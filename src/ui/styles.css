@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+/*
+ * 配色は Gmail を基準にする。
+ * 明るい面（白〜薄い青灰）を主体にし、真っ黒は使わない。
+ * ダークモードも #000 ではなく Gmail 相当の濃いグレーに寄せる。
+ */
+@theme {
+	--font-sans:
+		system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Hiragino Kaku Gothic ProN",
+		"Noto Sans JP", Meiryo, sans-serif;
+}
+
+:root {
+	/* 面 */
+	--surface: #ffffff; /* カード・本文の面 */
+	--surface-sunken: #f6f8fc; /* アプリの地。Gmail の背景 */
+	--surface-hover: #eaf1fb;
+	--surface-selected: #d3e3fd; /* 選択中の項目 */
+	--surface-read: #f2f6fc; /* 既読行 */
+
+	/* 文字 */
+	--text: #1f1f1f;
+	--text-muted: #5f6368;
+	--text-on-selected: #001d35;
+
+	/* 線 */
+	--line: #e3e3e3;
+	--line-soft: #f1f3f4;
+
+	/* 強調 */
+	--accent: #0b57d0;
+	--accent-weak: #c2e7ff; /* 作成ボタンの面 */
+	--accent-text: #041e49;
+	--danger: #d93025;
+	--warning: #b06000;
+	--success: #1e8e3e;
+}
+
+/*
+ * ダークは「選んだときだけ」。OS の設定には従わない。
+ * Gmail と同じく明るい面が既定で、暗くしたい人だけ切り替える。
+ * 切り替えは html 要素の data-theme="dark" で行う（src/ui/lib/theme.ts）。
+ */
+:root[data-theme="dark"] {
+	--surface: #1e1f20;
+	--surface-sunken: #131314;
+	--surface-hover: #2d2e30;
+	--surface-selected: #004a77;
+	--surface-read: #1a1b1c;
+
+	--text: #e3e3e3;
+	--text-muted: #9aa0a6;
+	--text-on-selected: #c2e7ff;
+
+	--line: #3c4043;
+	--line-soft: #2a2b2d;
+
+	--accent: #a8c7fa;
+	--accent-weak: #0842a0;
+	--accent-text: #d3e3fd;
+	--danger: #f2b8b5;
+	--warning: #fdd663;
+	--success: #6dd58c;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+}
+
+body {
+	background: var(--surface-sunken);
+	color: var(--text);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+}
+
+/* Gmail の丸みに寄せた共通クラス。個別画面で使い回す。 */
+@utility card {
+	background: var(--surface);
+	border-radius: 16px;
+	border: 1px solid var(--line);
+}
+
+@utility pill {
+	border-radius: 9999px;
+}
+
+/* 一覧の行。既読は沈ませ、未読は白く太く。 */
+@utility row-read {
+	background: var(--surface-read);
+	color: var(--text-muted);
+}
+
+@utility row-unread {
+	background: var(--surface);
+	color: var(--text);
+	font-weight: 600;
+}

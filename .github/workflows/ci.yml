@@ -1,0 +1,51 @@
+# CI — push と pull request で型検査・テスト・ビルドを検証する。
+# 本番デプロイは手動（workflow_dispatch）の deploy.yml で行う。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: 型検査・テスト・ビルド
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Node.js をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: 依存をインストール
+        run: npm ci
+
+      - name: 型検査
+        run: npx tsc --noEmit
+
+      - name: テスト（単体と e2e）
+        run: npx vitest run
+
+      - name: 要件と e2e の対応
+        run: node scripts/spec-coverage.mjs
+
+      - name: コメントが why になっているか
+        if: github.event_name == 'pull_request'
+        run: node scripts/check-comments.mjs origin/${{ github.base_ref }}
+
+      - name: 仕様を書かずに機能を足していないか
+        if: github.event_name == 'pull_request'
+        run: node scripts/spec-drift.mjs origin/${{ github.base_ref }}
+
+      - name: ビルド
+        run: npm run build
+
+      - name: 仕様書のビルド
+        run: npm run doc:build

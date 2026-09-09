@@ -1,0 +1,440 @@
+/**
+ * 絞り込みは必ず principal.addressIds で行う。userId で絞ってはいけない。
+ * FTS5 trigram は 3 文字未満の語を索引しないので、1〜2 文字は LIKE に落とす。
+ */
+import {
+	and,
+	asc,
+	desc,
+	eq,
+	inArray,
+	like,
+	sql,
+	type SQL,
+} from "drizzle-orm";
+import { addresses, messages, threads } from "@/db/schema";
+import type { Db } from "@/db/client";
+import type { Principal } from "@/shared/contracts/common";
+import type { MessageDirection, MessageStatus } from "@/shared/contracts/messages";
+import { normalizeAddress } from "@/domain/mail/address";
+import { invalidRequest } from "@/shared/errors";
+import type { SearchQuery } from "./query";
+
+export type MessageOrder = "received_at" | "relevance";
+
+export type MessageListFilters = {
+	search: SearchQuery;
+	/** 解決済みの id であること。アドレス文字列は resolveMailboxId を通す。 */
+	addressId?: string;
+	direction?: MessageDirection;
+	status?: MessageStatus;
+	threadId?: string;
+};
+
+export type MessageListParams = {
+	principal: Principal;
+	filters: MessageListFilters;
+	order: MessageOrder;
+	limit: number;
+	cursor?: string;
+};
+
+export type MessageRow = {
+	id: string;
+	threadId: string | null;
+	addressId: string;
+	direction: MessageDirection;
+	status: MessageStatus;
+	subject: string | null;
+	snippet: string | null;
+	fromAddr: string;
+	fromName: string | null;
+	toAddr: string;
+	ccAddr: string | null;
+	spamVerdict: string | null;
+	receivedAt: Date;
+	isRead: boolean;
+	isStarred: boolean;
+	hasAttachments: boolean;
+	textBody?: string | null;
+	htmlBody?: string | null;
+};
+
+const listColumns = {
+	id: messages.id,
+	threadId: messages.threadId,
+	addressId: messages.addressId,
+	direction: messages.direction,
+	status: messages.status,
+	subject: messages.subject,
+	snippet: messages.snippet,
+	fromAddr: messages.fromAddr,
+	fromName: messages.fromName,
+	toAddr: messages.toAddr,
+	ccAddr: messages.ccAddr,
+	spamVerdict: messages.spamVerdict,
+	receivedAt: messages.receivedAt,
+	isRead: messages.isRead,
+	isStarred: messages.isStarred,
+	hasAttachments: messages.hasAttachments,
+};
+
+function charLen(s: string): number {
+	return Array.from(s).length;
+}
+
+function escapeFtsTerm(w: string): string {
+	const cleaned = w.replace(/"/g, " ").replace(/\s+/g, " ").trim();
+	return `"${cleaned}"`;
+}
+
+function freeWordCondition(w: string): SQL {
+	if (charLen(w) >= 3) {
+		const term = escapeFtsTerm(w);
+		return sql`exists (
+			select 1 from "messages_fts" mf
+			where mf.rowid = "messages"."rowid"
+			  and mf.messages_fts match ${term}
+		)`;
+	}
+	const p = `%${w}%`;
+	return sql`(
+		${like(messages.subject, p)} or
+		${like(messages.textBody, p)} or
+		${like(messages.fromAddr, p)} or
+		${like(messages.toAddr, p)} or
+		${like(messages.ccAddr, p)}
+	)`;
+}
+
+function relevanceScore(words: string[]): SQL {
+	let acc: SQL = sql`0`;
+	for (const w of words) {
+		acc = sql`(${acc} + (case when ${freeWordCondition(w)} then 1 else 0 end))`;
+	}
+	return acc;
+}
+
+function cursorCondition(cur: { receivedAt: number; id: string }): SQL {
+	return sql`(
+		"messages"."received_at" < ${cur.receivedAt}
+		or ("messages"."received_at" = ${cur.receivedAt} and "messages"."id" < ${cur.id})
+	)`;
+}
+
+function threadCursorCondition(cur: { receivedAt: number; id: string }): SQL {
+	return sql`(
+		"threads"."last_message_at" < ${cur.receivedAt}
+		or ("threads"."last_message_at" = ${cur.receivedAt} and "threads"."id" < ${cur.id})
+	)`;
+}
+
+function buildMessageConditions(
+	principal: Principal,
+	filters: MessageListFilters,
+): SQL[] {
+	const conds: SQL[] = [];
+	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+		conds.push(inArray(messages.addressId, principal.addressIds));
+	}
+	const s = filters.search;
+	if (filters.addressId) conds.push(eq(messages.addressId, filters.addressId));
+	if (filters.direction) conds.push(eq(messages.direction, filters.direction));
+	if (filters.status) conds.push(eq(messages.status, filters.status));
+	if (filters.threadId) conds.push(eq(messages.threadId, filters.threadId));
+	if (s.from) conds.push(like(messages.fromAddr, `%${s.from}%`));
+	if (s.to) conds.push(like(messages.toAddr, `%${s.to}%`));
+	if (s.subject) conds.push(like(messages.subject, `%${s.subject}%`));
+	if (s.body) conds.push(like(messages.textBody, `%${s.body}%`));
+	if (s.since !== undefined) conds.push(sql`${messages.receivedAt} >= ${s.since}`);
+	if (s.until !== undefined) conds.push(sql`${messages.receivedAt} <= ${s.until}`);
+	if (s.isUnread) conds.push(eq(messages.isRead, false));
+	if (s.isStarred) conds.push(eq(messages.isStarred, true));
+	if (s.hasAttachment) conds.push(eq(messages.hasAttachments, true));
+	for (const w of s.freeWords) conds.push(freeWordCondition(w));
+	return conds;
+}
+
+export async function queryMessages(
+	db: Db,
+	params: MessageListParams,
+): Promise<{ rows: MessageRow[]; nextCursor: string | null }> {
+	const conds = buildMessageConditions(params.principal, params.filters);
+	if (params.cursor) {
+		const cur = decodeCursor(params.cursor);
+		if (!cur) throw invalidRequest("カーソルが不正です");
+		conds.push(cursorCondition(cur));
+	}
+	const where = conds.length > 0 ? and(...conds) : undefined;
+
+	let orderBy: SQL[];
+	if (params.order === "relevance" && params.filters.search.freeWords.length > 0) {
+		orderBy = [
+			sql`${relevanceScore(params.filters.search.freeWords)} desc`,
+			desc(messages.receivedAt),
+			desc(messages.id),
+		];
+	} else {
+		orderBy = [desc(messages.receivedAt), desc(messages.id)];
+	}
+
+	const rows = await db
+		.select(listColumns)
+		.from(messages)
+		.where(where)
+		.orderBy(...orderBy)
+		.limit(params.limit + 1)
+		.all();
+
+	const hasMore = rows.length > params.limit;
+	const page = rows.slice(0, params.limit);
+	const last = page.at(-1);
+	let nextCursor: string | null = null;
+	if (hasMore && last) {
+		nextCursor = encodeCursor(toUnix(last.receivedAt), last.id);
+	}
+	return { rows: page, nextCursor };
+}
+
+/** 権限外のアドレスは null を返す。呼び出し側は「該当なし」として扱うこと。 */
+export async function resolveMailboxId(
+	db: Db,
+	principal: Principal,
+	value: string,
+): Promise<string | null> {
+	let id = value;
+	if (value.includes("@")) {
+		const norm = normalizeAddress(value);
+		if (!norm) return null;
+		const row = await db
+			.select({ id: addresses.id })
+			.from(addresses)
+			.where(eq(addresses.address, norm))
+			.get();
+		if (!row) return null;
+		id = row.id;
+	}
+	if (!id) return null;
+	if (principal.addressIds !== "all" && !principal.addressIds.includes(id)) {
+		return null;
+	}
+	return id;
+}
+
+export async function getMessage(
+	db: Db,
+	principal: Principal,
+	messageId: string,
+	withBody = false,
+): Promise<MessageRow | null> {
+	const conds: SQL[] = [eq(messages.id, messageId)];
+	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+		conds.push(inArray(messages.addressId, principal.addressIds));
+	}
+	const columns = withBody
+		? { ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody }
+		: listColumns;
+	return (await db.select(columns).from(messages).where(and(...conds)).get()) ?? null;
+}
+
+export type ThreadRow = {
+	id: string;
+	addressId: string;
+	subject: string | null;
+	lastMessageAt: Date;
+	messageCount: number;
+	unreadCount: number;
+	address: string | null;
+	addressColor: string | null;
+	lastFromAddr: string | null;
+	lastFromName: string | null;
+	snippet: string | null;
+	hasAttachments: boolean;
+	isStarred: boolean;
+};
+
+export type ThreadListParams = {
+	principal: Principal;
+	addressId?: string;
+	limit: number;
+	cursor?: string;
+};
+
+const threadColumns = {
+	id: threads.id,
+	addressId: threads.addressId,
+	subject: threads.subject,
+	lastMessageAt: threads.lastMessageAt,
+	messageCount: threads.messageCount,
+	unreadCount: threads.unreadCount,
+};
+
+export async function queryThreads(
+	db: Db,
+	params: ThreadListParams,
+): Promise<{ rows: ThreadRow[]; nextCursor: string | null }> {
+	const conds: SQL[] = [];
+	if (params.principal.addressIds !== "all" && params.principal.addressIds.length > 0) {
+		conds.push(inArray(threads.addressId, params.principal.addressIds));
+	}
+	if (params.addressId) conds.push(eq(threads.addressId, params.addressId));
+	if (params.cursor) {
+		const cur = decodeCursor(params.cursor);
+		if (!cur) throw invalidRequest("カーソルが不正です");
+		conds.push(threadCursorCondition(cur));
+	}
+	const where = conds.length > 0 ? and(...conds) : undefined;
+
+	const rows = await db
+		.select(threadColumns)
+		.from(threads)
+		.where(where)
+		.orderBy(desc(threads.lastMessageAt), desc(threads.id))
+		.limit(params.limit + 1)
+		.all();
+
+	const hasMore = rows.length > params.limit;
+	const page = rows.slice(0, params.limit);
+	const last = page.at(-1);
+	let nextCursor: string | null = null;
+	if (hasMore && last) {
+		nextCursor = encodeCursor(toUnix(last.lastMessageAt), last.id);
+	}
+	return { rows: await withLastMessage(db, page), nextCursor };
+}
+
+// スレッドごとに 1 クエリ投げず、ページ分をまとめて引いて JS 側で最新を選ぶ。
+async function withLastMessage(
+	db: Db,
+	page: Omit<
+		ThreadRow,
+		"address" | "addressColor" | "lastFromAddr" | "lastFromName" | "snippet" | "hasAttachments" | "isStarred"
+	>[],
+): Promise<ThreadRow[]> {
+	const ids = page.map((t) => t.id);
+	if (ids.length === 0) return [];
+
+	const rows = await db
+		.select({
+			threadId: messages.threadId,
+			fromAddr: messages.fromAddr,
+			fromName: messages.fromName,
+			snippet: messages.snippet,
+			hasAttachments: messages.hasAttachments,
+			isStarred: messages.isStarred,
+			receivedAt: messages.receivedAt,
+		})
+		.from(messages)
+		.where(inArray(messages.threadId, ids))
+		.orderBy(asc(messages.receivedAt))
+		.all();
+
+	const addressIds = [...new Set(page.map((t) => t.addressId))];
+	const addressRows = await db
+		.select({ id: addresses.id, address: addresses.address, color: addresses.color })
+		.from(addresses)
+		.where(inArray(addresses.id, addressIds))
+		.all();
+	const addressById = new Map(addressRows.map((a) => [a.id, a]));
+
+	const latest = new Map<string, (typeof rows)[number]>();
+	const starred = new Set<string>();
+	const attached = new Set<string>();
+	for (const r of rows) {
+		if (!r.threadId) continue;
+		latest.set(r.threadId, r); // 昇順なので最後に入ったものが最新
+		if (r.isStarred) starred.add(r.threadId);
+		if (r.hasAttachments) attached.add(r.threadId);
+	}
+
+	return page.map((t) => {
+		const m = latest.get(t.id);
+		return {
+			...t,
+			address: addressById.get(t.addressId)?.address ?? null,
+			addressColor: addressById.get(t.addressId)?.color ?? null,
+			lastFromAddr: m?.fromAddr ?? null,
+			lastFromName: m?.fromName ?? null,
+			snippet: m?.snippet ?? null,
+			hasAttachments: attached.has(t.id),
+			isStarred: starred.has(t.id),
+		};
+	});
+}
+
+/** 権限外なら null。 */
+export async function getThread(
+	db: Db,
+	principal: Principal,
+	threadId: string,
+): Promise<ThreadRow | null> {
+	const row = await db.select(threadColumns).from(threads).where(eq(threads.id, threadId)).get();
+	if (!row) return null;
+	if (principal.addressIds !== "all" && !principal.addressIds.includes(row.addressId)) {
+		return null;
+	}
+	const [withSummary] = await withLastMessage(db, [row]);
+	return withSummary ?? null;
+}
+
+export async function queryThreadMessages(
+	db: Db,
+	principal: Principal,
+	threadId: string,
+): Promise<MessageRow[]> {
+	const conds: SQL[] = [eq(messages.threadId, threadId)];
+	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+		conds.push(inArray(messages.addressId, principal.addressIds));
+	}
+	return db
+		.select({ ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody })
+		.from(messages)
+		.where(and(...conds))
+		// 同じ秒に届いた分は rowid で決める。id は nanoid なので順序を持たない。
+		.orderBy(messages.receivedAt, sql`rowid`)
+		.all();
+}
+
+export async function attachmentsForMessage(
+	db: Db,
+	messageId: string,
+): Promise<Array<{ id: string; filename: string; contentType: string; sizeBytes: number; isInline: boolean }>> {
+	const { attachments } = await import("@/db/schema");
+	return db
+		.select({
+			id: attachments.id,
+			filename: attachments.filename,
+			contentType: attachments.contentType,
+			sizeBytes: attachments.sizeBytes,
+			isInline: attachments.isInline,
+		})
+		.from(attachments)
+		.where(eq(attachments.messageId, messageId))
+		.orderBy(attachments.createdAt, attachments.id)
+		.all();
+}
+
+export function encodeCursor(seconds: number, id: string): string {
+	const raw = `${Math.floor(seconds)}:${id}`;
+	return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** 不正なカーソルは throw せず null を返す。 */
+export function decodeCursor(
+	cursor: string,
+): { receivedAt: number; id: string } | null {
+	try {
+		let s = cursor.replace(/-/g, "+").replace(/_/g, "/");
+		while (s.length % 4 !== 0) s += "=";
+		const decoded = atob(s);
+		const m = decoded.match(/^(\d+):(.+)$/);
+		if (!m) return null;
+		return { receivedAt: Number(m[1]), id: m[2]! };
+	} catch {
+		return null;
+	}
+}
+
+export function toUnix(d: Date): number {
+	return Math.floor(d.getTime() / 1000);
+}

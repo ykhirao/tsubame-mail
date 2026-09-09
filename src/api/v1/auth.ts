@@ -1,0 +1,210 @@
+import { Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import type { CookieOptions } from "hono/utils/cookie";
+import { eq, sql } from "drizzle-orm";
+import { schema } from "@/db/client";
+import type { Db } from "@/db/client";
+import { newId } from "@/lib/id";
+import { hashPassword, needsRehash, verifyPassword } from "@/lib/password";
+import {
+	generateSessionToken,
+	hashToken,
+	SESSION_COOKIE,
+	SESSION_TTL_SECONDS,
+	secretEquals,
+} from "@/lib/tokens";
+import { readJson, unixSeconds } from "@/lib/validate";
+import { recordAudit } from "@/domain/access/policy";
+import { bootstrapBody, loginBody } from "@/shared/contracts/auth";
+import { ApiError, conflict, unauthorized } from "@/shared/errors";
+import { clientIp, getPrincipal, requireAuth } from "../middleware/auth";
+import type { AppEnv } from "../types";
+
+const app = new Hono<AppEnv>();
+
+/** Cookie の属性はここ 1 か所で決める。発行と失効で食い違わせない。 */
+function sessionCookieOptions(maxAge?: number): CookieOptions {
+	return {
+		httpOnly: true,
+		secure: true,
+		sameSite: "Lax",
+		path: "/",
+		...(maxAge === undefined ? {} : { maxAge }),
+	};
+}
+
+/** メールアドレスの存在を漏らさないための一律のメッセージ。 */
+const loginFailed = () => unauthorized("メールアドレスまたはパスワードが違います");
+
+async function createSession(
+	db: Db,
+	userId: string,
+	userAgent: string | null,
+	ip: string | null,
+): Promise<{ token: string; expiresAt: Date }> {
+	const token = generateSessionToken();
+	const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000);
+	await db.insert(schema.sessions).values({
+		id: newId("session"),
+		userId,
+		tokenHash: await hashToken(token),
+		expiresAt,
+		userAgent,
+		ip,
+	});
+	return { token, expiresAt };
+}
+
+app.post("/login", async (c) => {
+	const body = await readJson(c.req, loginBody);
+	const email = body.email.trim().toLowerCase();
+	const ip = clientIp(c);
+
+	// レート制限は「IP + メールアドレス」で掛ける。総当たりも列挙も同じ鍵で潰れる。
+	const limiter = c.env.LOGIN_RATE_LIMIT;
+	if (limiter) {
+		const { success } = await limiter.limit({ key: `login:${ip ?? "unknown"}:${email}` });
+		if (!success) {
+			throw new ApiError("rate_limited", "試行が多すぎます。しばらく待ってからやり直してください");
+		}
+	}
+
+	const db = c.get("db");
+	const [user] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
+
+	// 「居ない」「無効」「agent（パスワード無し）」「パスワード不一致」は全部同じ応答にする。
+	if (!user) throw loginFailed();
+	const ok = await verifyPassword(body.password, user.passwordHash);
+	if (!ok || user.status !== "active") throw loginFailed();
+
+	// 反復回数を上げたあとの初回ログインで静かに貼り替える。
+	if (needsRehash(user.passwordHash)) {
+		await db
+			.update(schema.users)
+			.set({ passwordHash: await hashPassword(body.password) })
+			.where(eq(schema.users.id, user.id));
+	}
+
+	const { token, expiresAt } = await createSession(
+		db,
+		user.id,
+		c.req.header("user-agent") ?? null,
+		ip,
+	);
+	await db.update(schema.users).set({ lastLoginAt: new Date() }).where(eq(schema.users.id, user.id));
+
+	setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SECONDS));
+
+	return c.json({
+		userId: user.id,
+		email: user.email,
+		name: user.name,
+		role: user.role,
+		expiresAt: unixSeconds(expiresAt),
+	});
+});
+
+app.post("/logout", async (c) => {
+	const token = getCookie(c, SESSION_COOKIE);
+	if (token) {
+		const db = c.get("db");
+		await db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, await hashToken(token)));
+	}
+	deleteCookie(c, SESSION_COOKIE, sessionCookieOptions());
+	return c.json({ ok: true });
+});
+
+app.get("/session", requireAuth, async (c) => {
+	const principal = getPrincipal(c);
+	const db = c.get("db");
+	const [user] = await db
+		.select({ id: schema.users.id, email: schema.users.email, name: schema.users.name })
+		.from(schema.users)
+		.where(eq(schema.users.id, principal.userId))
+		.limit(1);
+	if (!user) throw unauthorized();
+
+	return c.json({
+		userId: user.id,
+		email: user.email,
+		name: user.name,
+		role: principal.role,
+		via: principal.via,
+		scopes: principal.scopes,
+	});
+});
+
+app.get("/setup-state", async (c) => {
+	const db = c.get("db");
+	const [owners] = await db
+		.select({ count: sql<number>`count(*)` })
+		.from(schema.users)
+		.where(eq(schema.users.role, "owner"));
+	return c.json({ needsSetup: Number(owners?.count ?? 0) === 0 });
+});
+
+app.post("/bootstrap", async (c) => {
+	const body = await readJson(c.req, bootstrapBody);
+	const db = c.get("db");
+
+	const [owners] = await db
+		.select({ count: sql<number>`count(*)` })
+		.from(schema.users)
+		.where(eq(schema.users.role, "owner"));
+	if (Number(owners?.count ?? 0) > 0) {
+		throw conflict("すでにオーナーが存在します。オーナーにユーザー作成を依頼してください");
+	}
+
+	// オーナーは Cloudflare の DNS とメールルーティングまで触れる。
+	// デプロイ直後に URL を見つけただけの相手に取られないよう、
+	// デプロイできる人だけが知っている合言葉を一致条件にする。
+	//
+	// メールで使い捨てのパスワードを送る案は使えない。この時点ではまだ
+	// 送信ドメインを 1 つも繋いでいないので、アプリからメールを出せないため。
+	const secret = c.env.INTERNAL_SECRET ?? "";
+	if (secret.length < 20) {
+		throw new ApiError(
+			"forbidden",
+			"INTERNAL_SECRET が未設定か短すぎます（20 文字以上）。Worker のシークレットに設定してください",
+		);
+	}
+	if (!secretEquals(body.secret, secret)) {
+		throw new ApiError("forbidden", "セットアップの合言葉が違います");
+	}
+
+	const userId = newId("user");
+	const email = body.email.trim().toLowerCase();
+	await db.insert(schema.users).values({
+		id: userId,
+		email,
+		name: body.name,
+		passwordHash: await hashPassword(body.password),
+		role: "owner",
+		status: "active",
+	});
+
+	const ip = clientIp(c);
+	await recordAudit(db, {
+		actorId: userId,
+		action: "auth.bootstrap",
+		targetType: "user",
+		targetId: userId,
+		meta: { email },
+		ip,
+	});
+
+	const { token, expiresAt } = await createSession(
+		db,
+		userId,
+		c.req.header("user-agent") ?? null,
+		ip,
+	);
+	setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SECONDS));
+
+	return c.json(
+		{ userId, email, name: body.name, role: "owner", expiresAt: unixSeconds(expiresAt) },
+		201,
+	);
+});
+
+export default app;

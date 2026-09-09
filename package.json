@@ -1,0 +1,62 @@
+{
+  "name": "tsubame",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:worker": "wrangler dev",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy": "./scripts/deploy.sh",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv ./worker-env.d.ts",
+    "test:unit": "vitest run tests/",
+    "test:e2e": "vitest run e2e/",
+    "spec:coverage": "node scripts/spec-coverage.mjs",
+    "e2e:new": "node scripts/new-e2e.mjs",
+    "verify": "npm run typecheck && npm run test && npm run spec:coverage && npm run build",
+    "seed:local": "node scripts/seed-local.mjs",
+    "spec:drift": "node scripts/spec-drift.mjs",
+    "check:comments": "node scripts/check-comments.mjs",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "doc": "node scripts/build-docs.mjs --serve",
+    "doc:build": "node scripts/build-docs.mjs"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.7",
+    "mimetext": "^3.0.28",
+    "nanoid": "^6.0.1",
+    "postal-mime": "^3.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.5.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vitest/runner": "^4.1.11",
+    "drizzle-kit": "^0.31.10",
+    "marked": "^18.0.12",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.130.0"
+  },
+  "allowScripts": {
+    "workerd@1.20260815.1": true,
+    "workerd@1.20260908.1": true
+  }
+}

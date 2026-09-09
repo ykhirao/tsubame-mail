@@ -1,0 +1,18 @@
+#!/bin/sh
+# コミット前に、追加されたコメントが why になっているかを見る。
+# 規則だけで判定する。--llm はモデルを呼ぶので、コミットのたびには走らせない。
+#
+# pre-commit の時点ではコミットメッセージがまだ無いので、[no-comment-check] のような
+# メッセージ中のタグでは外せない。外すときは環境変数か --no-verify を使う。
+#   NO_COMMENT_CHECK=1 git commit -m "..."
+if [ -n "$NO_COMMENT_CHECK" ]; then
+	exit 0
+fi
+if git diff --cached --name-only | grep -qE '\.(ts|tsx|mjs)$'; then
+	node scripts/check-comments.mjs --staged || {
+		echo ""
+		echo "コメントの検査で止めました。"
+		echo "外すには NO_COMMENT_CHECK=1 git commit ... か --no-verify。まず直してください。"
+		exit 1
+	}
+fi

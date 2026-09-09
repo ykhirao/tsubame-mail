@@ -1,0 +1,174 @@
+import { beforeEach, describe, expect, vi } from "vitest";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import worker from "@/worker";
+import type { AnyQueueMessage } from "@/services/queue";
+import { scenario } from "../registry";
+import {
+	deliverEmail,
+	drainQueues,
+	freshHarness,
+	loginAsOwner,
+	mime,
+	seedDomain,
+	type Client,
+	type Harness,
+} from "../harness";
+import { hmacHex } from "@/services/webhooks";
+
+describe("FR-8 Webhook", () => {
+	let h: Harness;
+	let owner: Client;
+	let aiId: string;
+	let hitoId: string;
+
+	beforeEach(async () => {
+		h = await freshHarness();
+		owner = await loginAsOwner(h);
+		const seeded = await seedDomain(h, { addresses: ["ai", "hito"] });
+		aiId = seeded.addressIds.ai!;
+		hitoId = seeded.addressIds.hito!;
+	});
+
+	function stubWebhookFetch(status: number) {
+		const calls: { url: string; body: string; headers: Headers }[] = [];
+		vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : (input as Request).url;
+			calls.push({ url, body: String(init?.body ?? ""), headers: new Headers(init?.headers) });
+			return new Response(JSON.stringify({ ok: true }), { status });
+		});
+		return calls;
+	}
+
+	async function createWebhook(body: Record<string, unknown>) {
+		const res = await owner.post("/api/v1/webhooks", {
+			name: "hook",
+			url: "https://hook.example.com/tsubame",
+			events: ["message.received"],
+			enabled: true,
+			...body,
+		});
+		expect(res.status).toBe(201);
+		return res.body;
+	}
+
+	scenario("FR-8", "対象アドレス・対象イベントに一致する webhook にだけ POST が飛ぶ", async () => {
+		await createWebhook({
+			name: "ai 宛",
+			url: "https://hook-a.example.com/tsubame",
+			addressIds: [aiId],
+		});
+		await createWebhook({
+			name: "hito 宛",
+			url: "https://hook-b.example.com/tsubame",
+			addressIds: [hitoId],
+		});
+		await createWebhook({
+			name: "送信イベント",
+			url: "https://hook-c.example.com/tsubame",
+			addressIds: [aiId],
+			events: ["message.sent"],
+		});
+
+		const calls = stubWebhookFetch(200);
+
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await drainQueues(h);
+
+		expect(calls.map((c) => c.url)).toEqual(["https://hook-a.example.com/tsubame"]);
+	});
+
+	scenario("FR-8", "署名ヘッダが正しい HMAC になっている", async () => {
+		const created = await createWebhook({ url: "https://hook.example.com/tsubame" });
+		const secret = created.secret as string;
+		expect(secret).toBeTruthy();
+
+		const calls = stubWebhookFetch(200);
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await drainQueues(h);
+
+		expect(calls).toHaveLength(1);
+		const call = calls[0]!;
+		const sig = call.headers.get("X-Tsubame-Signature")!;
+		expect(sig).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
+
+		// 署名対象は `<t>.<body>`。同じ secret で再計算して一致することを確かめる。
+		const t = sig.match(/^t=(\d+)/)![1]!;
+		const v1 = sig.match(/v1=([0-9a-f]{64})/)![1]!;
+		const expected = await hmacHex(secret, `${t}.${call.body}`);
+		expect(v1).toBe(expected);
+	});
+
+	async function processOne(h: Harness) {
+		const item = h.pending.shift()!;
+		const batch = {
+			queue: item.queue === "inbound" ? "tsubame-inbound" : "tsubame-outbound",
+			messages: [
+				{
+					id: crypto.randomUUID(),
+					timestamp: new Date(),
+					body: item.body,
+					attempts: 1,
+					ack() {},
+					retry(opts?: { delaySeconds?: number }) {
+						h.retried.push({ body: item.body, delaySeconds: opts?.delaySeconds });
+					},
+				},
+			],
+			ackAll() {},
+			retryAll() {},
+		} as unknown as MessageBatch<AnyQueueMessage>;
+		const ctx = createExecutionContext();
+		await worker.queue!(batch, h.env, ctx);
+		await waitOnExecutionContext(ctx);
+	}
+
+	scenario("FR-8", "配信に失敗すると再試行が予約され、遅延が伸びる", async () => {
+		await createWebhook({ url: "https://hook.example.com/tsubame" });
+		stubWebhookFetch(500);
+
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		// 受信メッセージだけを処理する（drainQueues は再試行まで全部流してしまうので使わない）。
+		await processOne(h);
+
+		const retryMsg = h.pending.find((p) => p.queue === "outbound");
+		expect(retryMsg).toBeTruthy();
+		expect((retryMsg!.body as { kind: string }).kind).toBe("webhook.retry");
+
+		const { getDb } = await import("@/db/client");
+		const { webhookDeliveries } = await import("@/db/schema");
+		const db = getDb(h.env);
+		const first = await db.select().from(webhookDeliveries).all();
+		expect(first).toHaveLength(1);
+		expect(first[0]!.status).toBe("pending");
+		expect(first[0]!.attempt).toBe(1);
+		expect(first[0]!.nextRetryAt).not.toBeNull();
+
+		await processOne(h);
+		const second = await db.select().from(webhookDeliveries).all();
+		expect(second[0]!.attempt).toBe(2);
+		expect(second[0]!.nextRetryAt!.getTime()).toBeGreaterThan(first[0]!.nextRetryAt!.getTime());
+	});
+
+	scenario("FR-8", "secret は作成時だけ返り、一覧には出ない", async () => {
+		const created = await createWebhook({ url: "https://hook.example.com/tsubame" });
+		expect(created.secret).toBeTruthy();
+
+		const list = await owner.get("/api/v1/webhooks");
+		expect(list.status).toBe(200);
+		expect(Array.isArray(list.body)).toBe(true);
+		expect(list.body[0].secret).toBeUndefined();
+		expect(list.body[0].id).toBe(created.id);
+	});
+});

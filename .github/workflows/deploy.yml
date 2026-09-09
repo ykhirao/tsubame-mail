@@ -1,0 +1,44 @@
+# Deploy — 手動実行（workflow_dispatch）のみ。自動デプロイはしない。
+# CI と同じ検証を通してから scripts/deploy.sh で本番に書き込む。
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: 検証して本番デプロイ
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: tsubame-deploy
+      cancel-in-progress: false
+
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: 依存をインストール
+        run: npm ci
+
+      - name: 型検査
+        run: npx tsc --noEmit
+
+      - name: テスト
+        run: npx vitest run
+
+      - name: ビルド（検証）
+        run: npm run build
+
+      - name: 本番デプロイ
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RIDLEY_DATABASE_ID: ${{ secrets.RIDLEY_DATABASE_ID }}
+        run: ./scripts/deploy.sh --skip-build

@@ -1,0 +1,153 @@
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Link, useSearchParams } from "react-router";
+import type { MessageListItem } from "@/shared/contracts/messages";
+import { MessagesApi } from "@/ui/lib/api";
+import { EmptyState } from "@/ui/components/EmptyState";
+import { Spinner } from "@/ui/components/Spinner";
+import { formatDate } from "@/ui/lib/format";
+
+const PAGE = 25;
+
+const OPERATORS = ["from:", "subject:", "since:2026-01-01", "is:unread", "has:attachment"];
+
+export function Search() {
+	const [params, setParams] = useSearchParams();
+	const q = params.get("q") ?? "";
+	const hasQuery = params.get("q") != null;
+
+	const [draft, setDraft] = useState(q);
+	const [results, setResults] = useState<MessageListItem[]>([]);
+	const [nextCursor, setNextCursor] = useState<string | null>(null);
+	const [loading, setLoading] = useState(false);
+	const [loadingMore, setLoadingMore] = useState(false);
+
+	const run = useCallback(
+		async (cursor?: string) => {
+			const term = params.get("q") ?? "";
+			if (cursor) {
+				setLoadingMore(true);
+			} else {
+				setLoading(true);
+				setResults([]);
+				setNextCursor(null);
+			}
+			try {
+				const res = await MessagesApi.list({ q: term || undefined, limit: PAGE, cursor });
+				if (!cursor) {
+					setResults(res.data);
+					setNextCursor(res.next_cursor);
+				} else {
+					setResults((prev) => [...prev, ...res.data]);
+					setNextCursor(res.next_cursor);
+				}
+			} finally {
+				setLoading(false);
+				setLoadingMore(false);
+			}
+		},
+		[params],
+	);
+
+	useEffect(() => {
+		if (!hasQuery) return;
+		void run();
+	}, [run, hasQuery]);
+
+	const submit = (e: FormEvent) => {
+		e.preventDefault();
+		setDraft(draft.trim());
+		setParams({ q: draft.trim() });
+	};
+
+	const insertOperator = (op: string) => {
+		setDraft((prev) => (prev ? `${prev} ${op}` : op));
+	};
+
+	return (
+		<div className="flex flex-col gap-4">
+			<form onSubmit={submit} className="flex gap-2">
+				<input
+					value={draft}
+					onChange={(e) => setDraft(e.target.value)}
+					placeholder="検索キーワードを入力（例: from:foo@example.com subject:「見積」）"
+					className="w-full rounded-full border border-[var(--line)] bg-[var(--surface)] px-4 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
+				/>
+				<button
+					type="submit"
+					className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white hover:opacity-90"
+				>
+					検索
+				</button>
+			</form>
+
+			<div className="flex flex-wrap items-center gap-1.5">
+				{OPERATORS.map((op) => (
+					<button
+						key={op}
+						type="button"
+						onClick={() => insertOperator(op)}
+						className="rounded-full border border-[var(--line)] bg-[var(--surface)] px-2.5 py-1 text-xs text-[var(--accent)] hover:bg-[var(--surface-hover)]"
+					>
+						{op}
+					</button>
+				))}
+			</div>
+
+			<p className="text-xs text-[var(--text-muted)]">
+				3 文字以上は全文検索、1〜2 文字は部分一致で動きます。
+			</p>
+
+			{loading ? (
+				<Spinner />
+			) : !hasQuery ? (
+				<EmptyState icon="🔎" title="検索キーワードを入力してください">
+					件名・本文・送信者・宛先を日本語部分一致で検索できます。
+				</EmptyState>
+			) : results.length === 0 ? (
+				<EmptyState title="該当するメールがありません">条件を変えて再検索してください。</EmptyState>
+			) : (
+				<>
+					<ul className="card divide-y divide-[var(--line-soft)] overflow-hidden">
+						{results.map((m) => (
+							<li key={m.id}>
+								<Link
+									to={m.threadId ? `/threads/${m.threadId}` : "#"}
+									onClick={(e) => {
+										if (!m.threadId) e.preventDefault();
+									}}
+									className={`flex items-center gap-3 px-4 py-2.5 hover:bg-[var(--surface-hover)] ${
+										m.isRead ? "row-read" : "row-unread"
+									}`}
+								>
+									<span className="min-w-0 flex-1">
+										<span className="block truncate text-sm">
+											{m.subject?.trim() || "（件名なし）"}
+										</span>
+										<span className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">
+											{m.fromName || m.fromAddr}
+											{m.hasAttachments ? "  📎" : ""}
+										</span>
+									</span>
+									<span className="shrink-0 text-right text-xs text-[var(--text-muted)]">
+										{formatDate(m.receivedAt)}
+									</span>
+								</Link>
+							</li>
+						))}
+					</ul>
+					{nextCursor && (
+						<div className="text-center">
+							<button
+								onClick={() => void run(nextCursor)}
+								disabled={loadingMore}
+								className="rounded-full px-4 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--surface-hover)] disabled:text-[var(--text-muted)]"
+							>
+								{loadingMore ? "読み込み中…" : "もっと読む"}
+							</button>
+						</div>
+					)}
+				</>
+			)}
+		</div>
+	);
+}

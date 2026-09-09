@@ -1,0 +1,61 @@
+{
+	// ==========================================================================
+	// リファレンス用の設定例（wrangler.jsonc.example）
+	//
+	// 本物の実行設定はコミット済みの wrangler.jsonc を scripts/deploy.sh が
+	// 複製・生成する。d1_databases[].database_id にはアカウント固有の ID を
+	// 決してコミットしない。実デプロイ時は環境変数 RIDLEY_DATABASE_ID から
+	// 注入される（詳細は docs/deployment.md 第 4 節）。
+	//
+	// このファイルは直接デプロイに使わない。
+	// ==========================================================================
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ridley",
+	"main": "./src/worker.ts",
+	"compatibility_date": "2026-08-22",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": false,
+	"keep_vars": true,
+	"observability": { "enabled": true },
+	"upload_source_maps": true,
+
+	"assets": {
+		"binding": "ASSETS",
+		"directory": "./dist/client",
+		"not_found_handling": "single-page-application"
+	},
+
+	"vars": {
+		"APP_NAME": "ridley",
+		"EMAIL_WORKER_NAME": "ridley"
+	},
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ridley",
+			// database_id はスクリプトが置き換えるプレースホルダ。コミットしない。
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "ridley-mail" }],
+
+	"queues": {
+		"producers": [
+			{ "binding": "INBOUND_QUEUE", "queue": "ridley-inbound" },
+			{ "binding": "OUTBOUND_QUEUE", "queue": "ridley-outbound" }
+		],
+		"consumers": [
+			{ "queue": "ridley-inbound", "max_batch_size": 5, "max_retries": 3 },
+			{ "queue": "ridley-outbound", "max_batch_size": 5, "max_retries": 3 }
+		]
+	},
+
+	"send_email": [{ "name": "EMAIL", "remote": true }],
+
+	"ratelimits": [
+		{ "name": "LOGIN_RATE_LIMIT", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }
+	]
+}

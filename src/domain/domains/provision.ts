@@ -1,0 +1,403 @@
+/**
+ * catch-all は既定で有効化しない。Cloudflare の catch-all はゾーン単位で、
+ * apex の MX を奪った瞬間にゾーン宛の全メールを飲み込む。
+ */
+import { and, eq } from "drizzle-orm";
+import type { Db } from "@/db/client";
+import { addresses, domains } from "@/db/schema";
+import { newId } from "@/lib/id";
+import {
+	type CfDnsRecord,
+	type CloudflareApi,
+	type CloudflareApiEnv,
+	type ZoneRef,
+	literalToMatcher,
+	routingRuleId,
+	workerAction,
+} from "@/services/cloudflare-api";
+import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
+import {
+	type DnsCheckResult,
+	checkDomainDns,
+	inspectDnsRecords,
+	isZoneApex,
+	isWithinZone,
+	normalizeDnsName,
+} from "./dns-check";
+
+export type ProvisionEnv = CloudflareApiEnv & {
+	/** wrangler.jsonc の vars と、実際にデプロイした Worker 名が一致していること。 */
+	EMAIL_WORKER_NAME?: string;
+};
+
+export const DEFAULT_WORKER_NAME = "tsubame";
+
+export function emailWorkerName(env: ProvisionEnv): string {
+	return env.EMAIL_WORKER_NAME ?? DEFAULT_WORKER_NAME;
+}
+
+export const CATCH_ALL_WARNING =
+	"Cloudflare の catch-all は**ゾーン単位**です。有効にすると、そのゾーンの MX が " +
+	"Cloudflare を向いている限り、実在しないアドレス宛のメールもすべてこのアプリが受け取ります。" +
+	"apex の MX を Cloudflare に向けているゾーンでは、社内の全メールを飲み込む可能性があります。" +
+	"実在アドレスは catch-all より先に解決されますが、それでも既定は無効です。";
+
+export type DomainMode = "apex" | "subdomain";
+
+export type SendingDnsState = {
+	spf: boolean;
+	dkim: boolean;
+	dmarc: boolean;
+};
+
+export type ProvisionInput = {
+	name: string;
+	zoneId?: string;
+	/** apex を接続するときは必須。無いと invalidRequest。 */
+	confirmApex?: boolean;
+	enableSending?: boolean;
+	localParts?: string[];
+};
+
+export type ProvisionResult = {
+	domainId: string;
+	name: string;
+	zoneId: string;
+	zoneName: string;
+	mode: DomainMode;
+	routingStatus: "pending" | "active" | "error";
+	sendingStatus: "disabled" | "pending" | "active" | "error";
+	catchAllEnabled: boolean;
+	dnsCheck: DnsCheckResult;
+	sending: SendingDnsState;
+	createdAddressIds: string[];
+	lastError: string | null;
+};
+
+export function pickZoneForName<T extends { id: string; name: string }>(
+	zones: T[],
+	name: string,
+): T | null {
+	const target = normalizeDnsName(name);
+	const candidates = zones.filter((z) => isWithinZone(target, z.name));
+	if (candidates.length === 0) return null;
+	return candidates.reduce((best, z) => (z.name.length > best.name.length ? z : best));
+}
+
+export async function resolveZone(
+	api: CloudflareApi,
+	input: { name: string; zoneId?: string },
+): Promise<{ id: string; name: string }> {
+	const name = normalizeDnsName(input.name);
+	const zones = await api.listAllZones();
+
+	if (input.zoneId) {
+		const zone = zones.find((z) => z.id === input.zoneId);
+		if (!zone) {
+			throw notFound(
+				`ゾーン ${input.zoneId} がこの Cloudflare アカウントに見つかりません。` +
+					"CF_API_TOKEN のスコープにこのゾーンが入っているかも確認してください。",
+			);
+		}
+		if (!isWithinZone(name, zone.name)) {
+			throw invalidRequest(`${name} はゾーン ${zone.name} の配下ではありません。`);
+		}
+		return { id: zone.id, name: normalizeDnsName(zone.name) };
+	}
+
+	const zone = pickZoneForName(zones, name);
+	if (!zone) {
+		throw notFound(
+			`${name} を含む Cloudflare ゾーンが見つかりません。` +
+				"ゾーンがこのアカウントにあるか、CF_API_TOKEN のスコープに含まれているかを確認してください。",
+		);
+	}
+	return { id: zone.id, name: normalizeDnsName(zone.name) };
+}
+
+export async function previewDomain(
+	api: CloudflareApi,
+	input: { name: string; zoneId?: string },
+): Promise<DnsCheckResult> {
+	const zone = await resolveZone(api, input);
+	return checkDomainDns(api, zone, input.name);
+}
+
+const DKIM_NAME_PATTERN = /(^|\.)_domainkey\./;
+
+export function readSendingDnsState(
+	records: Pick<CfDnsRecord, "type" | "name" | "content">[],
+	name: string,
+): SendingDnsState {
+	const target = normalizeDnsName(name);
+	const txt = records.filter((r) => r.type.toUpperCase() === "TXT");
+	const under = (recordName: string) => {
+		const n = normalizeDnsName(recordName);
+		return n === target || n.endsWith(`.${target}`);
+	};
+
+	return {
+		spf: txt.some((r) => normalizeDnsName(r.name) === target && /v=spf1/i.test(r.content)),
+		dkim: txt.some(
+			(r) => under(r.name) && DKIM_NAME_PATTERN.test(normalizeDnsName(r.name)) && /v=dkim1/i.test(r.content),
+		),
+		dmarc: txt.some(
+			(r) => normalizeDnsName(r.name) === `_dmarc.${target}` && /v=dmarc1/i.test(r.content),
+		),
+	};
+}
+
+export function sendingStatusOf(state: SendingDnsState): "pending" | "active" {
+	return state.spf && state.dkim ? "active" : "pending";
+}
+
+export async function ensureAddressRoutingRule(
+	api: CloudflareApi,
+	params: { zone: ZoneRef; address: string; workerName: string },
+): Promise<string | null> {
+	const address = params.address.trim().toLowerCase();
+	const existing = await api.listEmailRoutingRules(params.zone);
+	const found = existing.find((rule) =>
+		rule.matchers.some(
+			(m) => m.field === "to" && (m.value ?? "").trim().toLowerCase() === address,
+		),
+	);
+	if (found) return routingRuleId(found);
+
+	const created = await api.createEmailRoutingRule(params.zone, {
+		name: `tsubame: ${address}`,
+		matchers: [literalToMatcher(address)],
+		actions: [workerAction(params.workerName)],
+		enabled: true,
+	});
+	return routingRuleId(created);
+}
+
+/** 宛先 Worker が一致するルールしか消さない。他が作ったルールは残す。 */
+export async function removeAddressRoutingRule(
+	api: CloudflareApi,
+	params: { zone: ZoneRef; address: string; workerName: string },
+): Promise<boolean> {
+	const address = params.address.trim().toLowerCase();
+	const rules = await api.listEmailRoutingRules(params.zone);
+	const target = rules.find(
+		(rule) =>
+			rule.actions.some(
+				(a) => a.type === "worker" && a.value.includes(params.workerName),
+			) &&
+			rule.matchers.some(
+				(m) => m.field === "to" && (m.value ?? "").trim().toLowerCase() === address,
+			),
+	);
+	const id = target ? routingRuleId(target) : null;
+	if (!id) return false;
+	await api.deleteEmailRoutingRule(params.zone, id);
+	return true;
+}
+
+export async function provisionDomain(params: {
+	db: Db;
+	api: CloudflareApi;
+	env: ProvisionEnv;
+	input: ProvisionInput;
+}): Promise<ProvisionResult> {
+	const { db, api, env, input } = params;
+	const name = normalizeDnsName(input.name);
+	const workerName = emailWorkerName(env);
+
+	const existing = await db.query.domains.findFirst({ where: eq(domains.name, name) });
+	if (existing) throw conflict(`${name} は既に接続されています。`);
+
+	const zone = await resolveZone(api, { name, zoneId: input.zoneId });
+	const dnsCheck = await checkDomainDns(api, zone, name);
+	const mode: DomainMode = isZoneApex(name, zone.name) ? "apex" : "subdomain";
+
+	if (mode === "apex" && input.confirmApex !== true) {
+		throw invalidRequest(
+			`${name} はゾーンの apex です。apex を接続すると MX が置き換わり、` +
+				"このドメイン宛の全メールがこのアプリに流れ込みます。" +
+				`サブドメイン運用（例: mail.${zone.name}）を推奨します。` +
+				"それでも apex を接続する場合は confirmApex: true を付けてください。",
+			{ warnings: dnsCheck.warnings, recommended: `mail.${zone.name}` },
+		);
+	}
+
+	const domainId = newId("domain");
+	await db.insert(domains).values({
+		id: domainId,
+		name,
+		zoneId: zone.id,
+		zoneName: zone.name,
+		mode,
+		routingStatus: "pending",
+		sendingStatus: input.enableSending === false ? "disabled" : "pending",
+		catchAllEnabled: false,
+		lastError: null,
+	});
+
+	const createdAddressIds: string[] = [];
+	let routingStatus: "pending" | "active" | "error" = "pending";
+	let sendingStatus: "disabled" | "pending" | "active" | "error" =
+		input.enableSending === false ? "disabled" : "pending";
+	let sending: SendingDnsState = { spf: false, dkim: false, dmarc: false };
+	let lastError: string | null = null;
+
+	try {
+		// name（= mail.example.com）を必ず渡す。渡さないと apex に MX が作られる。
+		await api.enableEmailRouting(zone, name);
+		await api.createEmailRoutingDns(zone, name);
+		routingStatus = "active";
+
+		for (const rawLocal of input.localParts ?? []) {
+			const localPart = rawLocal.trim().toLowerCase();
+			if (!localPart) continue;
+			const address = `${localPart}@${name}`;
+			await ensureAddressRoutingRule(api, { zone, address, workerName });
+			const addressId = newId("address");
+			await db.insert(addresses).values({
+				id: addressId,
+				domainId,
+				localPart,
+				address,
+				kind: "mailbox",
+				isCatchAll: false,
+			});
+			createdAddressIds.push(addressId);
+		}
+
+		if (input.enableSending !== false) {
+			await api.enableEmailSending(zone, name);
+			// Email Sending のステータス API は当てにならないので、実際のレコードから読む。
+			const records = await api.listDnsRecords(zone);
+			sending = readSendingDnsState(records, name);
+			sendingStatus = sendingStatusOf(sending);
+		}
+	} catch (err) {
+		lastError = err instanceof Error ? err.message : String(err);
+		if (routingStatus !== "active") routingStatus = "error";
+		if (sendingStatus !== "disabled") sendingStatus = "error";
+		await db
+			.update(domains)
+			.set({ routingStatus, sendingStatus, lastError })
+			.where(eq(domains.id, domainId));
+		throw err instanceof ApiError
+			? err
+			: new ApiError("internal", `ドメインの接続に失敗しました: ${lastError}`);
+	}
+
+	await db
+		.update(domains)
+		.set({ routingStatus, sendingStatus, lastError: null })
+		.where(eq(domains.id, domainId));
+
+	return {
+		domainId,
+		name,
+		zoneId: zone.id,
+		zoneName: zone.name,
+		mode,
+		routingStatus,
+		sendingStatus,
+		catchAllEnabled: false,
+		dnsCheck,
+		sending,
+		createdAddressIds,
+		lastError: null,
+	};
+}
+
+export type VerifyResult = {
+	domainId: string;
+	name: string;
+	routingStatus: "pending" | "active" | "error";
+	sendingStatus: "disabled" | "pending" | "active" | "error";
+	dnsCheck: DnsCheckResult;
+	sending: SendingDnsState;
+	lastError: string | null;
+};
+
+export async function verifyDomain(params: {
+	db: Db;
+	api: CloudflareApi;
+	domain: { id: string; name: string; zoneId: string; zoneName: string; sendingStatus: string };
+}): Promise<VerifyResult> {
+	const { db, api, domain } = params;
+	const zone = { id: domain.zoneId, name: domain.zoneName };
+
+	const records = await api.listDnsRecords(zone);
+	const dnsCheck = inspectDnsRecords({
+		name: domain.name,
+		zoneId: zone.id,
+		zoneName: zone.name,
+		records,
+	});
+	const sending = readSendingDnsState(records, domain.name);
+
+	const routingStatus: "pending" | "active" | "error" = dnsCheck.hasCloudflareMx
+		? "active"
+		: "pending";
+	const sendingStatus: "disabled" | "pending" | "active" | "error" =
+		domain.sendingStatus === "disabled" ? "disabled" : sendingStatusOf(sending);
+
+	await db
+		.update(domains)
+		.set({ routingStatus, sendingStatus, lastError: null })
+		.where(eq(domains.id, domain.id));
+
+	return {
+		domainId: domain.id,
+		name: domain.name,
+		routingStatus,
+		sendingStatus,
+		dnsCheck,
+		sending,
+		lastError: null,
+	};
+}
+
+export type CatchAllResult = {
+	domainId: string;
+	enabled: boolean;
+	warning: string;
+	catchAllAddress: string | null;
+};
+
+/** 有効化はゾーン全体に効く。呼び出し側で明示の確認を取ること。 */
+export async function setCatchAll(params: {
+	db: Db;
+	api: CloudflareApi;
+	env: ProvisionEnv;
+	domain: { id: string; name: string; zoneId: string; zoneName: string; mode: string };
+	enabled: boolean;
+}): Promise<CatchAllResult> {
+	const { db, api, env, domain, enabled } = params;
+	const zone = { id: domain.zoneId, name: domain.zoneName };
+	const workerName = emailWorkerName(env);
+
+	const catchAllAddress = await db.query.addresses.findFirst({
+		where: and(eq(addresses.domainId, domain.id), eq(addresses.isCatchAll, true)),
+	});
+
+	if (enabled && !catchAllAddress) {
+		throw invalidRequest(
+			"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
+		);
+	}
+
+	await api.updateCatchAllRule(zone, {
+		enabled,
+		name: `tsubame catch-all (${domain.name})`,
+		matchers: [{ type: "all" }],
+		// 無効化のときも actions は必要。落とすのは enabled だけ。
+		actions: [workerAction(workerName)],
+	});
+
+	await db.update(domains).set({ catchAllEnabled: enabled }).where(eq(domains.id, domain.id));
+
+	return {
+		domainId: domain.id,
+		enabled,
+		warning: CATCH_ALL_WARNING,
+		catchAllAddress: catchAllAddress?.address ?? null,
+	};
+}

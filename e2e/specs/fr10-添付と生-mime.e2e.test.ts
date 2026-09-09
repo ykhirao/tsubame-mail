@@ -1,0 +1,134 @@
+import { beforeEach, describe, expect } from "vitest";
+import { scenario } from "../registry";
+import {
+	createClient,
+	deliverEmail,
+	drainQueues,
+	freshHarness,
+	loginAsOwner,
+	seedDomain,
+	type Client,
+	type Harness,
+} from "../harness";
+
+describe("FR-10 添付と生 MIME", () => {
+	let h: Harness;
+	let owner: Client;
+
+	beforeEach(async () => {
+		h = await freshHarness();
+		owner = await loginAsOwner(h);
+	});
+
+	// harness の mime() は multipart を組めないので、ここだけローカルに持つ。
+	function multipartMime(opts: {
+		from: string;
+		to: string;
+		subject?: string;
+		messageId?: string;
+		text?: string;
+		attachment: { filename: string; contentType: string; content: string };
+	}): string {
+		const boundary = "e2e-boundary-0001";
+		const lines = [
+			`From: ${opts.from}`,
+			`To: ${opts.to}`,
+			`Subject: ${opts.subject ?? "添付つき"}`,
+			`Message-ID: <${opts.messageId ?? "e2e-" + crypto.randomUUID()}@tsubame.test>`,
+			`Date: ${new Date().toUTCString()}`,
+			"MIME-Version: 1.0",
+			`Content-Type: multipart/mixed; boundary="${boundary}"`,
+			"",
+			`--${boundary}`,
+			'Content-Type: text/plain; charset="UTF-8"',
+			"",
+			opts.text ?? "本文です。",
+			`--${boundary}`,
+			`Content-Type: ${opts.attachment.contentType}`,
+			`Content-Disposition: attachment; filename="${opts.attachment.filename}"`,
+			"",
+			opts.attachment.content,
+			`--${boundary}--`,
+			"",
+		];
+		return lines.join("\r\n");
+	}
+
+	scenario(
+		"FR-10",
+		"添付と生 MIME は R2 に置き、認可付きの一時 URL 経由でのみ取得できる。",
+		async () => {
+			const seeded = await seedDomain(h, { addresses: ["ai", "hito"] });
+			const aiAddr = "ai@mail.tsubame.test";
+
+			const attachmentContent = "添付ファイルの中身です。";
+			const raw = multipartMime({
+				from: "torihiki@ext.example.jp",
+				to: aiAddr,
+				subject: "添付つきのご連絡",
+				messageId: "att-0001",
+				text: "資料を添付します。",
+				attachment: {
+					filename: "資料.txt",
+					contentType: "text/plain",
+					content: attachmentContent,
+				},
+			});
+
+			await deliverEmail(h, { from: "torihiki@ext.example.jp", to: aiAddr, raw });
+			await drainQueues(h);
+
+			const list = await owner.get("/api/v1/messages?limit=10");
+			const msg = list.body.data[0];
+			expect(msg.hasAttachments).toBe(true);
+
+			const detail = await owner.get(`/api/v1/messages/${msg.id}`);
+			expect(detail.status).toBe(200);
+			expect(detail.body.attachments).toHaveLength(1);
+			const att = detail.body.attachments[0];
+			expect(att.filename).toBe("資料.txt");
+			expect(att.contentType).toBe("text/plain");
+
+			const attRes = await owner.get(`/api/v1/attachments/${att.id}`);
+			expect(attRes.status).toBe(200);
+			expect(attRes.headers.get("content-type")).toBe("text/plain");
+			expect(attRes.headers.get("content-disposition")).toContain("attachment");
+			expect(attRes.body).toContain(attachmentContent);
+
+			const rawRes = await owner.get(`/api/v1/messages/${msg.id}/raw`);
+			expect(rawRes.status).toBe(200);
+			expect(rawRes.headers.get("content-type")).toBe("message/rfc822");
+			expect(rawRes.body).toContain("Message-ID: <att-0001@tsubame.test>");
+			expect(rawRes.body).toContain(attachmentContent);
+
+			const userRes = await owner.post("/api/v1/admin/users", {
+				email: "bot@tsubame.test",
+				name: "見積ボット",
+				role: "agent",
+			});
+			expect(userRes.status).toBe(201);
+			const userId = userRes.body.id as string;
+
+			const grantRes = await owner.put(`/api/v1/admin/users/${userId}/grants`, [
+				{ addressId: seeded.addressIds.hito!, level: "read" },
+			]);
+			expect(grantRes.status).toBe(200);
+
+			const keyRes = await owner.post("/api/v1/admin/api-keys", {
+				userId,
+				name: "見積ボット本番",
+				scopes: ["read"],
+				addressIds: [seeded.addressIds.hito!],
+			});
+			expect(keyRes.status).toBe(201);
+			const token = keyRes.body.token as string;
+
+			const bot = createClient(h);
+			bot.useKey(token);
+			const deniedAtt = await bot.get(`/api/v1/attachments/${att.id}`);
+			expect([403, 404]).toContain(deniedAtt.status);
+			const deniedRaw = await bot.get(`/api/v1/messages/${msg.id}/raw`);
+			expect([403, 404]).toContain(deniedRaw.status);
+		},
+	);
+});
