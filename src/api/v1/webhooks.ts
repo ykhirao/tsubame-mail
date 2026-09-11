@@ -11,7 +11,7 @@ import { runDelivery } from "@/services/webhooks";
 import { afterCursor, toPage } from "@/lib/paging";
 import type { Webhook, WebhookDelivery } from "@/shared/contracts/webhooks";
 import type { AppEnv } from "@/api/types";
-import { clientIp, getPrincipal, requireOwner } from "../middleware/auth";
+import { clientIp, getPrincipal, requireOwner, requireUnrestricted } from "../middleware/auth";
 import { recordAudit } from "@/domain/access/policy";
 
 export const webhookRoutes = new Hono<AppEnv>();
@@ -105,7 +105,7 @@ webhookRoutes.get("/", async (c) => {
 	return c.json({ data: page.rows.map(toResponse), next_cursor: page.next_cursor });
 });
 
-webhookRoutes.post("/", async (c) => {
+webhookRoutes.post("/", requireUnrestricted, async (c) => {
 	const db = getDb(c.env);
 	const v = await readJson(c.req, webhookInput);
 	await assertAddressIdsValid(db, v.addressIds, c.get("principal"));
@@ -152,7 +152,7 @@ webhookRoutes.get("/:id", async (c) => {
 	return c.json(toResponse(row));
 });
 
-webhookRoutes.patch("/:id", async (c) => {
+webhookRoutes.patch("/:id", requireUnrestricted, async (c) => {
 	const db = getDb(c.env);
 	const id = c.req.param("id");
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
@@ -184,7 +184,7 @@ webhookRoutes.patch("/:id", async (c) => {
 	return c.json(toResponse(updated!));
 });
 
-webhookRoutes.delete("/:id", async (c) => {
+webhookRoutes.delete("/:id", requireUnrestricted, async (c) => {
 	const db = getDb(c.env);
 	const id = c.req.param("id");
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
@@ -228,7 +228,7 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
 	return c.json({ data: page.rows.map(toDeliveryResponse), next_cursor: page.next_cursor });
 });
 
-webhookRoutes.post("/deliveries/:id/retry", async (c) => {
+webhookRoutes.post("/deliveries/:id/retry", requireUnrestricted, async (c) => {
 	const db = getDb(c.env);
 	const deliveryId = c.req.param("id");
 	const delivery = await db

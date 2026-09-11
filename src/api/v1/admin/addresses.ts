@@ -12,7 +12,7 @@ import { newId } from "@/lib/id";
 import { afterCursor, toPage } from "@/lib/paging";
 import { defaultColorFor } from "@/shared/colors";
 import { createCloudflareApi } from "@/services/cloudflare-api";
-import { requireOwner } from "@/api/middleware/auth";
+import { requireOwner, requireUnrestricted } from "@/api/middleware/auth";
 import { clientIp, getPrincipal } from "@/api/middleware/auth";
 import { readJson } from "@/lib/validate";
 import { recordAudit } from "@/domain/access/policy";
@@ -111,7 +111,7 @@ app.get("/", async (c) => {
 	return c.json({ data, next_cursor: paged.next_cursor });
 });
 
-app.post("/", async (c) => {
+app.post("/", requireUnrestricted, async (c) => {
 	const input = await readJson(c.req, createAddressInput);
 	const db = c.get("db");
 
@@ -216,7 +216,7 @@ app.get("/:id", async (c) => {
 	return c.json({ data: present(row, domain.name, aliasTargetAddress) });
 });
 
-app.patch("/:id", async (c) => {
+app.patch("/:id", requireUnrestricted, async (c) => {
 	const { row, domain } = await loadAddress(c, c.req.param("id"));
 	const input = await readJson(c.req, updateAddressInput);
 	const db = c.get("db");
@@ -298,7 +298,7 @@ app.patch("/:id", async (c) => {
 	return c.json({ data: present(updated, domain.name, null) });
 });
 
-app.delete("/:id", async (c) => {
+app.delete("/:id", requireUnrestricted, async (c) => {
 	const { row, domain } = await loadAddress(c, c.req.param("id"));
 	const db = c.get("db");
 

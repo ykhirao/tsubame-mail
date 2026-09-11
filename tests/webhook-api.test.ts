@@ -297,7 +297,7 @@ describe("webhook の addressIds / events の検査（#44）", () => {
 		expect(after.addressIds).toEqual(["adr_patch_ok"]);
 	});
 
-	it("member スコープの principal から見えないアドレスは登録できない（ルータ単体）", async () => {
+	it("絞った admin キーは addressIds を指定した webhook 作成も 403（#129）", async () => {
 		await seedAddress("adr_visible");
 		await seedAddress("adr_hidden");
 		const scopedPrincipal: Principal = {
@@ -328,7 +328,7 @@ describe("webhook の addressIds / events の検査（#44）", () => {
 			},
 			env,
 		);
-		expect(res.status).toBe(400);
+		expect(res.status).toBe(403);
 	});
 });
 

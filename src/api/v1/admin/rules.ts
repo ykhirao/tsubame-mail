@@ -9,7 +9,7 @@ import { paginationQuery } from "@/shared/contracts/common";
 import { newId } from "@/lib/id";
 import type { AppEnv } from "@/api/types";
 import type { Db } from "@/db/client";
-import { clientIp, getPrincipal, requireOwner } from "../../middleware/auth";
+import { clientIp, getPrincipal, requireOwner, requireUnrestricted } from "../../middleware/auth";
 import { recordAudit } from "@/domain/access/policy";
 import { z } from "zod";
 
@@ -81,7 +81,7 @@ rulesRouter.get("/:id", async (c) => {
 	return c.json(rule);
 });
 
-rulesRouter.post("/", async (c) => {
+rulesRouter.post("/", requireUnrestricted, async (c) => {
 	const body = await readJson(c.req, createRuleSchema);
 	const db = c.get("db");
 	const domainId = body.domainId ?? null;
@@ -124,7 +124,7 @@ rulesRouter.post("/", async (c) => {
 	return c.json(created, 201);
 });
 
-rulesRouter.patch("/:id", async (c) => {
+rulesRouter.patch("/:id", requireUnrestricted, async (c) => {
 	const id = c.req.param("id");
 	const body = await readJson(c.req, updateRuleSchema);
 	const db = c.get("db");
@@ -184,7 +184,7 @@ rulesRouter.patch("/:id", async (c) => {
 	return c.json(updated);
 });
 
-rulesRouter.delete("/:id", async (c) => {
+rulesRouter.delete("/:id", requireUnrestricted, async (c) => {
 	const id = c.req.param("id");
 	const db = c.get("db");
 	const res = await db.delete(routingRules).where(eq(routingRules.id, id)).returning();

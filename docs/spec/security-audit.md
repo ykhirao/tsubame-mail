@@ -4,7 +4,7 @@
 **直したが残っている制約・また起きうる落とし穴・実機で未確認のこと**だけを載せる。
 
 - 解決済みの指摘は消した。#1〜#120 の再現・対応・再検査の記録は `git show 84eb932:docs/spec/security-audit.md`、
-  #121〜#126 はその対応のマージコミット（`git log --grep '#121'`）にある。コードのコメントにある「#n」「精査 #n」はその番号。
+  #121〜#126・#129 はその対応のコミット（`git log --grep '#121'` など）にある。コードのコメントにある「#n」「精査 #n」はその番号。
 - 番号は通しで、**次に振る番号は #130**。
 - 進め方（対応 → 再検査 → 次の精査）は `.agents/skills/security-audit/SKILL.md`。「この文書を進めて」と言われたらそれに従う。
 
@@ -12,16 +12,7 @@
 
 ### 直すもの
 
-| # | 深刻度 | 内容 | 場所 |
-| --- | --- | --- | --- |
-| 129 | **中** | 絞った admin キーでも、管理 API でキーの範囲外のメールに届く（#121 と同じ形。コードで確認） | `api/v1/webhooks.ts` `assertAddressIdsValid`、`api/v1/admin/rules.ts` |
-
-- **#129** #121 でユーザー管理はセッションだけにしたが、addressIds を絞った admin キーはまだ次のことができる。
-  (1) `POST /webhooks` の `addressIds` を省略（null = 全アドレス）すると `assertAddressIdsValid` が検査せずに通り、キーの範囲外のメールの件名とスニペットが通知で届く。
-  (2) ドメインスコープの `forward` ルールを作ると、そのドメインの全アドレスのメールを外部へ転送できる（本文ごと）。
-  (3) アドレス・ドメインの作成や変更も、キーの addressIds に縛られない。
-  **直し方**: `principal.addressIds !== "all"` の admin キーでは、webhook の `addressIds` の省略・空を 400 にし、ドメインスコープのルール・ドメイン・アドレスの変更系は 403 にする
-  （または #121 と同じく、管理の変更系をまとめてセッションか無制限のキーだけに絞る。どこまで絞るかは要件の判断）。
+今は無い。
 
 ### 設計判断が要るもの
 
@@ -39,14 +30,21 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
   （[Email lifecycle](https://developers.cloudflare.com/email-service/concepts/email-lifecycle/)）ので、成立するのは送信元ドメインに DMARC が無いか `p=none` のときに限られる。
 - **#128** `notes.md` では要件側の判断として保留、`security.md` の S-3 のチェックも未チェック。
 
+**本番のメールで確かめたこと**（2026-09-12、受信 1 通のヘッダだけを R2 の生 MIME から読んだ）:
+Cloudflare は送信者のヘッダより**上**に、`Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` →
+`Authentication-Results: mx.cloudflare.net; dkim=pass header.d=… ; dmarc=pass header.from=… policy.dmarc=reject; spf=…` → `X-CF-SpamH-Score: 1` の順で足す。
+authserv-id は `mx.cloudflare.net`、スパム判定は `X-CF-SpamH-Score`（数値。尺度は公式文書に無い）。
+Worker に届くメールで `Authentication-Results` が欠けることがあるという報告がある（[workerd #6740](https://github.com/cloudflare/workerd/issues/6740)）。
+
 **進め方**:
-1. まず実物を見る。Worker が受け取るメールに Cloudflare がどのヘッダを付けるか（`Authentication-Results` の authserv-id、スパム判定のヘッダ名）は公式文書に無い。
-   受信した生 MIME は R2（`raw/…`）に残っているので、実運用の 1 通を読んで確かめる。
-2. #127: email ハンドラ（`incoming.ts`。ヘッダを読めて `setReject()` も使える唯一の場所）で、Cloudflare の authserv-id を持つ `Authentication-Results` **だけ**を読む
-   （送信者も同名ヘッダを自由に書けるので、それ以外は信用しない）。結果を `InboundQueueMessage` に載せて運び、inbound をアンカーにする接ぎ木を
-   「DMARC pass、または From のドメインに揃った DKIM pass」のときに限る。保存するなら列の追加（スキーマ変更）が要る。
-   接ぎ木しないだけにするか、画面に「未認証」を出すかは要件の判断。
-3. #128: 1 で見つけた判定ヘッダを `incoming.ts` で読んで運び、`inbound.ts` の insert に `spamVerdict` を書く。`security.md` S-3 のチェックを付ける。
+1. 生 MIME は R2 に置いてキューの処理側（`inbound.ts` → `parse.ts`）でパースしているので、email ハンドラやキューのメッセージの形は変えずに `parse.ts` で読める。
+   信用するのは**一番上の** `Authentication-Results`（authserv-id が `mx.cloudflare.net` のもの）と、一番上の `X-CF-SpamH-Score` だけ
+   （送信者も同名ヘッダを自由に書けるので、下にあるものは無視する）。ヘッダが無ければ「未認証」「判定なし」とみなす。
+   Cloudflare が常にこの 2 つを付けるかは、受信済みの他のメールでも確かめてから決める（付かないメールがあると、送信者が書いた同名ヘッダが一番上に来る）。
+2. #127: inbound をアンカーにする接ぎ木（「From が同じ」の判定）を「DMARC pass、または From のドメインに揃った DKIM pass」のときに限る。
+   結果を保存するなら列の追加（スキーマ変更）が要る。接ぎ木しないだけにするか、画面に「未認証」を出すかは要件の判断。
+3. #128: `X-CF-SpamH-Score` を `spam_verdict`（`clean` / `suspicious` / `spam`）に写す。しきい値は尺度が分からないので、受信済みのメールのスコアの分布を見て決める。
+   決めたら `inbound.ts` の insert に `spamVerdict` を書き、`security.md` S-3 のチェックを付ける。
 
 ## 2. デプロイ時に要る作業
 
@@ -97,6 +95,8 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
 - owner が管理 API で自分のパスワードを変えると、自分にも強制変更が付く（`PATCH /me` で解除できる）（#98）。
 - vitest 用の固定の `INTERNAL_SECRET` はリポジトリにあり、本番の拒否リストには入っていない（#48）。
 - ユーザー管理の変更系（作成・更新・削除・grants）は API キーでは 403。自動化するなら画面ログインのセッションが要る（#121）。
+- 管理 API の変更系（webhook・ルール・ドメイン・アドレス）は、addressIds を絞ったキーでは 403。addressIds が全部のキーは期限付きでも通るので、
+  そのキーで作ったルールや webhook はキーの期限が切れた後も残る（#129）。
 
 ### Webhook
 
@@ -134,7 +134,7 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
 
 ## 5. 未確認（実機でしか確かめられないもの）
 
-- Worker に届くメールに Cloudflare が付けるヘッダ（#127 / #128 の前提）。
+- Cloudflare が `Authentication-Results` と `X-CF-SpamH-Score` を**すべての**受信メールに付けるか（#127 / #128 の前提。1 通では付いていた）。`X-CF-SpamH-Score` の尺度。
 - Email Routing が `INBOUND_QUEUE.send` の失敗を送信側の再送に変えるか（#24）。
 - 998 文字を超えるヘッダ行を Cloudflare Email Sending が拒否するか、中継 MTA がどう扱うか（#34 / #66。送信側は 998 以内に収めている）。
 - Cloudflare の `catch_all` が実機でもゾーンに 1 本であること（#85 / #117 の前提。fake CF と仕様の記述に基づく）。Cloudflare API の実レート制限と 429 の挙動（#93）。

@@ -173,6 +173,22 @@ export const requireSession: MiddlewareHandler<AppEnv> = async (c, next) => {
 	await next();
 };
 
+// 範囲を絞った admin キーは、キーより広い範囲（相手先ドメイン全体・全アドレス）を
+// 操作できてしまうので、管理者の変更はセッションか addressIds 全開放のキーに限る（#129）。
+export const requireUnrestricted: MiddlewareHandler<AppEnv> = async (c, next) => {
+	let principal = c.get("principal");
+	if (!principal) {
+		const resolved = await resolveRequestPrincipal(c);
+		if (!resolved) throw unauthorized();
+		principal = resolved;
+		c.set("principal", principal);
+	}
+	if (principal.via === "api_key" && principal.addressIds !== "all") {
+		throw forbidden("範囲を絞った API キーでは管理の変更はできません");
+	}
+	await next();
+};
+
 export function getPrincipal(c: Ctx): Principal {
 	const principal = c.get("principal");
 	if (!principal) throw unauthorized();

@@ -15,7 +15,7 @@ import {
 	verifyDomain,
 } from "@/domain/domains/provision";
 import { createCloudflareApi } from "@/services/cloudflare-api";
-import { requireOwner } from "@/api/middleware/auth";
+import { requireOwner, requireUnrestricted } from "@/api/middleware/auth";
 import { clientIp, getPrincipal } from "@/api/middleware/auth";
 import { readJson } from "@/lib/validate";
 import { recordAudit } from "@/domain/access/policy";
@@ -129,7 +129,7 @@ app.get("/", async (c) => {
 	});
 });
 
-app.post("/", async (c) => {
+app.post("/", requireUnrestricted, async (c) => {
 	const input = await readJson(c.req, createDomainInput);
 	const api = createCloudflareApi(c.env);
 
@@ -209,7 +209,7 @@ app.get("/:id", async (c) => {
 	});
 });
 
-app.delete("/:id", async (c) => {
+app.delete("/:id", requireUnrestricted, async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
 	const query = deleteDomainQuery.safeParse(c.req.query());
 	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
@@ -285,7 +285,7 @@ app.delete("/:id", async (c) => {
 	});
 });
 
-app.post("/:id/catch-all", async (c) => {
+app.post("/:id/catch-all", requireUnrestricted, async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
 	const input = await readJson(c.req, catchAllInput);
 
@@ -317,7 +317,7 @@ app.post("/:id/catch-all", async (c) => {
 	return c.json({ data: result, warning: CATCH_ALL_WARNING });
 });
 
-app.post("/:id/verify", async (c) => {
+app.post("/:id/verify", requireUnrestricted, async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
 	const api = createCloudflareApi(c.env);
 	// ゾーンが動いていることも確認しておく（トークンのスコープ切れをここで拾う）。
