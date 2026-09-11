@@ -155,7 +155,10 @@ export function createFakeCloudflare(options: FakeCloudflareOptions = {}): FakeC
 				return ok({ enabled: false });
 			}
 			if (/\/email\/routing\/dns$/.test(p)) {
-				const name = String(body?.name ?? url.searchParams.get("name") ?? "");
+				// name を省くと Cloudflare は apex に作る（apex 運用はこれが正しい呼び方）。
+				const zoneId = p.match(/^\/zones\/([^/]+)\//)?.[1];
+				const zoneName = zones.find((z) => z.id === zoneId)?.name ?? "";
+				const name = String(body?.name ?? url.searchParams.get("name") ?? zoneName);
 				const suggested = [
 					{ type: "MX", name, content: "route1.mx.cloudflare.net", priority: 1 },
 					{ type: "TXT", name, content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },

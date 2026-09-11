@@ -342,21 +342,43 @@ export type VerifyResult = {
 export async function verifyDomain(params: {
 	db: Db;
 	api: CloudflareApi;
-	domain: { id: string; name: string; zoneId: string; zoneName: string; sendingStatus: string };
+	domain: {
+		id: string;
+		name: string;
+		zoneId: string;
+		zoneName: string;
+		sendingStatus: string;
+		routingStatus?: string;
+		mode?: string;
+	};
 }): Promise<VerifyResult> {
 	const { db, api, domain } = params;
 	const zone = { id: domain.zoneId, name: domain.zoneName };
+	const errors: string[] = [];
 
 	// 接続の途中で失敗した分をここで拾い直す。読み直すだけだと、オンボーディング
 	// 自体が通っていないドメインが pending のまま永久に直らない。
-	let lastError: string | null = null;
+	if (domain.routingStatus !== undefined && domain.routingStatus !== "active") {
+		// apex は name を渡すと 2007 で弾かれる（enableEmailRouting 参照）。
+		const routingName = domain.mode === "apex" ? undefined : domain.name;
+		try {
+			await api.enableEmailRouting(zone, routingName);
+			await api.createEmailRoutingDns(zone, routingName);
+		} catch (err) {
+			errors.push(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	let sendingError = false;
 	if (domain.sendingStatus !== "disabled" && domain.sendingStatus !== "active") {
 		try {
 			await api.enableEmailSending(zone, domain.name);
 		} catch (err) {
-			lastError = err instanceof Error ? err.message : String(err);
+			sendingError = true;
+			errors.push(err instanceof Error ? err.message : String(err));
 		}
 	}
+	const lastError = errors.length > 0 ? errors.join(" / ") : null;
 
 	const records = await api.listDnsRecords(zone);
 	const dnsCheck = inspectDnsRecords({
@@ -373,7 +395,7 @@ export async function verifyDomain(params: {
 	const sendingStatus: "disabled" | "pending" | "active" | "error" =
 		domain.sendingStatus === "disabled"
 			? "disabled"
-			: lastError
+			: sendingError
 				? "error"
 				: sendingStatusOf(sending);
 

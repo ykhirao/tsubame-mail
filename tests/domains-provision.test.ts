@@ -6,6 +6,7 @@ import {
 	pickZoneForName,
 	readSendingDnsState,
 	resolveZone,
+	verifyDomain,
 } from "@/domain/domains/provision";
 import { CloudflareApi } from "@/services/cloudflare-api";
 import { applyMigrations, createFakeCloudflare, getTestDb, testEnv } from "./domains-helpers";
@@ -261,5 +262,89 @@ describe("provisionDomain", () => {
 		});
 		expect(row?.routingStatus).toBe("error");
 		expect(row?.lastError).toContain("CF_API_TOKEN");
+	});
+});
+
+describe("verifyDomain", () => {
+	// 接続の途中で routing が失敗すると、再検査しても enable を呼び直さない限り
+	// pending のまま直らない（削除して作り直すしかなくなる）。
+	it("routing が pending なら enable を呼び直して復旧する", async () => {
+		let failRouting = true;
+		const fake = createFakeCloudflare({
+			zones: [{ id: "zone1", name: "recover.test" }],
+			failWith: (req) =>
+				failRouting && /email\/routing\/(enable|dns)$/.test(req.path)
+					? { status: 400, errors: [{ code: 2007, message: "Invalid Input" }] }
+					: undefined,
+		});
+		const db = getTestDb();
+
+		// 接続は routing で落ちる。行は error のまま残り、あとで再検査に賭けることになる。
+		await provisionDomain({
+			db,
+			api: apiOf(fake),
+			env: testEnv,
+			input: { name: "recover.test", confirmApex: true, enableSending: false },
+		}).catch(() => undefined);
+
+		const before = await db.query.domains.findFirst({
+			where: eq(domains.name, "recover.test"),
+		});
+		expect(before?.routingStatus).toBe("error");
+
+		// Cloudflare 側が直った後に再検査する。
+		failRouting = false;
+		const result = await verifyDomain({
+			db,
+			api: apiOf(fake),
+			domain: {
+				id: before!.id,
+				name: before!.name,
+				zoneId: before!.zoneId,
+				zoneName: before!.zoneName,
+				sendingStatus: before!.sendingStatus,
+				routingStatus: before!.routingStatus,
+				mode: before!.mode,
+			},
+		});
+
+		expect(result.routingStatus).toBe("active");
+		expect(result.lastError).toBeNull();
+
+		// apex なので name を渡さずに呼び直している。
+		const enable = fake.find((r) => /email\/routing\/enable$/.test(r.path));
+		expect(enable.at(-1)!.body).toEqual({});
+	});
+
+	it("routing が既に active なら enable を呼ばない", async () => {
+		const fake = createFakeCloudflare({ zones: [{ id: "zone1", name: "stable.test" }] });
+		const db = getTestDb();
+
+		await provisionDomain({
+			db,
+			api: apiOf(fake),
+			env: testEnv,
+			input: { name: "mail.stable.test", enableSending: false },
+		});
+		const row = await db.query.domains.findFirst({
+			where: eq(domains.name, "mail.stable.test"),
+		});
+		const before = fake.find((r) => /email\/routing\/enable$/.test(r.path)).length;
+
+		await verifyDomain({
+			db,
+			api: apiOf(fake),
+			domain: {
+				id: row!.id,
+				name: row!.name,
+				zoneId: row!.zoneId,
+				zoneName: row!.zoneName,
+				sendingStatus: row!.sendingStatus,
+				routingStatus: row!.routingStatus,
+				mode: row!.mode,
+			},
+		});
+
+		expect(fake.find((r) => /email\/routing\/enable$/.test(r.path))).toHaveLength(before);
 	});
 });

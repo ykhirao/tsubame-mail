@@ -30,6 +30,21 @@ export type CleanupFailure = {
 	reason: string;
 };
 
+/** ロック済みレコードは個別に消せない。Cloudflare の画面でサービスごと無効化する。 */
+const LOCKED_HINT =
+	"Email Sending が作った DNS レコードはロックされていて個別には消せません。" +
+	"Cloudflare の画面（メール送信 → 対象ドメイン → 設定 → 無効化）から" +
+	"サービスごと無効化すると、まとめて削除されます。";
+
+export function cleanupFailureNote(failures: CleanupFailure[]): string {
+	const lines = failures.map((f) => `${f.label}: ${f.reason}`);
+	const locked = failures.some((f) => /lock/i.test(f.reason));
+	return (
+		`Cloudflare 側で消せなかったものがあります。\n${lines.join("\n")}` +
+		(locked ? `\n${LOCKED_HINT}` : "")
+	);
+}
+
 export type CleanupResult = {
 	removedRoutingRules: string[];
 	removedDnsRecords: string[];

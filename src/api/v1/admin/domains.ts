@@ -3,7 +3,7 @@ import type { Context } from "hono";
 import { and, asc, count, eq, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { addresses, domains } from "@/db/schema";
-import { cleanupDomain } from "@/domain/domains/cleanup";
+import { cleanupDomain, cleanupFailureNote } from "@/domain/domains/cleanup";
 import {
 	CATCH_ALL_WARNING,
 	assertZoneCatchAllSafe,
@@ -281,9 +281,7 @@ app.delete("/:id", async (c) => {
 
 	return c.json({
 		data: { id: domain.id, deleted: true, cleanup },
-		note: cleanup?.failures.length
-			? "Cloudflare 側で消せなかったものがあります。failures を確認してください。"
-			: null,
+		note: cleanup?.failures.length ? cleanupFailureNote(cleanup.failures) : null,
 	});
 });
 

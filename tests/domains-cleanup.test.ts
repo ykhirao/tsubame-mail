@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { cleanupDomain, isOwnDnsRecord, isOwnRoutingRule } from "@/domain/domains/cleanup";
+import {
+	cleanupDomain,
+	cleanupFailureNote,
+	isOwnDnsRecord,
+	isOwnRoutingRule,
+} from "@/domain/domains/cleanup";
 import { CloudflareApi } from "@/services/cloudflare-api";
 import { createFakeCloudflare, testEnv } from "./domains-helpers";
 
@@ -176,6 +181,22 @@ describe("cleanupDomain", () => {
 		expect(result.failures).toHaveLength(1);
 		expect(result.failures[0]).toMatchObject({ kind: "dns_record", label: "MX mail.example.com" });
 		expect(result.failures[0]!.reason).toContain("CF_API_TOKEN");
+	});
+
+	it("failures は理由まで伝える。ロック済みなら消し方も添える", () => {
+		const note = cleanupFailureNote([
+			{ kind: "dns_record", id: "r1", label: "MX cf-bounce.example.com", reason: "record is locked" },
+		]);
+		// ラベルだけでは何が起きたか分からず、利用者が自力で直せない。
+		expect(note).toContain("MX cf-bounce.example.com");
+		expect(note).toContain("record is locked");
+		expect(note).toContain("無効化");
+
+		const other = cleanupFailureNote([
+			{ kind: "routing_rule", id: "x", label: "ルール", reason: "boom" },
+		]);
+		expect(other).toContain("boom");
+		expect(other).not.toContain("無効化");
 	});
 
 	it("catch-all を有効にしていたら無効化する", async () => {
