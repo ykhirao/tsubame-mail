@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "7f82e75b-5568-43ef-8cc1-48c06fe067d3",
-  "prevId": "7162cf3e-5a23-4946-9858-0d1a7f1678e8",
+  "id": "da054ae4-6431-4d44-9ecb-3b5a78495aca",
+  "prevId": "013c1ab8-aa7e-47c1-99aa-8741125f0108",
   "tables": {
     "address_grants": {
       "name": "address_grants",
@@ -149,6 +149,13 @@
         },
         "signature": {
           "name": "signature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "color": {
+          "name": "color",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1301,6 +1308,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'active'"
+        },
+        "must_change_password": {
+          "name": "must_change_password",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
         },
         "last_login_at": {
           "name": "last_login_at",

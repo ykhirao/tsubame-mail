@@ -279,6 +279,109 @@ describe("resolveIncoming: 表記ゆれで拒否をすり抜けられない", ()
 	});
 });
 
+describe("resolveIncoming: ルールの deliver 先もエイリアスを辿り、アーカイブ済みは配送しない（#62）", () => {
+	beforeEach(resetDb);
+
+	async function seedRuleTarget(cfg: {
+		boxArchived?: boolean;
+		aliasToBox?: boolean;
+		catchAll?: boolean;
+	}): Promise<ReturnType<typeof getDb>> {
+		const db = getDb(env);
+		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
+		await db.insert(addresses).values([
+			{
+				id: "adr_box",
+				domainId: DOM_ID,
+				localPart: "box",
+				address: "box@example.com",
+				kind: "mailbox",
+				...(cfg.boxArchived ? { archivedAt: new Date() } : {}),
+			},
+			...((cfg.aliasToBox
+				? [
+						{
+							id: "adr_alias",
+							domainId: DOM_ID,
+							localPart: "al",
+							address: "al@example.com",
+							kind: "alias" as const,
+							aliasTargetId: "adr_box",
+						},
+					]
+				: [])),
+			...((cfg.catchAll
+				? [
+						{
+							id: "adr_catch",
+							domainId: DOM_ID,
+							localPart: "_",
+							address: "_@example.com",
+							kind: "mailbox" as const,
+							isCatchAll: true,
+						},
+					]
+				: [])),
+		]);
+		await db.insert(routingRules).values({
+			id: newId("rule"),
+			scope: "domain",
+			domainId: DOM_ID,
+			name: "redirect",
+			action: "deliver",
+			matcher: { to: "rule@example.com" },
+			target: cfg.aliasToBox ? "adr_alias" : "adr_box",
+			priority: 10,
+			enabled: true,
+		});
+		return db;
+	}
+
+	it("deliver 先がエイリアスならエイリアス先へ辿る", async () => {
+		const db = await seedRuleTarget({ aliasToBox: true });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "rule@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_box" });
+	});
+
+	it("deliver 先がアーカイブ済みなら配送せず catch-all へ落とす", async () => {
+		const db = await seedRuleTarget({ boxArchived: true, catchAll: true });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "rule@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_catch" });
+	});
+
+	it("deliver 先のエイリアス先がアーカイブ済みでも配送せず catch-all へ落とす", async () => {
+		const db = await seedRuleTarget({ aliasToBox: true, boxArchived: true, catchAll: true });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "rule@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_catch" });
+	});
+
+	it("deliver 先が消えた行を指すなら配送せず catch-all へ落とす", async () => {
+		const db = getDb(env);
+		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
+		await db.insert(addresses).values({
+			id: "adr_catch",
+			domainId: DOM_ID,
+			localPart: "_",
+			address: "_@example.com",
+			kind: "mailbox",
+			isCatchAll: true,
+		});
+		await db.insert(routingRules).values({
+			id: newId("rule"),
+			scope: "domain",
+			domainId: DOM_ID,
+			name: "redirect",
+			action: "deliver",
+			matcher: { to: "rule@example.com" },
+			target: "ghost",
+			priority: 10,
+			enabled: true,
+		});
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "rule@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_catch" });
+	});
+});
+
 describe("matchRule", () => {
 	it("from の部分一致・大文字小文字を無視", () => {
 		expect(matchRule({ from: "SPAM" }, { from: "Someone@Spam.example.com" })).toBe(true);

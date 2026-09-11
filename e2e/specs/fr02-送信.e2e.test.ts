@@ -244,7 +244,9 @@ describe("FR-2 送信", () => {
 
 		expect(sent).toHaveLength(1);
 		const raw = sent[0]!.raw;
-		expect(raw).toContain("資料.txt");
+		// #119: 非 ASCII のファイル名はヘッダで RFC 2231 符号化される（DB の filename は素のまま）。
+		expect(raw).not.toContain("資料.txt");
+		expect(raw).toContain("filename*=UTF-8''%E8%B3%87%E6%96%99.txt");
 		expect(raw).toContain(base64);
 	});
 

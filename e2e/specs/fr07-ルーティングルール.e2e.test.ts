@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
 import {
+	createClient,
 	deliverEmail,
 	drainQueues,
 	freshHarness,
@@ -156,5 +157,81 @@ describe("FR-7 ルーティングルール", () => {
 		expect(list.status).toBe(200);
 		expect(list.body.data).toHaveLength(1);
 		expect(list.body.data[0].isRead).toBe(true);
+	});
+
+	async function memberAndKeyedOwner(): Promise<[Client, Client]> {
+		const memberCreate = await owner.post("/api/v1/admin/users", {
+			email: "member@tsubame.test",
+			name: "メンバー",
+			role: "member",
+			password: "member-pass-12345",
+		});
+		expect(memberCreate.status).toBe(201);
+		const member = createClient(h);
+		expect((await member.post("/api/v1/auth/login", {
+			email: "member@tsubame.test",
+			password: "member-pass-12345",
+		})).status).toBe(200);
+
+		const me = await owner.get("/api/v1/me");
+		const key = await owner.post("/api/v1/admin/api-keys", {
+			userId: me.body.id,
+			name: "read-send-owner",
+			scopes: ["read", "send"],
+			addressIds: null,
+		});
+		expect(key.status).toBe(201);
+		const keyed = createClient(h);
+		keyed.useKey(key.body.token);
+		return [member, keyed];
+	}
+
+	scenario("FR-7", "member セッションと admin 無しの owner キーではルールを作成・更新・削除できない", async () => {
+		const [member, keyed] = await memberAndKeyedOwner();
+
+		const createdRule = await owner.post("/api/v1/admin/rules", {
+			scope: "domain",
+			domainId,
+			priority: 10,
+			enabled: true,
+			name: "既存ルール",
+			action: "reject",
+			matcher: { from: "spam@ext.jp" },
+		});
+		expect(createdRule.status).toBe(201);
+		const ruleId = createdRule.body.id;
+
+		const createBody = {
+			scope: "domain",
+			domainId,
+			priority: 20,
+			enabled: true,
+			name: "権限の無い人が作るルール",
+			action: "reject",
+			matcher: { from: "x@ext.jp" },
+		};
+
+		for (const [label, client] of [
+			["member", member],
+			["owner read+send キー", keyed],
+		] as const) {
+			expect((await client.post("/api/v1/admin/rules", createBody)).status, `${label} 作成`).toBe(403);
+			expect((await client.patch(`/api/v1/admin/rules/${ruleId}`, { enabled: false })).status, `${label} 更新`).toBe(403);
+			expect((await client.del(`/api/v1/admin/rules/${ruleId}`)).status, `${label} 削除`).toBe(403);
+		}
+
+		const still = await owner.get(`/api/v1/admin/rules/${ruleId}`);
+		expect(still.status).toBe(200);
+		expect(still.body.enabled).toBe(true);
+	});
+
+	scenario("FR-7", "不正なルール入力は 400", async () => {
+		const res = await owner.post("/api/v1/admin/rules", {
+			scope: "domain",
+			domainId,
+			priority: 10,
+			name: "action が無い",
+		});
+		expect(res.status).toBe(400);
 	});
 });

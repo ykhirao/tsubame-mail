@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { desc, eq } from "drizzle-orm";
 import { rulesRouter } from "@/api/v1/admin/rules";
 import { addresses, domains } from "@/db/schema";
 import { applyMigrations, callJson, getTestDb, mountRouter, ownerPrincipal } from "./domains-helpers";
@@ -140,5 +141,137 @@ describe("POST /admin/rules の target 検証（#38）", () => {
 			body: JSON.stringify({ target: "adr_does_not_exist" }),
 		});
 		expect(patched.status).toBe(400);
+	});
+});
+
+describe("ルールの deliver 先の制限（#62）", () => {
+	it("エイリアス行を deliver の宛先にすると 400", async () => {
+		const domA = await seedDomain(`dom_62a`, `r${seq}a.example.com`);
+		const inbox = await seedAddress(`adr_62a_inbox`, domA, "inbox", `r${seq}a.example.com`);
+		await getTestDb().insert(addresses).values({
+			id: `adr_62a_alias`,
+			domainId: domA,
+			localPart: "sales",
+			address: `sales@r${seq}a.example.com`,
+			kind: "alias",
+			aliasTargetId: inbox,
+		});
+
+		const res = await callJson(app(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "domain",
+				domainId: domA,
+				name: "deliver alias",
+				action: "deliver",
+				matcher: {},
+				target: `adr_62a_alias`,
+			}),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("アーカイブ済み行を deliver の宛先にすると 400", async () => {
+		const domA = await seedDomain(`dom_62b`, `r${seq}b.example.com`);
+		const archived = await seedAddress(`adr_62b_arch`, domA, "inbox", `r${seq}b.example.com`);
+		await getTestDb()
+			.update(addresses)
+			.set({ archivedAt: new Date() })
+			.where(eq(addresses.id, archived));
+
+		const res = await callJson(app(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "domain",
+				domainId: domA,
+				name: "deliver archived",
+				action: "deliver",
+				matcher: {},
+				target: archived,
+			}),
+		});
+		expect(res.status).toBe(400);
+	});
+});
+
+describe("存在しない scope 先 id は 400（#63）", () => {
+	it("存在しない domainId の domain スコープは 400", async () => {
+		const res = await callJson(app(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "domain",
+				domainId: "dom_does_not_exist",
+				name: "x",
+				action: "drop",
+				matcher: {},
+			}),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("存在しない addressId の address スコープは 400", async () => {
+		const res = await callJson(app(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "address",
+				addressId: "adr_does_not_exist",
+				name: "x",
+				action: "mark",
+				matcher: {},
+			}),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("scope に合わない id も 400", async () => {
+		const domA = await seedDomain(`dom_63c`, `r${seq}c.example.com`);
+		const res = await callJson(app(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "address",
+				domainId: domA,
+				name: "x",
+				action: "mark",
+				matcher: {},
+			}),
+		});
+		expect(res.status).toBe(400);
+	});
+});
+
+describe("admin/rules のカーソルページング（#65）", () => {
+	it("limit をまたいでも全件欠落なく読める", async () => {
+		const dom = await seedDomain(`dom_65`, `r${seq}65.example.com`);
+		const ids: string[] = [];
+		for (let i = 0; i < 12; i++) {
+			const created = await callJson(app(), "/", {
+				method: "POST",
+				body: JSON.stringify({
+					scope: "domain",
+					domainId: dom,
+					name: `rule-${i}`,
+					action: "drop",
+					matcher: {},
+				}),
+			});
+			expect(created.status).toBe(201);
+			ids.push(created.json.id);
+		}
+
+		const seen: string[] = [];
+		let cursor: string | null = null;
+		let pages = 0;
+		do {
+			const url = `/?limit=5${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+			const page = await callJson(app(), url);
+			expect(page.status).toBe(200);
+			seen.push(...page.json.data.map((r: any) => r.id));
+			cursor = page.json.next_cursor;
+			pages += 1;
+		} while (cursor);
+		expect(pages).toBeGreaterThan(1);
+		// カーソルをまたいでも重複・欠落なく、自分が作った分が全部見える（前のテストで作った行があってもよい）
+		expect(new Set(seen).size).toBe(seen.length);
+		expect(ids.every((id) => seen.includes(id))).toBe(true);
 	});
 });

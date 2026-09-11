@@ -33,6 +33,10 @@
 npm ci
 ```
 
+`npm ci` は install script を持つ依存（`workerd`、`esbuild`、`core-js-pure`、`fsevents`）の
+postinstall を実行する。これらは配布物（`dist/client`）には入らないが、ビルド・テストに要るので
+`--ignore-scripts` での実行は想定していない。
+
 ---
 
 ## 2. リソースを作る
@@ -116,6 +120,37 @@ openssl rand -base64 32
 > `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` を
 > リポジトリの Secrets に登録する（第 7 節の GitHub Actions を参照）。
 
+### 3.1 シークレットのローテーションと失効
+
+**`CF_API_TOKEN`（Zone / Email Routing / Email Sending の編集権を持つ）**。漏れた、または
+定期的に入れ替えるときは:
+
+1. Cloudflare ダッシュボードで**新しいトークンを発行**し、古いトークンと同じ権限・Zone 範囲にする。
+2. `npx wrangler secret put CF_API_TOKEN` で新トークンを投入する（GitHub Actions を使うなら
+   `CLOUDFLARE_API_TOKEN` 側も同じ値に更新する）。
+3. 切り替えを確認したら、ダッシュボードから**古いトークンを失効**させる。新トークンはこの手順で
+   `wrangler.local.jsonc` の再生成や再デプロイを要しない（Worker のシークレットは即時反映）が、
+   古いトークンを残すと漏洩範囲が減らない。
+
+**`INTERNAL_SECRET`**。`src/api/v1/auth.ts` で参照するのは **`POST /api/v1/auth/bootstrap` だけ**。
+オーナーが 1 人でも居ると bootstrap は 409 を返すため、**初回セットアップ後は使われない**。
+秘密を残しておく価値より消す方が安全なので、オーナーを作ったら:
+
+```bash
+npx wrangler secret delete INTERNAL_SECRET
+```
+
+消すと、万一オーナーを全員削除した「再セットアップ」はできなくなる（bootstrap が 403 になる）。
+再セットアップが必要になる環境では、その時だけ再度 `wrangler secret put INTERNAL_SECRET` で投入する。
+
+**Webhook の `secret`**。`POST /api/v1/webhooks` の登録応答に一度だけ平文で出て、以後は取得できない
+再発行 API が無い。漏れた場合は**既存の webhook を作り直す**（`DELETE` → 新しい `secret` 付きで再登録）しかない。
+
+**API キー**。漏洩時は管理画面・`/api/v1/me/api-keys` で該当キーを**失効（revoke）** する。
+キーは `revokedAt` / `expiresAt` を毎リクエスト検査するため、失効は即有効になる。
+パスワードが流出した場合は `PATCH /api/v1/me` でパスワードを変える。その利用者の全セッションが落ち、
+未失効の API キーもすべて失効する（精査 #99）。キーを使う連携はキーを発行し直して入れ替える。
+
 ---
 
 ## 4. `database_id` の注入方針
@@ -174,6 +209,21 @@ D1_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.lo
 ただし `wrangler.local.jsonc` は生成物なので、**必ず `scripts/deploy.sh` 経由で**
 まとめて実行することを推奨する。
 
+### 5.1 既存環境への `0004_fts_delete_triggers` 適用について
+
+`0004` は最後に `INSERT INTO messages_fts VALUES ('rebuild')` を実行し、FTS 索引を**バッチ無しで
+全件再構築**する。`deploy.sh` は `wrangler deploy` の**前**に `--remote` でマイグレーションを流すので、
+`messages` の行数が増えると D1 の実行時間上限（数万行を超えるあたりから現実的）に当たり得る。
+
+- 0004 が未適用の既存環境に流す前に、**行数の目安を確認する**:
+  `npx wrangler d1 execute DB --remote --config wrangler.local.jsonc --command 'select count(*) from messages'`
+- **失敗したときの状態**は「トリガは新形式・索引は古いまま・デプロイ未実施」で止まる。
+  `deploy.sh` は `set -euo pipefail` なので、この状態でデプロイには進まない。
+- **復旧手順**: `0004` の `'rebuild'` は後から単独で流し直せる。
+  `npx wrangler d1 execute DB --remote --config wrangler.local.jsonc --command "INSERT INTO messages_fts VALUES ('rebuild')"`
+  を実行して索引を構築してからデプロイを続ける。
+- 0004 は既存 SQL として書き換えない（スキーマの二重管理を避けるため）。
+
 ---
 
 ## 6. ビルドとデプロイ
@@ -227,7 +277,7 @@ D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 アドレスである必要はない。** この時点ではまだ送信ドメインを 1 つも繋いでいないため、
 アプリからメールを出せず、使い捨てパスワードを送る方式が使えないため。
 
-cURL で:
+cURL で（ボディには第 3 節で `INTERNAL_SECRET` に入れた合言葉を `secret` として入れる。無いと 400）:
 
 ```bash
 curl -X POST "https://<あなたの公開ホスト>/api/v1/auth/bootstrap" \
@@ -240,7 +290,7 @@ curl -X POST "https://<あなたの公開ホスト>/api/v1/auth/bootstrap" \
   }'
 ```
 
-レスポンスに `Set-Cookie: tsb_session=...` が返れば成功。owner が既に居る状態で叩くと
+レスポンスに `Set-Cookie: __Host-tsb_session=...` が返れば成功。owner が既に居る状態で叩くと
 409 になり、ログイン画面からも `/bootstrap` への導線が消える。
 以後のメンバーはオーナーが管理画面から追加する。
 

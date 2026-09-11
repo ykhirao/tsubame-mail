@@ -1,5 +1,10 @@
 /** 平文はどれも発行時のレスポンスにしか出さない。DB に置くのは SHA-256 の 16 進文字列だけ。 */
-export const SESSION_COOKIE = "tsb_session";
+// `__Host-` は Secure + Path=/ + Domain 無しをブラウザに強制するので、同一登録ドメインの別サブドメインから
+// `Set-Cookie: tsb_session=…; Domain=.example.com` で上書きされるセッション固定（#84）を封じる。
+export const SESSION_COOKIE = "__Host-tsb_session";
+
+/** #84 で名前を変える前の旧セッション Cookie。読まないが、login / logout で消す。 */
+export const LEGACY_SESSION_COOKIE = "tsb_session";
 
 export const API_KEY_PREFIX = "tsb_";
 

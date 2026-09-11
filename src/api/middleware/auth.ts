@@ -24,6 +24,19 @@ function clientIp(c: Ctx): string | null {
 	return c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? null;
 }
 
+// hono の Cookie パーサは同名 Cookie の先頭勝ちなので、セッション固定（#84）の重複を見抜けない。
+// 生の Cookie ヘッダを数え、同名のセッション Cookie が 2 つ以上あれば 401 にする。
+export function sessionToken(c: Ctx): string | null {
+	const raw = c.req.header("cookie") ?? "";
+	const prefix = `${SESSION_COOKIE}=`;
+	let count = 0;
+	for (const part of raw.split(";")) {
+		if (part.trim().startsWith(prefix)) count++;
+	}
+	if (count > 1) throw unauthorized();
+	return getCookie(c, SESSION_COOKIE) ?? null;
+}
+
 /** 「無効なキー」と「キーが無い」を呼ぶ側で区別できるよう、例外は投げず null を返す。 */
 export async function resolveRequestPrincipal(c: Ctx): Promise<Principal | null> {
 	const bearer = parseBearer(c.req.header("authorization"));
@@ -31,7 +44,7 @@ export async function resolveRequestPrincipal(c: Ctx): Promise<Principal | null>
 		return looksLikeApiKey(bearer) ? await principalFromApiKey(c, bearer) : null;
 	}
 
-	const cookie = getCookie(c, SESSION_COOKIE);
+	const cookie = sessionToken(c);
 	if (cookie) return await principalFromSession(c, cookie);
 
 	return null;

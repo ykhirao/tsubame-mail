@@ -27,6 +27,10 @@ jobs:
       - name: 依存をインストール
         run: npm ci
 
+      # dev 依存はビルドとテストにだけ使い、配布物に入らないので監査の門から外す。
+      - name: 実行時依存の脆弱性監査
+        run: npm audit --omit=dev --audit-level=high
+
       - name: 型検査
         run: npx tsc --noEmit
 

@@ -29,6 +29,21 @@ describe("sendMessageInput スキーマ", () => {
 		expect(sendMessageInput.safeParse({ ...baseInput, to: ok }).success).toBe(true);
 	});
 
+	it("to / cc / bcc の配列要素数に上限がある（#79）", () => {
+		const many = Array.from({ length: 101 }, (_, i) => `a${i}@b.jp`);
+		expect(sendMessageInput.safeParse({ ...baseInput, to: many }).success).toBe(false);
+		expect(sendMessageInput.safeParse({ ...baseInput, to: many.slice(0, 100) }).success).toBe(true);
+		expect(replyInput.safeParse({ cc: many }).success).toBe(false);
+		const ok = Array.from({ length: 100 }, (_, i) => `a${i}@b.jp`);
+		expect(replyInput.safeParse({ cc: ok }).success).toBe(true);
+	});
+
+	it("閉じない引用で parseAddressList 後の宛先が 0 件だと失敗する（#80）", () => {
+		const unclosed = '"open <a@x.jp>, b@c.jp';
+		expect(sendMessageInput.safeParse({ ...baseInput, to: unclosed }).success).toBe(false);
+		expect(sendMessageInput.safeParse({ ...baseInput, to: "a@b.jp" }).success).toBe(true);
+	});
+
 	it("配列の 1 要素にカンマ区切りで詰めても、要素数でなく実際の宛先数で数える（#22 再検査失敗）", () => {
 		const packedOver = [Array.from({ length: 101 }, (_, i) => `a${i}@b.jp`).join(", ")];
 		expect(sendMessageInput.safeParse({ ...baseInput, to: packedOver }).success).toBe(false);

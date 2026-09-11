@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { defaultColorFor } from "@/shared/colors";
-import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
 import { addresses, domains, messages } from "@/db/schema";
 import type { AppEnv } from "@/api/types";
+import { jsonIdsIn } from "@/domain/access/policy";
 import { ApiError, forbidden, invalidRequest, unauthorized } from "@/shared/errors";
 import { afterCursor, toPage } from "@/lib/paging";
 
@@ -64,7 +65,7 @@ app.get("/", async (c) => {
 		.innerJoin(domains, eq(addresses.domainId, domains.id))
 		.where(
 			and(
-				scoped ? inArray(addresses.id, scoped) : undefined,
+				scoped ? jsonIdsIn(addresses.id, scoped) : undefined,
 				includeArchived ? undefined : isNull(addresses.archivedAt),
 				afterCursor(addresses, cursor, "asc"),
 			),

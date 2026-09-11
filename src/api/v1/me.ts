@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
@@ -10,6 +10,7 @@ import { readJson, unixSeconds } from "@/lib/validate";
 import {
 	addressSetHas,
 	intersectAddressSets,
+	jsonIdsIn,
 	listAccessibleAddresses,
 	normalizeScopes,
 	recordAudit,
@@ -29,8 +30,19 @@ app.use("*", requireAuth);
 
 // 漏れた read/send キー 1 本で無期限の子キーを作られたり、他のキーを全部失効させられたりしないよう、
 // キー管理そのものは Cookie セッションか admin スコープ付きキーだけに絞る。
-function requireKeyManagement(principal: Principal): void {
-	if (principal.via === "session") return;
+async function requireKeyManagement(principal: Principal, db: Db): Promise<void> {
+	if (principal.via === "session") {
+		// 仮パスワードのままではキーを発行・失効できない（#64）。
+		const [user] = await db
+			.select({ mustChangePassword: schema.users.mustChangePassword })
+			.from(schema.users)
+			.where(eq(schema.users.id, principal.userId))
+			.limit(1);
+		if (user?.mustChangePassword) {
+			throw forbidden("パスワードを変更するまで API キーを発行・失効できません");
+		}
+		return;
+	}
 	if (principal.scopes.includes("admin")) return;
 	throw forbidden("キーの管理には admin スコープが必要です");
 }
@@ -87,6 +99,8 @@ app.patch("/", async (c) => {
 	if (!user) throw unauthorized();
 
 	const patch: { name?: string; passwordHash?: string; mustChangePassword?: boolean } = {};
+	let passwordChanged = false;
+	let revokedApiKeys = 0;
 	if (body.name) patch.name = body.name;
 
 	if (body.newPassword) {
@@ -106,10 +120,16 @@ app.patch("/", async (c) => {
 		// パスワードを変えたら他のセッションを落とす（自分の Cookie も含めて全部）。
 		// 漏れたキーがそのまま生きないよう、発行済みの API キーも失効させる（#99）。
 		await db.delete(schema.sessions).where(eq(schema.sessions.userId, user.id));
+		const [before] = await db
+			.select({ n: sql<number>`count(*)` })
+			.from(schema.apiKeys)
+			.where(and(eq(schema.apiKeys.userId, user.id), isNull(schema.apiKeys.revokedAt)));
 		await db
 			.update(schema.apiKeys)
 			.set({ revokedAt: new Date() })
 			.where(and(eq(schema.apiKeys.userId, user.id), isNull(schema.apiKeys.revokedAt)));
+		passwordChanged = true;
+		revokedApiKeys = Number(before?.n ?? 0);
 	}
 
 	return c.json({
@@ -117,7 +137,8 @@ app.patch("/", async (c) => {
 		email: user.email,
 		name: patch.name ?? user.name,
 		role: user.role,
-		passwordChanged: Boolean(patch.passwordHash),
+		passwordChanged,
+		revokedApiKeys,
 	});
 });
 
@@ -139,9 +160,9 @@ app.get("/api-keys", async (c) => {
 
 app.post("/api-keys", async (c) => {
 	const principal = getPrincipal(c);
-	requireKeyManagement(principal);
-	const body = await readJson(c.req, createApiKeyBody);
 	const db = c.get("db");
+	await requireKeyManagement(principal, db);
+	const body = await readJson(c.req, createApiKeyBody);
 
 	// 発行できる権限は **今のリクエストの権限まで**。
 	// これを principal 基準にしておくと、絞られたキーからさらに広いキーを作る抜け道が塞がる。
@@ -184,8 +205,8 @@ app.post("/api-keys", async (c) => {
 
 app.delete("/api-keys/:id", async (c) => {
 	const principal = getPrincipal(c);
-	requireKeyManagement(principal);
 	const db = c.get("db");
+	await requireKeyManagement(principal, db);
 	const id = c.req.param("id");
 
 	const [key] = await db
@@ -253,7 +274,7 @@ export async function assertAddressesExist(db: Db, ids: string[]): Promise<void>
 	const found = await db
 		.select({ id: schema.addresses.id })
 		.from(schema.addresses)
-		.where(inArray(schema.addresses.id, ids));
+		.where(jsonIdsIn(schema.addresses.id, ids));
 	const known = new Set(found.map((r) => r.id));
 	const missing = ids.filter((id) => !known.has(id));
 	if (missing.length > 0) throw invalidRequest(`存在しないアドレスです: ${missing.join(", ")}`);

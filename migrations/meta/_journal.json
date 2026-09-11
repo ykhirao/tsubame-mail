@@ -13,14 +13,28 @@
       "idx": 1,
       "version": "6",
       "when": 1788972355052,
-      "tag": "0001_add_address_color",
+      "tag": "0001_search_fts",
       "breakpoints": true
     },
     {
       "idx": 2,
       "version": "6",
       "when": 1788975026650,
-      "tag": "0002_add_must_change_password",
+      "tag": "0002_add_address_color",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1788976000000,
+      "tag": "0003_add_must_change_password",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788977000000,
+      "tag": "0004_fts_delete_triggers",
       "breakpoints": true
     }
   ]

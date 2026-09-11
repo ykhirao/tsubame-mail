@@ -31,19 +31,34 @@ export type ParsedMessage = {
 // postal-mime は encoded-word をデコードするので、Message-ID 系ヘッダに CRLF が混入しうる
 // （実害は無いが、返信生成時に assertNoLineBreak が throw して失敗する）。トークンをこの形に絞る。
 const MESSAGE_ID_TOKEN = /^[^\s<>\x00-\x1f\x7f]+$/;
+// CRLF で割れた断片（X-Inj など）を返信の References に出さないため、References / In-Reply-To は
+// 山括弧で囲まれた Message-ID 形式（中身は MESSAGE_ID_TOKEN かつ @ を含む）だけを残す（#72）。
+const REFERENCE_ID = /^<([^\s<>\x00-\x1f\x7f]+)>$/;
 
 function stripBrackets(value: string | undefined | null): string | null {
 	const t = value?.trim().replace(/^<|>$/g, "").trim();
 	return t && MESSAGE_ID_TOKEN.test(t) ? t : null;
 }
 
+function referenceToken(value: string | undefined | null): string | null {
+	if (!value) return null;
+	for (const token of value.split(/\s+/)) {
+		const m = REFERENCE_ID.exec(token);
+		const id = m?.[1];
+		if (id && id.includes("@")) return id;
+	}
+	return null;
+}
+
 function cleanReferences(ref: string | undefined | null): string | null {
 	if (!ref) return null;
-	const tokens = ref
-		.split(/\s+/)
-		.map((t) => t.replace(/^<|>$/g, "").trim())
-		.filter((t) => t && MESSAGE_ID_TOKEN.test(t));
-	return tokens.length > 0 ? tokens.join(" ") : null;
+	const ids: string[] = [];
+	for (const token of ref.split(/\s+/)) {
+		const m = REFERENCE_ID.exec(token);
+		const id = m?.[1];
+		if (id && id.includes("@")) ids.push(id);
+	}
+	return ids.length > 0 ? ids.join(" ") : null;
 }
 
 function toParsedAddress(a: { address?: string; name?: string }): ParsedAddress | null {
@@ -113,7 +128,7 @@ export async function parseRawMime(raw: Uint8Array | ArrayBuffer | string): Prom
 		subject: email.subject ?? null,
 		text: email.text ?? null,
 		html: email.html ?? null,
-		inReplyTo: stripBrackets(email.inReplyTo),
+		inReplyTo: referenceToken(email.inReplyTo),
 		references: cleanReferences(email.references),
 		date: parseDate(email.date, null),
 		snippet: buildSnippet(email.text, email.html),

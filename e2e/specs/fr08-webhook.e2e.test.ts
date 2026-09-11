@@ -4,6 +4,7 @@ import worker from "@/worker";
 import type { AnyQueueMessage } from "@/services/queue";
 import { scenario } from "../registry";
 import {
+	createClient,
 	deliverEmail,
 	drainQueues,
 	freshHarness,
@@ -207,5 +208,74 @@ describe("FR-8 Webhook", () => {
 		expect(list.body.next_cursor).toBeNull();
 		expect(list.body.data[0].secret).toBeUndefined();
 		expect(list.body.data[0].id).toBe(created.id);
+	});
+
+	async function memberAndKeyedOwner(): Promise<[Client, Client]> {
+		const memberCreate = await owner.post("/api/v1/admin/users", {
+			email: "member@tsubame.test",
+			name: "メンバー",
+			role: "member",
+			password: "member-pass-12345",
+		});
+		expect(memberCreate.status).toBe(201);
+		const member = createClient(h);
+		expect((await member.post("/api/v1/auth/login", {
+			email: "member@tsubame.test",
+			password: "member-pass-12345",
+		})).status).toBe(200);
+
+		const me = await owner.get("/api/v1/me");
+		const key = await owner.post("/api/v1/admin/api-keys", {
+			userId: me.body.id,
+			name: "read-send-owner",
+			scopes: ["read", "send"],
+			addressIds: null,
+		});
+		expect(key.status).toBe(201);
+		const keyed = createClient(h);
+		keyed.useKey(key.body.token);
+		return [member, keyed];
+	}
+
+	scenario("FR-8", "member セッションと admin 無しの owner キーでは webhook を作成・更新・削除できない", async () => {
+		const [member, keyed] = await memberAndKeyedOwner();
+
+		const created = await owner.post("/api/v1/webhooks", {
+			name: "既存フック",
+			url: "https://hook.example.com/tsubame",
+			events: ["message.received"],
+			enabled: true,
+		});
+		expect(created.status).toBe(201);
+		const webhookId = created.body.id;
+
+		const createBody = {
+			name: "権限の無い人が作るフック",
+			url: "https://hook.example.com/x",
+			events: ["message.received"],
+		};
+
+		for (const [label, client] of [
+			["member", member],
+			["owner read+send キー", keyed],
+		] as const) {
+			expect((await client.post("/api/v1/webhooks", createBody)).status, `${label} 作成`).toBe(403);
+			expect((await client.patch(`/api/v1/webhooks/${webhookId}`, { enabled: false })).status, `${label} 更新`).toBe(403);
+			expect((await client.del(`/api/v1/webhooks/${webhookId}`)).status, `${label} 削除`).toBe(403);
+		}
+
+		const still = await owner.get("/api/v1/webhooks");
+		expect(still.status).toBe(200);
+		expect(still.body.data[0].enabled).toBe(true);
+	});
+
+	scenario("FR-8", "不正な webhook 入力は 400", async () => {
+		for (const body of [
+			{ url: "https://hook.example.com/tsubame", events: ["message.received"] },
+			{ name: "name だけ", events: ["message.received"] },
+		]) {
+			const res = await owner.post("/api/v1/webhooks", body as Record<string, unknown>);
+			expect(res.status).toBe(400);
+		}
 	});
 });

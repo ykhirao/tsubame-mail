@@ -2,7 +2,7 @@
  * クエリは必ず `addressFilter()` で絞ること。`user_id` で直接絞ると、
  * 共有アドレスと API キーの address_ids がどちらも効かなくなる。
  */
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Column, SQL } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { schema } from "@/db/client";
@@ -138,15 +138,21 @@ export function isOwner(principal: Principal): boolean {
 	return principal.role === "owner" && hasScope(principal, "admin");
 }
 
+// id の数だけバインド変数を積む inArray は D1 の 100 個上限を越える（#57）。
+// 列の値を JSON 1 本で json_each に渡して比較する。空配列は何も一致しない（fail-closed）。
+export function jsonIdsIn(column: Column, ids: string[]): SQL {
+	return sql`${column} in (select value from json_each(${JSON.stringify(ids)}))`;
+}
+
 /** "all" では undefined を返す。そのまま `and(...)` に渡してよい。 */
 export function addressFilter(principal: Principal, column: Column): SQL | undefined {
 	if (principal.addressIds === "all") return undefined;
-	return inArray(column, principal.addressIds);
+	return jsonIdsIn(column, principal.addressIds);
 }
 
 export function writableAddressFilter(principal: Principal, column: Column): SQL | undefined {
 	if (principal.writableAddressIds === "all") return undefined;
-	return inArray(column, principal.writableAddressIds);
+	return jsonIdsIn(column, principal.writableAddressIds);
 }
 
 export async function listAccessibleAddresses(db: Db, principal: Principal) {

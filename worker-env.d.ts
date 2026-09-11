@@ -18,6 +18,7 @@ declare global {
 			OUTBOUND_QUEUE: Queue<OutboundQueueMessage>;
 			EMAIL: SendEmail;
 			LOGIN_RATE_LIMIT: RateLimit;
+			SEND_RATE_LIMIT: RateLimit;
 
 			/** Cloudflare API トークン（Zone / Email Routing / Email Sending）。Worker Secret。 */
 			CF_API_TOKEN?: string;

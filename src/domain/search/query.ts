@@ -18,9 +18,15 @@ export type SearchQuery = {
 };
 
 const OPERATOR_RE = /^(from|to|subject|body|since|until|is|has|in):/;
+// 語数が増えると LIKE の枝や FTS の式木が太くなり 500 になる（#88）。
+export const MAX_QUERY_CHARS = 500;
+export const MAX_FREE_WORDS = 10;
 
 export function parseSearchQuery(input: string | null | undefined): SearchQuery {
 	if (!input || !input.trim()) return { freeWords: [] };
+	if (Array.from(input).length > MAX_QUERY_CHARS) {
+		throw invalidRequest(`検索文字列が長すぎます（最大 ${MAX_QUERY_CHARS} 文字）`);
+	}
 	const q: SearchQuery = { freeWords: [] };
 	const s = input;
 	let i = 0;
@@ -46,6 +52,9 @@ export function parseSearchQuery(input: string | null | undefined): SearchQuery 
 		if (value) q.freeWords.push(value);
 	}
 
+	if (q.freeWords.length > MAX_FREE_WORDS) {
+		throw invalidRequest(`検索語が多すぎます（最大 ${MAX_FREE_WORDS} 語）`);
+	}
 	return q;
 }
 

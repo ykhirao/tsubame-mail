@@ -8,7 +8,6 @@ import {
 	desc,
 	eq,
 	exists,
-	inArray,
 	like,
 	ne,
 	sql,
@@ -18,6 +17,7 @@ import { addresses, messages, threads } from "@/db/schema";
 import type { Db } from "@/db/client";
 import type { Principal } from "@/shared/contracts/common";
 import type { MessageDirection, MessageStatus } from "@/shared/contracts/messages";
+import { jsonIdsIn } from "@/domain/access/policy";
 import { normalizeAddress } from "@/domain/mail/address";
 import { invalidRequest } from "@/shared/errors";
 import type { SearchQuery } from "./query";
@@ -99,22 +99,21 @@ function freeWordCondition(w: string): SQL {
 			  and mf.messages_fts match ${term}
 		)`;
 	}
+	// 5 列ずつ LIKE を張ると語数×5 のバインドを積み、relevance で二重に出て 100 を超える（#88）。
+	// 対象列を連結した 1 つの文字列と LIKE 1 本（1 バインド）にまとめる。列の間に制御文字を挟み、
+	// 件名の末尾と本文の先頭のような列の境目をまたいで一致しないようにする（検索語は空白で割るので含まない）。
 	const p = `%${w}%`;
-	return sql`(
-		${like(messages.subject, p)} or
-		${like(messages.textBody, p)} or
-		${like(messages.fromAddr, p)} or
-		${like(messages.toAddr, p)} or
-		${like(messages.ccAddr, p)}
-	)`;
+	const sep = sql`char(31)`;
+	const haystack = sql`(coalesce(${messages.subject}, '') || ${sep} || coalesce(${messages.textBody}, '') || ${sep} || coalesce(${messages.fromAddr}, '') || ${sep} || coalesce(${messages.toAddr}, '') || ${sep} || coalesce(${messages.ccAddr}, ''))`;
+	return sql`${haystack} like ${p}`;
 }
 
+// 入れ子にすると語数に比例して SQL の式木が深くなり（#88）、平坦な和にする。
 function relevanceScore(words: string[]): SQL {
-	let acc: SQL = sql`0`;
-	for (const w of words) {
-		acc = sql`(${acc} + (case when ${freeWordCondition(w)} then 1 else 0 end))`;
-	}
-	return acc;
+	return sql.join(
+		words.map((w) => sql`(case when ${freeWordCondition(w)} then 1 else 0 end)`),
+		sql` + `,
+	);
 }
 
 function cursorCondition(cur: { receivedAt: number; id: string }): SQL {
@@ -137,12 +136,16 @@ function buildMessageConditions(
 ): SQL[] {
 	const conds: SQL[] = [];
 	if (principal.addressIds !== "all") {
-		conds.push(inArray(messages.addressId, principal.addressIds));
+		conds.push(jsonIdsIn(messages.addressId, principal.addressIds));
 	}
 	const s = filters.search;
 	if (filters.addressId) conds.push(eq(messages.addressId, filters.addressId));
 	if (filters.direction) conds.push(eq(messages.direction, filters.direction));
-	if (filters.status) conds.push(eq(messages.status, filters.status));
+	if (filters.status) {
+		conds.push(eq(messages.status, filters.status));
+	} else {
+		conds.push(ne(messages.status, "trash"));
+	}
 	if (filters.threadId) conds.push(eq(messages.threadId, filters.threadId));
 	if (s.from) conds.push(like(messages.fromAddr, `%${s.from}%`));
 	if (s.to) conds.push(like(messages.toAddr, `%${s.to}%`));
@@ -227,13 +230,14 @@ export async function getMessage(
 	db: Db,
 	principal: Principal,
 	messageId: string,
-	withBody = false,
+	opts: { withBody?: boolean; includeTrash?: boolean } = {},
 ): Promise<MessageRow | null> {
 	const conds: SQL[] = [eq(messages.id, messageId)];
+	if (!opts.includeTrash) conds.push(ne(messages.status, "trash"));
 	if (principal.addressIds !== "all") {
-		conds.push(inArray(messages.addressId, principal.addressIds));
+		conds.push(jsonIdsIn(messages.addressId, principal.addressIds));
 	}
-	const columns = withBody
+	const columns = opts.withBody
 		? { ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody }
 		: listColumns;
 	return (await db.select(columns).from(messages).where(and(...conds)).get()) ?? null;
@@ -255,11 +259,14 @@ export type ThreadRow = {
 	isStarred: boolean;
 };
 
+export type ThreadView = "inbox" | "starred" | "sent" | "trash";
+
 export type ThreadListParams = {
 	principal: Principal;
 	addressId?: string;
 	limit: number;
 	cursor?: string;
+	view?: ThreadView;
 	/** 既定 false。true でゴミ箱しか持たないスレッドも返す。 */
 	includeTrash?: boolean;
 };
@@ -279,7 +286,7 @@ export async function queryThreads(
 ): Promise<{ rows: ThreadRow[]; nextCursor: string | null }> {
 	const conds: SQL[] = [];
 	if (params.principal.addressIds !== "all") {
-		conds.push(inArray(threads.addressId, params.principal.addressIds));
+		conds.push(jsonIdsIn(threads.addressId, params.principal.addressIds));
 	}
 	if (params.addressId) conds.push(eq(threads.addressId, params.addressId));
 	if (params.cursor) {
@@ -287,16 +294,24 @@ export async function queryThreads(
 		if (!cur) throw invalidRequest("カーソルが不正です");
 		conds.push(threadCursorCondition(cur));
 	}
-	if (!params.includeTrash) {
-		// メッセージが全てゴミ箱（drop ルールなど）のスレッドを受信箱に出さない（#92）。
-		conds.push(
-			exists(
-				db
-					.select({ one: sql`1` })
-					.from(messages)
-					.where(and(eq(messages.threadId, threads.id), ne(messages.status, "trash"))),
-			),
+	const view = params.view ?? "inbox";
+	const includeTrash = params.includeTrash === true || view === "trash";
+	const threadHas = (cond: SQL) =>
+		exists(
+			db
+				.select({ one: sql`1` })
+				.from(messages)
+				.where(and(eq(messages.threadId, threads.id), cond)),
 		);
+	if (view === "starred") {
+		conds.push(threadHas(eq(messages.isStarred, true)));
+	} else if (view === "sent") {
+		conds.push(threadHas(eq(messages.direction, "outbound")));
+	} else if (view === "trash") {
+		conds.push(threadHas(eq(messages.status, "trash")));
+	} else if (!includeTrash) {
+		// メッセージが全てゴミ箱（drop ルールなど）のスレッドを受信箱に出さない（#92）。
+		conds.push(threadHas(ne(messages.status, "trash")));
 	}
 	const where = conds.length > 0 ? and(...conds) : undefined;
 
@@ -315,7 +330,7 @@ export async function queryThreads(
 	if (hasMore && last) {
 		nextCursor = encodeCursor(toUnix(last.lastMessageAt), last.id);
 	}
-	return { rows: await withLastMessage(db, page, !params.includeTrash), nextCursor };
+	return { rows: await withLastMessage(db, page, !includeTrash), nextCursor };
 }
 
 // スレッドごとに 1 クエリ投げず、ページ分をまとめて引いて JS 側で最新を選ぶ。
@@ -330,7 +345,7 @@ async function withLastMessage(
 	const ids = page.map((t) => t.id);
 	if (ids.length === 0) return [];
 
-	const msgConds: SQL[] = [inArray(messages.threadId, ids)];
+	const msgConds: SQL[] = [jsonIdsIn(messages.threadId, ids)];
 	if (excludeTrash) msgConds.push(ne(messages.status, "trash"));
 	const rows = await db
 		.select({
@@ -351,7 +366,7 @@ async function withLastMessage(
 	const addressRows = await db
 		.select({ id: addresses.id, address: addresses.address, color: addresses.color })
 		.from(addresses)
-		.where(inArray(addresses.id, addressIds))
+		.where(jsonIdsIn(addresses.id, addressIds))
 		.all();
 	const addressById = new Map(addressRows.map((a) => [a.id, a]));
 
@@ -392,6 +407,14 @@ export async function getThread(
 	if (principal.addressIds !== "all" && !principal.addressIds.includes(row.addressId)) {
 		return null;
 	}
+	if (!includeTrash) {
+		const live = await db
+			.select({ one: sql`1` })
+			.from(messages)
+			.where(and(eq(messages.threadId, threadId), ne(messages.status, "trash")))
+			.get();
+		if (!live) return null;
+	}
 	const [withSummary] = await withLastMessage(db, [row], !includeTrash);
 	return withSummary ?? null;
 }
@@ -407,7 +430,7 @@ export async function queryThreadMessages(
 ): Promise<MessageRow[]> {
 	const conds: SQL[] = [eq(messages.threadId, threadId)];
 	if (principal.addressIds !== "all") {
-		conds.push(inArray(messages.addressId, principal.addressIds));
+		conds.push(jsonIdsIn(messages.addressId, principal.addressIds));
 	}
 	if (!includeTrash) conds.push(ne(messages.status, "trash"));
 	return db

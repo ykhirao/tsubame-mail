@@ -68,9 +68,9 @@ export function json(body: unknown): RequestInit {
 
 export function sessionCookie(res: Response): string {
 	const raw = res.headers.get("set-cookie") ?? "";
-	const m = /tsb_session=([^;]+)/.exec(raw);
-	if (!m) throw new Error(`set-cookie に tsb_session がない: ${raw}`);
-	return `tsb_session=${m[1]}`;
+	const m = /__Host-tsb_session=([^;]+)/.exec(raw);
+	if (!m) throw new Error(`set-cookie に __Host-tsb_session がない: ${raw}`);
+	return `__Host-tsb_session=${m[1]}`;
 }
 
 export async function resetDb() {

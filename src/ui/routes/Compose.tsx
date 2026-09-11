@@ -132,7 +132,10 @@ export function Compose() {
 				return looseAddressOf(a) !== fromKey && !isSelfAddress(a, from);
 			});
 			setReplyTo([original.fromAddr, ...others].join(", "));
-			setReplyCc(original.ccAddr ?? "");
+			// 既定の Cc も isSelfAddress で濾す（#78）。濾さないと box+promo@ が Cc 欄に見えたまま
+			// 送られ、画面とサーバ（dedupeRecipients が除く）の結果が食い違う。
+			const ccList = splitAddressCsv(original.ccAddr ?? "").filter((a) => !isSelfAddress(a, from));
+			setReplyCc(ccList.join(", "));
 		} else {
 			setReplyTo(original.fromAddr);
 			setReplyCc("");
@@ -278,7 +281,7 @@ export function Compose() {
 							className={underlineCls}
 						/>
 					</div>
-					{replyAll && (
+					{(replyAll || replyCc.trim() !== "") && (
 						<div className="flex items-center gap-2">
 							<span className={labelCls}>Cc</span>
 							<input

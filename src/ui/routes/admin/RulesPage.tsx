@@ -401,7 +401,8 @@ export function RulesPage() {
 				getAllPages<DomainSummary>("/api/v1/admin/domains"),
 				getAllPages<AdminAddress>("/api/v1/admin/addresses"),
 			]);
-			setRules(ruleList);
+			// why: 受信の判定は priority の高い順に当たるので、画面もその順で見せないと効くルールを読み違える。
+			setRules([...ruleList].sort((a, b) => b.priority - a.priority));
 			setDomains(domainList);
 			setAddresses(addressList);
 		} catch (e) {

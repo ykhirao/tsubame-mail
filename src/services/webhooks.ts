@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { messages, webhooks, webhookDeliveries } from "@/db/schema";
 import { newId } from "@/lib/id";
@@ -99,6 +99,20 @@ export async function dispatchMessageEvent(
 
 	await Promise.all(
 		targets.map(async (w) => {
+			// at-least-once の再配達で同じ Webhook・同じメッセージ・同じイベントの配信行が
+			// 既にあれば作らない。二重配信を防ぐ（精査 #77）。
+			const already = await db
+				.select({ id: webhookDeliveries.id })
+				.from(webhookDeliveries)
+				.where(
+					and(
+						eq(webhookDeliveries.webhookId, w.id),
+						eq(webhookDeliveries.event, event),
+						eq(webhookDeliveries.messageId, messageId),
+					),
+				)
+				.get();
+			if (already) return;
 			try {
 				const deliveryId = newId("delivery");
 				await db.insert(webhookDeliveries).values({
@@ -182,7 +196,9 @@ export async function runDelivery(
 			);
 			return;
 		}
-		// status が failed の delivery は手動再送の再チャレンジ。claim を無視して POST に進む。
+		// failed: キューが最終試行を重複配達しても受け手へ再 POST しない。手動再送は
+		// pending の delivery に attempt+1 を渡すので、この claim をまたいで POST に進むことはない（#118）。
+		return;
 	}
 
 	const started = Date.now();

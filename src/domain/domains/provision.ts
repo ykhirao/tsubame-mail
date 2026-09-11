@@ -399,16 +399,13 @@ export type CatchAllResult = {
 	catchAllAddress: string | null;
 };
 
-/**
- * ゾーンの catch-all は 1 本しかない。別のドメインが「有効」と記録している間に
- * 落とすと、そのドメインの受け皿に黙って届かなくなるので破壊を避ける。
- */
-export async function assertZoneCatchAllSafe(
+/** ゾーンの catch-all を持てるのは 1 ドメインだけ。同じ zoneId で他ドメインが有効ならその名前を返す。 */
+async function zoneCatchAllConflict(
 	db: Db,
 	params: { zoneId: string; domainId: string },
-): Promise<void> {
-	const others = await db
-		.select({ id: domains.id })
+): Promise<string | null> {
+	const other = await db
+		.select({ name: domains.name })
 		.from(domains)
 		.where(
 			and(
@@ -416,10 +413,19 @@ export async function assertZoneCatchAllSafe(
 				eq(domains.catchAllEnabled, true),
 				ne(domains.id, params.domainId),
 			),
-		);
-	if (others.length > 0) {
+		)
+		.limit(1);
+	return other[0]?.name ?? null;
+}
+
+export async function assertZoneCatchAllSafe(
+	db: Db,
+	params: { zoneId: string; domainId: string },
+): Promise<void> {
+	const other = await zoneCatchAllConflict(db, params);
+	if (other) {
 		throw conflict(
-			"このゾーンでは別のドメインが catch-all を有効にしています。ゾーン単位の catch-all は 1 本しかないので、先にそちらを無効化してください。",
+			`このゾーンでは別のドメインが catch-all を有効にしています（${other}）。先に ${other} の catch-all を無効にしてください。`,
 		);
 	}
 }
@@ -428,7 +434,14 @@ export async function setCatchAll(params: {
 	db: Db;
 	api: CloudflareApi;
 	env: ProvisionEnv;
-	domain: { id: string; name: string; zoneId: string; zoneName: string; mode: string };
+	domain: {
+		id: string;
+		name: string;
+		zoneId: string;
+		zoneName: string;
+		mode: string;
+		catchAllEnabled: boolean;
+	};
 	enabled: boolean;
 }): Promise<CatchAllResult> {
 	const { db, api, env, domain, enabled } = params;
@@ -445,8 +458,21 @@ export async function setCatchAll(params: {
 				"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
 			);
 		}
-	} else {
 		await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
+	} else if (!domain.catchAllEnabled) {
+		// 自分の行が「有効」を握っていなければ、そのゾーンで他ドメインが握っている間は落とさない（#85）。
+		await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
+	} else if (await zoneCatchAllConflict(db, { zoneId: domain.zoneId, domainId: domain.id })) {
+		// 修正前のデータで同じゾーンの 2 ドメインが両方「有効」になっていると、ゾーンに 1 本の CF の
+		// catch-all を落とした瞬間に残った側が「有効」表示のまま届かなくなる（#85 と同じ食い違い）。
+		// 残る側がいる間は CF に触らず、自分の記録だけ下ろして持ち主を 1 つに減らす（#117）。
+		await db.update(domains).set({ catchAllEnabled: false }).where(eq(domains.id, domain.id));
+		return {
+			domainId: domain.id,
+			enabled: false,
+			warning: CATCH_ALL_WARNING,
+			catchAllAddress: catchAllAddress?.address ?? null,
+		};
 	}
 
 	await api.updateCatchAllRule(zone, {

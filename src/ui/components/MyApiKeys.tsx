@@ -13,9 +13,17 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 	const [busy, setBusy] = useState(false);
 
 	const load = useCallback(async () => {
+		// 失効済みキーを画面側で除くので、25 件の 1 ページだけ読むと失効キー 1 本で
+		// 26 本目以降の有効キーが表示されず失効もできなくなる（#65）。 next_cursor を辿って全ページ読む。
 		try {
-			const res = await MyKeysApi.list();
-			setKeys(res.data.filter((k) => !k.revokedAt));
+			const out: MyApiKey[] = [];
+			let cursor: string | null = null;
+			do {
+				const res = await MyKeysApi.list(cursor ? { cursor } : {});
+				out.push(...res.data);
+				cursor = res.next_cursor;
+			} while (cursor);
+			setKeys(out.filter((k) => !k.revokedAt));
 		} catch {
 			/* 一覧が取れなくても発行はできる */
 		}

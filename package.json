@@ -54,9 +54,5 @@
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.130.0"
-  },
-  "allowScripts": {
-    "workerd@1.20260815.1": true,
-    "workerd@1.20260908.1": true
   }
 }

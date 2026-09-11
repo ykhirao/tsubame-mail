@@ -1,11 +1,12 @@
 // 同じジョブを二重に送らない。claim できなかった（queued でも、期限切れの sending でもない）
 // ジョブは何もせず返す。
-import { and, eq, lt, or } from "drizzle-orm";
+import { and, eq, lt, or, sql } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { attachments, messages, outboundJobs } from "@/db/schema";
+import { addresses, attachments, messages, outboundJobs } from "@/db/schema";
 import type { OutboundSendMessage } from "@/services/queue";
 import { dispatchMessageEvent } from "@/services/webhooks";
 import { bytesToBase64, parseMailboxes, sendRawEmail } from "@/services/sender";
+import { normalizeAddress } from "./address";
 import { composeMime, generateMessageId, type ComposeAttachment } from "./compose";
 
 export const OUTBOUND_BACKOFF_SECONDS = [10, 60, 300] as const;
@@ -25,6 +26,23 @@ export function isRetryExhausted(attempts: number): boolean {
 	return attempts > OUTBOUND_MAX_ATTEMPTS;
 }
 
+// 送信できない恒久状態（アーカイブ済み・エイリアス・回数上限）は再試行しても同じなので
+// 一括でメッセージとジョブを failed に落とし、Webhook を発火させる。
+async function failOutbound(
+	db: ReturnType<typeof getDb>,
+	env: CloudflareEnv,
+	jobId: string,
+	messageId: string,
+	lastError: string,
+): Promise<void> {
+	await db.update(messages).set({ status: "failed" }).where(eq(messages.id, messageId));
+	await db
+		.update(outboundJobs)
+		.set({ status: "failed", lastError })
+		.where(eq(outboundJobs.id, jobId));
+	await dispatchMessageEvent(env, "message.failed", messageId);
+}
+
 export async function processOutboundSend(
 	msg: OutboundSendMessage,
 	env: CloudflareEnv,
@@ -39,7 +57,13 @@ export async function processOutboundSend(
 	// 期限を過ぎた行は、同じ job の再配達（キューは at-least-once）が来たときに拾い直す。
 	const claimed = await db
 		.update(outboundJobs)
-		.set({ status: "sending", nextAttemptAt: new Date(now.getTime() + SENDING_STUCK_SECONDS * 1000) })
+		.set({
+			status: "sending",
+			nextAttemptAt: new Date(now.getTime() + SENDING_STUCK_SECONDS * 1000),
+			// 期限切れの sending の拾い直しでも試行回数を数える。数えないと attempts が上限の
+			// 固まった job を再配達のたびに送り続ける（精査 #59）。
+			attempts: sql`${outboundJobs.attempts} + 1`,
+		})
 		.where(
 			and(
 				eq(outboundJobs.id, msg.jobId),
@@ -74,6 +98,31 @@ export async function processOutboundSend(
 		.get();
 	if (!message) return;
 
+	// 試行回数の上限に達した job は送らず failed にする（#59）。
+	if (isRetryExhausted(job.attempts)) {
+		await failOutbound(db, env, job.id, message.id, "送信試行回数の上限に達しました");
+		return;
+	}
+
+	// キュー投入の後に差出人がアーカイブ・エイリアス化されても送信しない（精査 #67）。
+	// assertCanSend と同じ判定を配信直前にも掛ける。
+	const fromNorm = normalizeAddress(message.fromAddr);
+	const sender = fromNorm
+		? await db
+				.select({ kind: addresses.kind, archivedAt: addresses.archivedAt })
+				.from(addresses)
+				.where(eq(addresses.address, fromNorm))
+				.get()
+		: null;
+	if (sender?.archivedAt) {
+		await failOutbound(db, env, job.id, message.id, "差出人アドレスがアーカイブされています");
+		return;
+	}
+	if (sender?.kind === "alias") {
+		await failOutbound(db, env, job.id, message.id, "差出人アドレスがエイリアス化されています");
+		return;
+	}
+
 	let raw: string;
 	try {
 		const attachRows = await db
@@ -84,7 +133,10 @@ export async function processOutboundSend(
 		const attachList: ComposeAttachment[] = [];
 		for (const a of attachRows) {
 			const obj = await env.BUCKET.get(a.r2Key);
-			const buf = obj ? new Uint8Array(await obj.arrayBuffer()) : new Uint8Array(0);
+			// R2 から添付が消えていると空 0 バイトの添付を黙って送ってしまう（精査 #102）。
+			// 見つからなければ throw して再試行させ、上限に達したら failed にする。
+			if (!obj) throw new Error(`添付データが見つかりません: ${a.filename}`);
+			const buf = new Uint8Array(await obj.arrayBuffer());
 			attachList.push({
 				filename: a.filename,
 				contentType: a.contentType,
@@ -124,20 +176,12 @@ export async function processOutboundSend(
 			raw,
 		});
 	} catch (err) {
-		const attempts = job.attempts + 1;
+		const attempts = job.attempts;
 		const lastError = err instanceof Error ? err.message : String(err);
 		console.error("送信に失敗", { jobId: job.id, attempts, lastError });
 
 		if (isRetryExhausted(attempts)) {
-			await db
-				.update(messages)
-				.set({ status: "failed" })
-				.where(eq(messages.id, message.id));
-			await db
-				.update(outboundJobs)
-				.set({ status: "failed", attempts, lastError })
-				.where(eq(outboundJobs.id, job.id));
-			await dispatchMessageEvent(env, "message.failed", message.id);
+			await failOutbound(db, env, job.id, message.id, lastError);
 			return;
 		}
 

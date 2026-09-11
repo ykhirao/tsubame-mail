@@ -1,11 +1,11 @@
 import { Hono } from "hono";
-import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
 import { newId } from "@/lib/id";
 import { generateTemporaryPassword, hashPassword } from "@/lib/password";
 import { readJson, unixSeconds } from "@/lib/validate";
 import { afterCursor, toPage } from "@/lib/paging";
-import { recordAudit } from "@/domain/access/policy";
+import { jsonIdsIn, recordAudit } from "@/domain/access/policy";
 import {
 	adminUserListQuery,
 	createUserBody,
@@ -249,7 +249,7 @@ app.put("/:id/grants", async (c) => {
 		const found = await db
 			.select({ id: schema.addresses.id })
 			.from(schema.addresses)
-			.where(inArray(schema.addresses.id, wanted.map((g) => g.addressId)));
+			.where(jsonIdsIn(schema.addresses.id, wanted.map((g) => g.addressId)));
 		const known = new Set(found.map((r) => r.id));
 		const missing = wanted.filter((g) => !known.has(g.addressId)).map((g) => g.addressId);
 		if (missing.length > 0) throw invalidRequest(`存在しないアドレスです: ${missing.join(", ")}`);
@@ -257,9 +257,17 @@ app.put("/:id/grants", async (c) => {
 
 	await db.delete(schema.addressGrants).where(eq(schema.addressGrants.userId, id));
 	if (wanted.length > 0) {
-		await db
-			.insert(schema.addressGrants)
-			.values(wanted.map((g) => ({ userId: id, addressId: g.addressId, level: g.level })));
+		// 1 文に全件の 3 列積むとバインドが 100 を超える（#57）。30 件=90 バインドずつに割る。
+		const CHUNK = 30;
+		const insertBatches: any[] = [];
+		for (let i = 0; i < wanted.length; i += CHUNK) {
+			insertBatches.push(
+				db.insert(schema.addressGrants).values(
+					wanted.slice(i, i + CHUNK).map((g) => ({ userId: id, addressId: g.addressId, level: g.level })),
+				),
+			);
+		}
+		await db.batch(insertBatches as unknown as Parameters<typeof db.batch>[0]);
 	}
 
 	await recordAudit(db, {

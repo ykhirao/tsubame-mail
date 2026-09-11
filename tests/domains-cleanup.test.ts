@@ -153,7 +153,7 @@ describe("cleanupDomain", () => {
 		expect(result.removedDnsRecords.sort()).toEqual(["MX mail.example.com", "TXT mail.example.com"]);
 		expect(fake.dnsRecords.map((r) => r.id).sort()).toEqual(["apex-mx", "dmarc", "web-a"]);
 
-		expect(result.skippedDnsRecords.sort()).toEqual(["A mail.example.com", "TXT _dmarc.mail.example.com"]);
+		expect(result.skippedDnsRecords.sort()).toEqual(["A mail.example.com"]);
 		expect(result.failures).toEqual([]);
 		expect(result.catchAllDisabled).toBe(false);
 	});
@@ -222,5 +222,24 @@ describe("cleanupDomain", () => {
 			"TXT example.com",
 		]);
 		expect(fake.dnsRecords.map((r) => r.id).sort()).toEqual(["other-mx", "sub-dkim", "sub-mx", "sub-spf"]);
+	});
+
+	it("サブドメイン切断で配下の別接続の MX / TXT を消さない（#60）", async () => {
+		// mail.example.com を切断するときに、配下の deep.mail.example.com のメール用 DNS を巻き込まない。
+		const subTarget = { ...target, name: "mail.example.com" };
+		const fake = createFakeCloudflare({
+			zones: [{ id: "zone1", name: "example.com" }],
+			dnsRecords: [
+				{ id: "mine-mx", type: "MX", name: "mail.example.com", content: "route1.mx.cloudflare.net" },
+				{ id: "mine-dkim", type: "TXT", name: "cf-bounce._domainkey.mail.example.com", content: "v=DKIM1; p=AAA" },
+				{ id: "deep-mx", type: "MX", name: "deep.mail.example.com", content: "route1.mx.cloudflare.net" },
+				{ id: "deep-spf", type: "TXT", name: "deep.mail.example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+			],
+		});
+
+		const result = await cleanupDomain(new CloudflareApi(testEnv, { fetch: fake.fetch }), subTarget);
+
+		expect(result.removedDnsRecords.sort()).toEqual(["MX mail.example.com", "TXT cf-bounce._domainkey.mail.example.com"]);
+		expect(fake.dnsRecords.map((r) => r.id).sort()).toEqual(["deep-mx", "deep-spf"]);
 	});
 });

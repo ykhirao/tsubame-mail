@@ -13,6 +13,9 @@ import { afterCursor, toPage } from "@/lib/paging";
 import { defaultColorFor } from "@/shared/colors";
 import { createCloudflareApi } from "@/services/cloudflare-api";
 import { requireOwner } from "@/api/middleware/auth";
+import { clientIp, getPrincipal } from "@/api/middleware/auth";
+import { readJson } from "@/lib/validate";
+import { recordAudit } from "@/domain/access/policy";
 import type { AppEnv } from "@/api/types";
 import { paginationQuery } from "@/shared/contracts/common";
 import {
@@ -33,18 +36,6 @@ app.onError((err, c) => {
 	console.error("unhandled error", err);
 	return c.json({ error: { code: "internal", message: "内部エラーが発生しました" } }, 500);
 });
-
-async function readBody<T extends z.ZodType>(c: Context<AppEnv>, schema: T): Promise<z.infer<T>> {
-	let raw: unknown;
-	try {
-		raw = await c.req.json();
-	} catch {
-		throw invalidRequest("JSON の本文が必要です");
-	}
-	const parsed = schema.safeParse(raw);
-	if (!parsed.success) throw invalidRequest("入力が不正です", z.treeifyError(parsed.error));
-	return parsed.data;
-}
 
 const toSeconds = (value: Date | null | undefined): number | null =>
 	value ? Math.floor(value.getTime() / 1000) : null;
@@ -121,7 +112,7 @@ app.get("/", async (c) => {
 });
 
 app.post("/", async (c) => {
-	const input = await readBody(c, createAddressInput);
+	const input = await readJson(c.req, createAddressInput);
 	const db = c.get("db");
 
 	const domain = await db.query.domains.findFirst({ where: eq(domains.id, input.domainId) });
@@ -139,6 +130,10 @@ app.post("/", async (c) => {
 		if (!target) throw invalidRequest("aliasTargetId のアドレスが見つかりません");
 		if (target.kind === "alias") {
 			throw invalidRequest("エイリアスのエイリアスは作れません。実在のメールボックスを指定してください。");
+		}
+		// エイリアス先は同じドメインに限る。越境させると向き先ドメインの削除で宙に浮く。（#61・API 側）
+		if (target.domainId !== domain.id) {
+			throw invalidRequest("エイリアス先は同じドメインのアドレスを指定してください");
 		}
 	}
 
@@ -181,6 +176,22 @@ app.post("/", async (c) => {
 	const row = await db.query.addresses.findFirst({ where: eq(addresses.id, id) });
 	if (!row) throw notFound("作成したアドレスを読み直せませんでした");
 
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "address.create",
+		targetType: "address",
+		targetId: id,
+		meta: {
+			address,
+			localPart: input.localPart,
+			domainId: domain.id,
+			kind: input.kind,
+			aliasTargetId: input.kind === "alias" ? (input.aliasTargetId ?? null) : null,
+			isCatchAll: input.isCatchAll,
+		},
+		ip: clientIp(c),
+	});
+
 	return c.json({ data: { ...present(row, domain.name, null), routingRuleId } }, 201);
 });
 
@@ -207,7 +218,7 @@ app.get("/:id", async (c) => {
 
 app.patch("/:id", async (c) => {
 	const { row, domain } = await loadAddress(c, c.req.param("id"));
-	const input = await readBody(c, updateAddressInput);
+	const input = await readJson(c.req, updateAddressInput);
 	const db = c.get("db");
 
 	const nextKind = input.kind ?? row.kind;
@@ -222,6 +233,9 @@ app.patch("/:id", async (c) => {
 		});
 		if (!target) throw invalidRequest("aliasTargetId のアドレスが見つかりません");
 		if (target.kind === "alias") throw invalidRequest("エイリアスのエイリアスは作れません");
+		if (target.domainId !== row.domainId) {
+			throw invalidRequest("エイリアス先は同じドメインのアドレスを指定してください");
+		}
 
 		// 自分をエイリアス先にしている行があると、そちらが宛先の無いエイリアスになる（連鎖）。
 		if (row.kind !== "alias") {
@@ -267,6 +281,20 @@ app.patch("/:id", async (c) => {
 
 	const updated = await db.query.addresses.findFirst({ where: eq(addresses.id, row.id) });
 	if (!updated) throw notFound("更新したアドレスを読み直せませんでした");
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "address.update",
+		targetType: "address",
+		targetId: row.id,
+		meta: {
+			address: row.address,
+			kind: nextKind,
+			aliasTargetId: nextKind === "alias" ? nextAliasTargetId : null,
+			isCatchAll: input.isCatchAll ?? row.isCatchAll,
+			archived: input.archived,
+		},
+		ip: clientIp(c),
+	});
 	return c.json({ data: present(updated, domain.name, null) });
 });
 
@@ -289,6 +317,15 @@ app.delete("/:id", async (c) => {
 	});
 
 	await db.delete(addresses).where(eq(addresses.id, row.id));
+
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "address.delete",
+		targetType: "address",
+		targetId: row.id,
+		meta: { address: row.address, domainId: row.domainId, kind: row.kind },
+		ip: clientIp(c),
+	});
 
 	return c.json({
 		data: { id: row.id, deleted: true, routingRuleRemoved: removed },

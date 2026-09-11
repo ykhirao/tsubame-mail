@@ -26,6 +26,7 @@ function formatListDate(unixSec: number): string {
 export function Inbox() {
 	const [searchParams] = useSearchParams();
 	const selected = searchParams.get("address") ?? "";
+	const view = searchParams.get("view") ?? "inbox";
 
 	const [threads, setThreads] = useState<ThreadListItem[]>([]);
 	const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -45,6 +46,9 @@ export function Inbox() {
 		try {
 			const res = await ThreadsApi.list({
 				...(selected ? { address: selected } : {}),
+				...(view !== "inbox"
+					? { view: view as "starred" | "sent" | "trash" }
+					: {}),
 				limit: PAGE,
 				cursor,
 			});
@@ -59,7 +63,7 @@ export function Inbox() {
 			setLoading(false);
 			setLoadingMore(false);
 		}
-	}, [selected]);
+	}, [selected, view]);
 
 	/**
 	 * スターはメッセージ側に付くので、スレッドの最新 1 件を代表として更新する。
@@ -81,13 +85,26 @@ export function Inbox() {
 		void fetchThreads();
 	}, [fetchThreads]);
 
+	const VIEW_TITLES: Record<string, string> = {
+		inbox: "受信箱",
+		starred: "スター付き",
+		sent: "送信済み",
+		trash: "ゴミ箱",
+	};
+
 	return (
 		<div className="flex flex-1 flex-col">
 			<section className="card overflow-hidden">
 				{loading ? (
 					<Spinner />
 				) : threads.length === 0 ? (
-					<EmptyState title="メールがありません">
+					<EmptyState
+						title={
+							view === "inbox"
+								? "メールがありません"
+								: `${VIEW_TITLES[view] ?? "この一覧"}のメールがありません`
+						}
+					>
 						{selected
 							? "このメールボックスにはまだ届いていません"
 							: "すべてのメールボックスを見ています"}
@@ -100,7 +117,7 @@ export function Inbox() {
 								return (
 									<li key={t.id}>
 										<Link
-											to={`/threads/${t.id}`}
+											to={`/threads/${t.id}${view === "trash" ? "?view=trash" : ""}`}
 											className={`flex min-h-11 items-center gap-3 px-4 py-1.5 transition-colors hover:bg-[var(--surface-hover)] hover:shadow-sm ${
 												unread
 													? "bg-[var(--surface)] font-semibold text-[var(--text)]"

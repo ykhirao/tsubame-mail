@@ -80,20 +80,35 @@ export async function findExistingThreadId(db: Db, refs: ThreadRefs): Promise<st
 	return anchor?.threadId ?? null;
 }
 
+/** 件数 1・未読 unreadCount で初期化する。message と同じ batch に入れて確定させる（#77）。 */
+export function createThreadStatement(
+	db: Db,
+	opts: {
+		id: string;
+		addressId: string;
+		subject: string | null;
+		lastMessageAt: Date;
+		messageCount?: number;
+		unreadCount?: number;
+	},
+) {
+	return db.insert(threads).values({
+		id: opts.id,
+		addressId: opts.addressId,
+		subject: opts.subject,
+		lastMessageAt: opts.lastMessageAt,
+		messageCount: opts.messageCount ?? 1,
+		unreadCount: opts.unreadCount ?? 1,
+	});
+}
+
 /** 件数 1・未読 1 で初期化するので、呼び出し側で足さないこと。 */
 export async function createThread(
 	db: Db,
 	opts: { addressId: string; subject: string | null; lastMessageAt: Date },
 ): Promise<string> {
 	const id = newId("thread");
-	await db.insert(threads).values({
-		id,
-		addressId: opts.addressId,
-		subject: opts.subject,
-		lastMessageAt: opts.lastMessageAt,
-		messageCount: 1,
-		unreadCount: 1,
-	});
+	await createThreadStatement(db, { id, ...opts });
 	return id;
 }
 
@@ -101,12 +116,12 @@ export async function createThread(
  * 日付を偽装した古い返信でスレッドを沈められないよう、lastMessageAt は後退させない。
  * `integer(mode: "timestamp")` は秒で格納するので、生 SQL に混ぜる値も秒に合わせる。
  */
-export async function updateThreadStats(
+export function updateThreadStatsStatement(
 	db: Db,
 	opts: { threadId: string; lastMessageAt: Date; unreadDelta: number },
-): Promise<void> {
+) {
 	const lastMessageAtSec = Math.floor(opts.lastMessageAt.getTime() / 1000);
-	await db
+	return db
 		.update(threads)
 		.set({
 			lastMessageAt: sql`max(${threads.lastMessageAt}, ${lastMessageAtSec})`,
@@ -114,6 +129,13 @@ export async function updateThreadStats(
 			unreadCount: sql`${threads.unreadCount} + ${opts.unreadDelta}`,
 		})
 		.where(eq(threads.id, opts.threadId));
+}
+
+export async function updateThreadStats(
+	db: Db,
+	opts: { threadId: string; lastMessageAt: Date; unreadDelta: number },
+): Promise<void> {
+	await updateThreadStatsStatement(db, opts);
 }
 
 /** 0 未満にはならないよう丸める。 */

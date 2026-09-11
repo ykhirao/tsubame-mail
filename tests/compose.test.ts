@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import PostalMime from "postal-mime";
 import {
 	buildReplyQuote,
 	quoteHeader,
@@ -8,6 +9,8 @@ import {
 	referencesFor,
 	stripHtml,
 } from "@/domain/mail/quote";
+import { composeMime } from "@/domain/mail/compose";
+import { formatAddress } from "@/domain/mail/address";
 
 const src = {
 	fromName: "山田太郎",
@@ -106,6 +109,42 @@ describe("stripHtml", () => {
 	});
 });
 
+describe("composeMime の To 行（長い表示名 #66）", () => {
+	function toLine(raw: string): string {
+		const block = raw.split(/\r?\n\r?\n/)[0]!;
+		return block.split(/\r?\n(?=[A-Za-z-]+:)/).find((l) => l.startsWith("To:"))!;
+	}
+
+	it("受信由来の 1000 バイト超の表示名でも To 行が 998 文字に収まる", () => {
+		const longName = "あ".repeat(1000); // 3000 バイト
+		const raw = composeMime({
+			messageId: "msg_1",
+			fromAddr: "me@example.com",
+			toAddr: `${formatAddress({ address: "a@b.jp", name: longName })}, b@c.jp`,
+			subject: "件名",
+			textBody: "本文",
+		});
+		const line = toLine(raw);
+		expect(line.length).toBeLessThanOrEqual(998);
+		// 表示名は落ち、アドレスは残る。
+		expect(line).toContain("<a@b.jp>");
+	});
+
+	it("通常の長さの表示名は保持される", () => {
+		const raw = composeMime({
+			messageId: "msg_1",
+			fromAddr: "me@example.com",
+			toAddr: `${formatAddress({ address: "a@b.jp", name: "山田 太郎" })}, b@c.jp`,
+			subject: "件名",
+			textBody: "本文",
+		});
+		const line = toLine(raw);
+		expect(line.length).toBeLessThanOrEqual(998);
+		// 名前は mimetext が base64 の encoded-word で入る（落ちていない）。
+		expect(line).toContain("=?utf-8?B?");
+	});
+});
+
 describe("quoteHtml", () => {
 	it("blockquote で包み、ヘッダは改行タグにする", () => {
 		const h = quoteHtml("2026年9月9日 12:34 <a@b.jp>:", "<p>こんにちは</p>");
@@ -114,3 +153,43 @@ describe("quoteHtml", () => {
 		expect(h).toContain("<p>こんにちは</p>");
 	});
 });
+
+describe("composeMime の添付ファイル名（#119）", () => {
+	it("非 ASCII のファイル名は生 UTF-8 ヘッダにならず、読み戻すと復元される", async () => {
+		const raw = composeMime(
+			{
+				messageId: "msg_1",
+				fromAddr: "me@example.com",
+				toAddr: "a@b.jp",
+				subject: "件名",
+				textBody: "本文",
+			},
+			[{ filename: "レポ\"ート;x.pdf", contentType: "application/pdf", base64: "aGk=" }],
+		);
+		// ヘッダ部に 0x80 以上のバイトが無い。
+		const header = raw.split(/\r?\n\r?\n/)[0]!;
+		for (const ch of header) {
+			expect(ch.charCodeAt(0)).toBeLessThan(0x80);
+		}
+		expect(raw).not.toContain("name=\"レポ");
+		// RFC 2231（filename*=UTF-8''…）を読み戻すと元のファイル名になる。
+		const parsed = await new PostalMime().parse(raw);
+		expect(parsed.attachments[0]?.filename).toBe("レポ\"ート;x.pdf");
+	});
+
+	it("ASCII のファイル名は従来どおり name=/filename= に入り、壊れない", () => {
+		const raw = composeMime(
+			{
+				messageId: "msg_1",
+				fromAddr: "me@example.com",
+				toAddr: "a@b.jp",
+				subject: "件名",
+				textBody: "本文",
+			},
+			[{ filename: "report(1).pdf", contentType: "application/pdf", base64: "aGk=" }],
+		);
+		expect(raw).toContain('name="report(1).pdf"');
+		expect(raw).toContain('filename="report(1).pdf"');
+	});
+});
+

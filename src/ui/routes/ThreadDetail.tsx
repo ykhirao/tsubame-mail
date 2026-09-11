@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import type { MessageDetail } from "@/shared/contracts/messages";
 import { MessagesApi, ThreadsApi } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
@@ -32,6 +32,8 @@ function initialOf(m: MessageDetail): string {
 export function ThreadDetail() {
 	const { id } = useParams();
 	const navigate = useNavigate();
+	const [searchParams] = useSearchParams();
+	const includeTrash = searchParams.get("view") === "trash";
 	const [messages, setMessages] = useState<MessageDetail[] | null>(null);
 	const [subject, setSubject] = useState<string | null>(null);
 	const [notFound, setNotFound] = useState(false);
@@ -40,7 +42,7 @@ export function ThreadDetail() {
 	useEffect(() => {
 		if (!id) return;
 		let alive = true;
-		ThreadsApi.get(id)
+		ThreadsApi.get(id, { includeTrash })
 			.then((t) => {
 				if (!alive) return;
 				setSubject(t.subject);
@@ -54,7 +56,7 @@ export function ThreadDetail() {
 		return () => {
 			alive = false;
 		};
-	}, [id]);
+	}, [id, includeTrash]);
 
 	const markLocalRead = useCallback((msgs: MessageDetail[]) => {
 		setMessages((prev) =>

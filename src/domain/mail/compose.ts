@@ -39,7 +39,10 @@ export function generateMessageId(messageId: string, fromAddr: string): string {
 export function toMailboxObjects(csv: string): { addr: string; name?: string }[] {
 	return parseAddressList(csv).map((a) => {
 		assertNoLineBreak("宛先アドレス", a.address);
-		return a.name ? { addr: a.address, name: a.name } : { addr: a.address };
+		// 表示名が長すぎると base64 化した To 行が RFC 5322 の 998 文字を超える（精査 #66）。
+		// 超える分は表示名を落としてアドレスだけで出す。
+		if (!a.name || !displayNameFitsLine(a.name, a.address)) return { addr: a.address };
+		return { addr: a.address, name: a.name };
 	});
 }
 
@@ -47,6 +50,16 @@ export function toMailboxObjects(csv: string): { addr: string; name?: string }[]
 // 改行が 1 つ混ざるだけで任意のヘッダや本文を差し込まれる。
 function assertNoLineBreak(label: string, value: string): void {
 	if (/[\r\n\0]/.test(value)) throw new Error(`${label}に改行を含められません`);
+}
+
+// mimetext は宛先をエンコードした 1 行ごとに折り返す。表示名は base64 化で 4/3 に膨らむので、
+// 「To: =?utf-8?B?...?= <addr>」1 行が 998 文字に収まるか、表示名の分だけで判定する。
+const TO_LINE_BUDGET = 900;
+function displayNameFitsLine(name: string, addr: string): boolean {
+	const nameBytes = new TextEncoder().encode(name).length;
+	const addrLen = new TextEncoder().encode(addr).length;
+	const encodedName = `=?utf-8?B?`.length + Math.ceil(nameBytes / 3) * 4 + `?=`.length;
+	return encodedName + addrLen <= TO_LINE_BUDGET;
 }
 
 /**
@@ -74,6 +87,19 @@ export function formatMessageIdList(
 // mimetext は filename を `filename="..."` にそのまま埋める。
 function quotedStringContent(value: string): string {
 	return value.replace(/[\\"]/g, "\\$&");
+}
+
+// 非 ASCII のファイル名を RFC 2231 の filename* パラメータにする。
+// addAttachment は name=/filename= に値を素通しし、8bit のヘッダ行になる。unreserved 以外を %XX で
+// 符号化するので `"` / `;` が混ざっても壊れない（#119）。
+function rfc2231Param(value: string): string {
+	const SAFE = /[A-Za-z0-9\-._~]/;
+	let out = "UTF-8''";
+	for (const b of new TextEncoder().encode(value)) {
+		const ch = String.fromCharCode(b);
+		out += SAFE.test(ch) ? ch : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+	}
+	return out;
 }
 
 // mimetext はヘッダを折り返さない。RFC 5322 は 1 行 998 文字までなので、
@@ -174,11 +200,17 @@ export function composeMime(
 	for (const a of attachments) {
 		assertNoLineBreak("添付のファイル名", a.filename);
 		if (!MIME_TYPE.test(a.contentType)) throw new Error(`添付の Content-Type が不正です: ${a.contentType}`);
-		msg.addAttachment({
+		const content = msg.addAttachment({
 			filename: quotedStringContent(a.filename),
 			contentType: a.contentType,
 			data: a.base64,
 		});
+		// addAttachment は filename を `name="…"` / `filename="…"` に素通しする。
+		// 非 ASCII は生 UTF-8 の 8bit ヘッダ行になるので RFC 2231 で符号化して差し替える（#119）。
+		if (/[^\x00-\x7f]/.test(a.filename)) {
+			content.setHeader("Content-Type", `${a.contentType}; name*=${rfc2231Param(a.filename)}`);
+			content.setHeader("Content-Disposition", `attachment; filename*=${rfc2231Param(a.filename)}`);
+		}
 	}
 
 	return msg.asRaw();

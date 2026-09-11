@@ -51,8 +51,28 @@ describe("parseRawMime", () => {
 		].join("\r\n");
 		const p = await parseRawMime(raw);
 		expect(p.messageId).toBeNull();
-		// References は空白区切りでトークン化するので、CRLF はトークンの区切りに吸収され
-		// 改行を含んだトークンは残らない。
+		// #72 で山括弧の無い断片は捨てるようになったので、参考文献は残らない。
+		expect(p.references).toBeNull();
+	});
+
+	it("encoded-word で CRLF を混入させた References は、割れた断片を残さず山括弧付き Message-ID だけ残す（#72）", async () => {
+		const raw = [
+			"From: taro@example.com",
+			"To: a@example.com",
+			"Subject: test",
+			"Message-ID: <legit@x.example>",
+			"In-Reply-To: <prev@x.example>",
+			"References: =?UTF-8?Q?ref=0D=0AX-Inj=3A_1?=@x.example <prev@x.example>",
+			"MIME-Version: 1.0",
+			"Content-Type: text/plain; charset=utf-8",
+			"",
+			"hi",
+		].join("\r\n");
+		const p = await parseRawMime(raw);
+		// CRLF で割れた X-Inj: の断片はトークンとして残らず、山括弧付き Message-ID だけが残る。
+		expect(p.inReplyTo).toBe("prev@x.example");
+		expect(p.references).toBe("prev@x.example");
+		expect(p.references).not.toContain("Inj");
 		expect(p.references).not.toContain("\r");
 		expect(p.references).not.toContain("\n");
 	});

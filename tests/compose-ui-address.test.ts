@@ -20,4 +20,8 @@ describe("isSelfAddress", () => {
 		expect(isSelfAddress("box+b@x.jp", "box+a@x.jp")).toBe(false);
 		expect(isSelfAddress("box+a@x.jp", "box+a@x.jp")).toBe(true);
 	});
+
+	it("全員に返信の既定 Cc（box+promo@）を自分として濾せる（#78）", () => {
+		expect(isSelfAddress("box+promo@x.jp", "box@x.jp")).toBe(true);
+	});
 });

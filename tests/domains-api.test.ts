@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import addressRoutes from "@/api/v1/addresses";
 import adminAddressRoutes from "@/api/v1/admin/addresses";
 import adminDomainRoutes from "@/api/v1/admin/domains";
-import { addresses, domains, messages } from "@/db/schema";
+import { addresses, auditLogs, domains, messages } from "@/db/schema";
 import {
 	applyMigrations,
 	callJson,
@@ -197,11 +197,10 @@ describe("POST /admin/domains/:id/catch-all", () => {
 		expect(res.json.error.message).toContain("confirm: true");
 	});
 
-	it("同じゾーンの他ドメインが有効なら無効化を 409 にする（#85）", async () => {
+	it("同じゾーンで他ドメインが有効で自分の行が未所有者なら 409 にする（#85）", async () => {
 		const idA = await seedDomain("dom_disable_a", "mail.disable-a.example.com");
 		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idA));
 		const idB = await seedDomain("dom_disable_b", "mail.disable-b.example.com");
-		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idB));
 		fake.catchAll.enabled = true;
 
 		const res = await callJson(adminDomains(), `/${idB}/catch-all`, {
@@ -213,6 +212,36 @@ describe("POST /admin/domains/:id/catch-all", () => {
 		expect(res.json.error.message).toContain("別のドメインが catch-all を有効");
 		// ゾーンの catch-all は落ちない（A の受け皿への到達を黙って止めない）。
 		expect(fake.catchAll.enabled).toBe(true);
+	});
+
+	it("両方「有効」の破綻状態では一方の無効化で抜け出せる（#117）", async () => {
+		const idA = await seedDomain("dom_broken_a", "mail.broken-a.example.com");
+		const idB = await seedDomain("dom_broken_b", "mail.broken-b.example.com");
+		// このファイルの DB は共有で zone1 には他のテストの有効な catch-all があるので、2 つだけのゾーンに移す。
+		for (const id of [idA, idB]) {
+			await getTestDb()
+				.update(domains)
+				.set({ zoneId: "zone-broken", catchAllEnabled: true })
+				.where(eq(domains.id, id));
+		}
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${idB}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+
+		expect(res.status).toBe(200);
+		expect(res.json.data.enabled).toBe(false);
+		// A がまだ「有効」なので CF の catch-all は落とさない。落とすと A が有効表示のまま届かなくなる。
+		expect(fake.catchAll.enabled).toBe(true);
+
+		const last = await callJson(adminDomains(), `/${idA}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+		expect(last.status).toBe(200);
+		expect(fake.catchAll.enabled).toBe(false);
 	});
 
 	it("他ドメインが残らなければ無効化できる（#85）", async () => {
@@ -560,5 +589,131 @@ describe("GET /addresses（全ユーザー）", () => {
 	it("触れるアドレスが無ければ空", async () => {
 		const res = await callJson(mountRouter("/", addressRoutes, memberPrincipal([])), "/");
 		expect(res.json.data).toEqual([]);
+	});
+});
+
+describe("subdomain 同士の入れ子切断（#60）", () => {
+	it("配下に別接続があれば cleanup 付き切断は 409 で、配下の MX / TXT は残る", async () => {
+		const parentId = await seedDomain("dom_parent", "mail.p60a.example.com", "subdomain");
+		const deepId = await seedDomain("dom_deep", "deep.mail.p60a.example.com", "subdomain");
+		fake.dnsRecords.push(
+			{ id: "deep-mx", type: "MX", name: "deep.mail.p60a.example.com", content: "route1.mx.cloudflare.net" },
+			{ id: "deep-spf", type: "TXT", name: "deep.mail.p60a.example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+		);
+
+		const res = await callJson(adminDomains(), `/${parentId}`, { method: "DELETE" });
+
+		expect(res.status).toBe(409);
+		expect(fake.dnsRecords.some((r) => r.id === "deep-mx")).toBe(true);
+		expect(fake.dnsRecords.some((r) => r.id === "deep-spf")).toBe(true);
+		// deep 側も DB に残っている
+		const deepRow = (await getTestDb().select().from(domains).where(eq(domains.id, deepId)).get())!;
+		expect(deepRow.id).toBe(deepId);
+	});
+
+	it("無関係な兄弟（other.example.com）は影響しない", async () => {
+		const parentId = await seedDomain("dom_sib_parent", "mail.p60b.example.com", "subdomain");
+		const siblingId = await seedDomain("dom_sib", "other.p60b.example.com", "subdomain");
+		fake.dnsRecords.push({
+			id: "other-mx",
+			type: "MX",
+			name: "other.p60b.example.com",
+			content: "route1.mx.cloudflare.net",
+		});
+
+		const res = await callJson(adminDomains(), `/${parentId}`, { method: "DELETE" });
+
+		expect(res.status).toBe(200);
+		// 兄弟のレコードは消さない
+		expect(fake.dnsRecords.some((r) => r.id === "other-mx")).toBe(true);
+	});
+});
+
+describe("別ドメインへのエイリアス（#61）", () => {
+	it("別ドメインのアドレスを aliasTarget にすると 400", async () => {
+		const domA = await seedDomain("dom_61a", "mail.a61.example.com");
+		const domB = await seedDomain("dom_61b", "mail.b61.example.com");
+		const mailboxB = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: domB, localPart: "inbox" }),
+		});
+		expect(mailboxB.status).toBe(201);
+		const baselineRules = fake.routingRules.length;
+
+		const res = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				domainId: domA,
+				localPart: "sales",
+				kind: "alias",
+				aliasTargetId: mailboxB.json.data.id,
+			}),
+		});
+		expect(res.status).toBe(400);
+		// 失敗した作成でルーティングルールは増えない
+		expect(fake.routingRules.length).toBe(baselineRules);
+	});
+
+	it("PATCH で別ドメインへエイリアス化すると 400", async () => {
+		const domA = await seedDomain("dom_61p", "mail.p61.example.com");
+		const domB = await seedDomain("dom_bp", "mail.bp61.example.com");
+		const targetB = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: domB, localPart: "inbox" }),
+		});
+		const solo = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: domA, localPart: "solo" }),
+		});
+
+		const res = await callJson(adminAddresses(), `/${solo.json.data.id}`, {
+			method: "PATCH",
+			body: JSON.stringify({ kind: "alias", aliasTargetId: targetB.json.data.id }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("別ドメインのエイリアスが向き先のドメインの DELETE は 409（#61）", async () => {
+		const domA = await seedDomain("dom_61del", "mail.del61.example.com");
+		const domB = await seedDomain("dom_61delb", "mail.del61b.example.com");
+		const mailboxA = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: domA, localPart: "inbox" }),
+		});
+		// 修正前の越境エイリアスを疑似的に再現（この操作自体は今は API で拒否される）。
+		await getTestDb().insert(addresses).values({
+			id: "adr_cross_alias",
+			domainId: domB,
+			localPart: "sales",
+			address: `sales@mail.del61b.example.com`,
+			kind: "alias",
+			aliasTargetId: mailboxA.json.data.id,
+		});
+
+		const res = await callJson(adminDomains(), `/${domA}`, { method: "DELETE" });
+		expect(res.status).toBe(409);
+	});
+});
+
+describe("管理 API の監査（#95）", () => {
+	it("ドメイン接続が domain.connect として記録される", async () => {
+		const res = await callJson(adminDomains(), "/", {
+			method: "POST",
+			body: JSON.stringify({ name: "mail.audit.example.net", localParts: ["ai"] }),
+		});
+		expect(res.status).toBe(201);
+		const rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.map((r) => r.action)).toContain("domain.connect");
+	});
+
+	it("アドレス作成が address.create として記録される", async () => {
+		const id = await seedDomain("dom_audit_addr", "mail.auditaddr.example.com");
+		const res = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "inbox" }),
+		});
+		expect(res.status).toBe(201);
+		const rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.map((r) => r.action)).toContain("address.create");
 	});
 });

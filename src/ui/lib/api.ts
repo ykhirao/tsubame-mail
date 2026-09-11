@@ -123,26 +123,47 @@ export const AuthApi = {
 export const MeApi = {
 	get: () => request<Me>("/me", { redirectOnUnauthorized: false }),
 	update: (body: UpdateMeBody) =>
-		request<{ id: string; email: string; name: string; role: string; passwordChanged: boolean }>(
-			"/me",
-			{ method: "PATCH", body },
-		),
+		request<{
+			id: string;
+			email: string;
+			name: string;
+			role: string;
+			passwordChanged: boolean;
+			revokedApiKeys: number;
+		}>("/me", { method: "PATCH", body }),
 };
 
+type AddressListPage = { data: MyAddress[]; next_cursor: string | null };
+
+async function listAllAddresses(): Promise<AddressListPage> {
+	// 101 件以上でも取りこぼさないよう next_cursor を追って全ページ読む（#81）。
+	const acc: MyAddress[] = [];
+	let cursor: string | null = null;
+	do {
+		const suffix: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+		const res: AddressListPage = await request<AddressListPage>(`/addresses${suffix}`);
+		acc.push(...res.data);
+		cursor = res.next_cursor;
+	} while (cursor);
+	return { data: acc, next_cursor: null };
+}
+
 export const AddressesApi = {
-	list: () => request<{ data: MyAddress[]; next_cursor: string | null }>("/addresses"),
+	list: listAllAddresses,
 };
 
 export const ThreadsApi = {
 	list: (query: ThreadListParams = {}) =>
 		request<ThreadListResponse>(`/threads${qs(query)}`),
-	get: (id: string) => request<ThreadDetailResponse>(`/threads/${id}`),
+	get: (id: string, opts: { includeTrash?: boolean } = {}) =>
+		request<ThreadDetailResponse>(`/threads/${id}${qs(opts)}`),
 };
 
 export const MessagesApi = {
 	list: (query: MessageListParams = {}) =>
 		request<MessageListResponse>(`/messages${qs(query)}`),
-	get: (id: string) => request<MessageDetail>(`/messages/${id}`),
+	get: (id: string, opts: { includeTrash?: boolean } = {}) =>
+		request<MessageDetail>(`/messages/${id}${qs(opts)}`),
 	patch: (id: string, body: MessagePatch) =>
 		request<MessageDetail>(`/messages/${id}`, { method: "PATCH", body }),
 	send: (input: SendMessageInput) =>
@@ -181,7 +202,8 @@ export type MyApiKey = {
 };
 
 export const MyKeysApi = {
-	list: () => request<{ data: MyApiKey[]; next_cursor: string | null }>("/me/api-keys"),
+	list: (query: { limit?: number; cursor?: string } = {}) =>
+		request<{ data: MyApiKey[]; next_cursor: string | null }>(`/me/api-keys${qs(query)}`),
 	/** 発行の応答にだけ平文が入る。 */
 	create: (body: { name: string; scopes: string[]; addressIds?: string[] }) =>
 		request<MyApiKey & { token: string }>("/me/api-keys", { method: "POST", body }),

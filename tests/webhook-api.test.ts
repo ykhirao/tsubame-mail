@@ -3,9 +3,10 @@ import { env } from "cloudflare:test";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { addresses, domains, webhooks, webhookDeliveries } from "@/db/schema";
+import { addresses, auditLogs, domains, webhooks, webhookDeliveries } from "@/db/schema";
 import { createApp } from "@/api/app";
 import { webhookRoutes } from "@/api/v1/webhooks";
+import { runDelivery } from "@/services/webhooks";
 import { rulesRouter } from "@/api/v1/admin/rules";
 import { webhookUrlProblem } from "@/shared/contracts/webhooks";
 import { ApiError } from "@/shared/errors";
@@ -522,7 +523,8 @@ describe("配信履歴 API", () => {
 		const body = (await res.json()) as { status: string; httpStatus: number; attempt: number };
 		expect(body.status).toBe("success");
 		expect(body.httpStatus).toBe(200);
-		expect(body.attempt).toBe(3);
+		// claim に合わせて attempt を 1 繰り上げて再送する（#69）。
+		expect(body.attempt).toBe(4);
 	});
 
 	// #42: 手動再送が status を見ずに実行すると、success を再送して受け手に二重に届いたり、
@@ -566,4 +568,156 @@ describe("配信履歴 API", () => {
 			expect(after!.status).toBe(status);
 		},
 	);
+});
+
+describe("手動再送の claim（#69）", () => {
+	useCleanState();
+
+	async function seedFailedDelivery(opts: { attempt?: number; enabled?: boolean } = {}) {
+		const db = getDb(env);
+		const webhookId = newId("webhook");
+		await db.insert(webhooks).values({
+			id: webhookId,
+			name: "h",
+			url: "https://ok.example/hook",
+			secret: "s",
+			events: ["message.received"],
+			addressIds: null,
+			enabled: opts.enabled ?? true,
+		});
+		const deliveryId = newId("delivery");
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId,
+			event: "message.received",
+			status: "failed",
+			httpStatus: 500,
+			error: "HTTP 500",
+			attempt: opts.attempt ?? 3,
+		});
+		return { webhookId, deliveryId };
+	}
+
+	it("無効化した webhook の failed 配信の再送は 409 で fetch されない", async () => {
+		const { deliveryId } = await seedFailedDelivery({ enabled: false });
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(409);
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		const after = await getDb(env)
+			.select()
+			.from(webhookDeliveries)
+			.where(eq(webhookDeliveries.id, deliveryId))
+			.get();
+		expect(after!.status).toBe("failed");
+	});
+
+	it("同時 2 回の再送は片方だけが取り、fetch は 1 回", async () => {
+		const { deliveryId } = await seedFailedDelivery();
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const [r1, r2] = await Promise.all([
+			call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" }),
+			call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" }),
+		]);
+
+		expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		const after = await getDb(env)
+			.select()
+			.from(webhookDeliveries)
+			.where(eq(webhookDeliveries.id, deliveryId))
+			.get();
+		expect(after!.status).toBe("success");
+	});
+});
+
+describe("手動再送はキューの重複配達と違う（#118）", () => {
+	useCleanState();
+
+	it("failed 配信への再配達は re-POST せず、手動再送は従来どおり 1 回 POST する", async () => {
+		const db = getDb(env);
+		const webhookId = newId("webhook");
+		await db.insert(webhooks).values({
+			id: webhookId,
+			name: "h",
+			url: "https://ok.example/h",
+			secret: "s",
+			events: ["message.received"],
+			addressIds: null,
+		});
+		const deliveryId = newId("delivery");
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId,
+			event: "message.received",
+			status: "failed",
+			httpStatus: 503,
+			error: "HTTP 503",
+			attempt: 5,
+		});
+
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		// キューが最終試行の {deliveryId, attempt:5} を重複配達してくる。
+		await runDelivery(env, deliveryId, 5);
+		expect(fetchMock).not.toHaveBeenCalled();
+
+		// 手動再送は failed → pending にして attempt+1 を渡し、1 回 POST する。
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, {
+			method: "POST",
+		});
+		expect(res.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const body = (await res.json()) as { status: string; attempt: number };
+		expect(body.status).toBe("success");
+		expect(body.attempt).toBe(6);
+	});
+});
+
+describe("管理 API の監査（#95）", () => {
+	useCleanState();
+
+	it("webhook の作成が webhook.create として記録される", async () => {
+		const token = await ownerToken();
+		const res = await call("/api/v1/webhooks", token, { method: "POST", body: validPayload });
+		const { id } = (await res.json()) as { id: string };
+
+		const rows = await getDb(env).select().from(auditLogs).all();
+		const created = rows.find((r) => r.targetId === id);
+		expect(created).toBeTruthy();
+		expect(created!.action).toBe("webhook.create");
+		expect(created!.meta).toMatchObject({ name: "受信通知", enabled: true });
+		expect(JSON.stringify(created!.meta)).not.toContain("secret");
+	});
+
+	it("ルールの作成が rule.create として記録される", async () => {
+		const db = getDb(env);
+		const domainId = newId("domain");
+		await db.insert(domains).values({
+			id: domainId,
+			name: "mail.audit.example.com",
+			zoneId: "zone1",
+			zoneName: "example.com",
+			mode: "subdomain",
+		});
+		const token = await ownerToken();
+		const res = await call("/api/v1/admin/rules", token, {
+			method: "POST",
+			body: { scope: "domain", domainId, name: "監査用", action: "drop", matcher: {} },
+		});
+		expect(res.status).toBe(201);
+
+		const rows = await db.select().from(auditLogs).all();
+		expect(rows.map((r) => r.action)).toContain("rule.create");
+	});
 });

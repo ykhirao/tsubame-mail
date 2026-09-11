@@ -19,11 +19,12 @@ export const MIME_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS = 50;
-const MAX_RECIPIENTS = 100;
-const MAX_BODY_BYTES = 1024 * 1024;
+export const MAX_RECIPIENTS = 100;
+export const MAX_BODY_BYTES = 1024 * 1024;
 // z.string().max はコード単位を数え、多バイト文字なら実バイト数が大幅に超える。D1 の 1 行 2MB 上限に
 // zod の門より先に当たって 500 になるので、バイト数で検査する（#89）。
-const MAX_COMBINED_BODY_BYTES = 1536 * 1024;
+// 返信ではサーバが足す引用が入った後の本文にも同じ上限を掛ける（#115）。
+export const MAX_COMBINED_BODY_BYTES = 1536 * 1024;
 /** RFC 5322 のヘッダ行上限。base64 化後の長さなので、生バイト数はこれより少し余裕を持たせる。 */
 const base64LenForBytes = (bytes: number) => Math.ceil(bytes / 3) * 4;
 
@@ -39,7 +40,8 @@ export const attachment = z.object({
 export type Attachment = z.infer<typeof attachment>;
 
 /** 単一アドレス文字列でも配列でも受ける。内部では文字列に正規化してから扱う。 */
-const addressList = z.union([singleLine.min(1), z.array(singleLine.min(1)).min(1)]);
+// 配列の要素数を無制限にすると、bodyLimit の 40MB まで要素を詰められ safeParse 自体が重くなる（精査 #79）。
+const addressList = z.union([singleLine.min(1), z.array(singleLine.min(1)).min(1).max(MAX_RECIPIENTS)]);
 export type AddressList = z.infer<typeof addressList>;
 
 function recipientCount(list: string | string[] | undefined): number {
@@ -108,6 +110,11 @@ export const sendMessageInput = z
 	.superRefine((input, ctx) => {
 		checkAttachmentsTotal(input.attachments, ctx);
 		checkBodyBytes(input, ctx);
+		// 閉じない引用の `"open <a@x.jp>` などで parseAddressList 後の件数が 0 になり、
+		// 202 のままジョブが「送信先が指定されていません」で failed になる（精査 #80）。
+		if (recipientCount(input.to) === 0) {
+			ctx.addIssue({ code: "custom", message: "宛先が指定されていません", path: ["to"] });
+		}
 		const total = recipientCount(input.to) + recipientCount(input.cc) + recipientCount(input.bcc);
 		if (total > MAX_RECIPIENTS) {
 			ctx.addIssue({ code: "custom", message: `宛先は合計 ${MAX_RECIPIENTS} 件までです`, path: ["to"] });

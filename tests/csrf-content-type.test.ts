@@ -2,6 +2,7 @@ import { SELF, createExecutionContext, waitOnExecutionContext } from "cloudflare
 import { describe, expect, it } from "vitest";
 import worker from "@/worker";
 import { OWNER, freshHarness, type Harness } from "../e2e/harness";
+import { createApiKeyFor, createUser } from "./auth-helpers";
 
 async function post(path: string, contentType: string | null, body: string) {
 	const h = await freshHarness();
@@ -30,7 +31,7 @@ async function bootstrapOwnerCookie(h: Harness): Promise<string> {
 	const ctx = createExecutionContext();
 	const res = await worker.fetch(req as Parameters<typeof worker.fetch>[0], h.env, ctx);
 	await waitOnExecutionContext(ctx);
-	const m = /tsb_session=[^;]+/.exec(res.headers.get("set-cookie") ?? "");
+	const m = /__Host-tsb_session=[^;]+/.exec(res.headers.get("set-cookie") ?? "");
 	if (!m) throw new Error(`bootstrap に失敗: ${res.status}`);
 	return m[0];
 }
@@ -54,6 +55,24 @@ describe("変更系 API の Content-Type 検査（#50）", () => {
 	it("application/json; charset=utf-8 は通る", async () => {
 		const res = await post("/api/v1/auth/login", "application/json; charset=utf-8", json);
 		expect(res.status).toBe(401);
+	});
+});
+
+describe("管理 API の変更系も readJson を通る（#75）", () => {
+	it("認証済みでも Content-Type が JSON でなければ 400", async () => {
+		for (const path of ["/api/v1/admin/rules", "/api/v1/admin/domains", "/api/v1/admin/addresses", "/api/v1/webhooks"]) {
+			const h = await freshHarness();
+			const cookie = await bootstrapOwnerCookie(h);
+			const req = new Request(`https://tsubame.test${path}`, {
+				method: "POST",
+				headers: { "content-type": "text/plain", cookie },
+				body: '{"name":"x"}',
+			});
+			const ctx = createExecutionContext();
+			const res = await worker.fetch(req as Parameters<typeof worker.fetch>[0], h.env, ctx);
+			await waitOnExecutionContext(ctx);
+			expect(res.status, path).toBe(400);
+		}
 	});
 });
 
@@ -119,5 +138,92 @@ describe("同一登録ドメインの別サブドメインからの no-cors CSRF
 			const res = await SELF.fetch(req);
 			expect(res.status, path).toBe(400);
 		}
+	});
+});
+
+describe("Cookie 認証の変更系にだけ Fetch Metadata を要求する（#76）", () => {
+	async function doWorker(h: Harness, path: string, init: RequestInit): Promise<Response> {
+		const req = new Request(`https://tsubame.test${path}`, init);
+		const ctx = createExecutionContext();
+		const res = await worker.fetch(req as Parameters<typeof worker.fetch>[0], h.env, ctx);
+		await waitOnExecutionContext(ctx);
+		return res;
+	}
+
+	it("Sec-Fetch-Site: same-site のログアウトは 403（Cookie 認証）", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/auth/logout", {
+			method: "POST",
+			headers: { cookie, "sec-fetch-site": "same-site" },
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("Sec-Fetch-Site: cross-site のログアウトは 403", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/auth/logout", {
+			method: "POST",
+			headers: { cookie, "sec-fetch-site": "cross-site" },
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("Cookie + same-site の送信（POST /messages）も 403", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/messages", {
+			method: "POST",
+			headers: { cookie, "content-type": "application/json", "sec-fetch-site": "same-site" },
+			body: JSON.stringify({ to: ["a@b.test"], subject: "x", text: "y" }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("Sec-Fetch-Site: same-origin のログアウトは通る", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/auth/logout", {
+			method: "POST",
+			headers: { cookie, "sec-fetch-site": "same-origin" },
+		});
+		expect(res.status).toBe(200);
+	});
+
+	it("Sec-Fetch-Site が無く Origin が異なるログアウトは 403", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/auth/logout", {
+			method: "POST",
+			headers: { cookie, origin: "https://evil.example.com" },
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("Sec-Fetch-Site が無く Origin: null のログアウトは 500 でなく 403", async () => {
+		const h = await freshHarness();
+		const cookie = await bootstrapOwnerCookie(h);
+		const res = await doWorker(h, "/api/v1/auth/logout", {
+			method: "POST",
+			headers: { cookie, origin: "null" },
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("API キー（Bearer）は cross-site でも通る", async () => {
+		const h = await freshHarness();
+		const owner = await createUser({ role: "owner", email: "apikey@example.test" });
+		const key = await createApiKeyFor({ userId: owner.id });
+		const res = await doWorker(h, "/api/v1/me/api-keys", {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${key.token}`,
+				"content-type": "application/json",
+				"sec-fetch-site": "cross-site",
+			},
+			body: JSON.stringify({ name: "cross", scopes: ["read"] }),
+		});
+		expect(res.status).toBe(201);
 	});
 });

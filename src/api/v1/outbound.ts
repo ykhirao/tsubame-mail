@@ -5,16 +5,20 @@ import { getDb } from "@/db/client";
 import { addresses, attachments, messages, outboundJobs, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
 import type { AppEnv } from "@/api/types";
-import { forbidden, invalidRequest, notFound } from "@/shared/errors";
+import { ApiError, forbidden, invalidRequest, notFound } from "@/shared/errors";
 import { baseAddressOf, normalizeAddress, parseAddressList, formatAddressList } from "@/domain/mail/address";
 import { addressListToCsv } from "@/domain/mail/compose";
 import { canRead, requireScope } from "@/domain/access/policy";
 import { canSendFrom } from "@/services/sender";
 import { putAttachment } from "@/services/r2";
 import { buildReplyQuote, referencesFor, replySubject } from "@/domain/mail/quote";
+import { readJson } from "@/lib/validate";
 import {
 	sendMessageInput,
 	replyInput,
+	MAX_RECIPIENTS,
+	MAX_BODY_BYTES,
+	MAX_COMBINED_BODY_BYTES,
 	type SendMessageInput,
 } from "@/shared/contracts/send";
 
@@ -63,6 +67,16 @@ async function assertCanSend(
 }
 
 type DecodedAttachment = { filename: string; contentType: string; bytes: Uint8Array };
+
+// 送信は 1 リクエスト 100 宛先の上限はあるがリクエスト数の上限が無かった（精査 #106）。
+// 鍵は API キー id（セッションならユーザー id）で、漏れた send キー 1 本で送信量が制限されるようにする。
+async function checkSendRateLimit(limiter: RateLimit | undefined, key: string): Promise<void> {
+	if (!limiter) return;
+	const { success } = await limiter.limit({ key });
+	if (!success) {
+		throw new ApiError("rate_limited", "送信が多すぎます。しばらく待ってからやり直してください");
+	}
+}
 
 // メッセージの行を作る前に弾く。後で落ちると、送られないまま queued の行だけが残る。
 function decodeAttachments(input: SendMessageInput["attachments"]): DecodedAttachment[] {
@@ -192,18 +206,20 @@ async function enqueueOutbound(
 router.post("/", async (c) => {
 	const db = getDb(c.env);
 	const principal = c.get("principal");
-	const body = await c.req.json().catch(() => null);
-	const parsed = sendMessageInput.safeParse(body);
-	if (!parsed.success) throw invalidRequest("送信内容が不正です", parsed.error);
-	const input = parsed.data;
+	const input = await readJson(c.req, sendMessageInput);
+	await checkSendRateLimit(c.env.SEND_RATE_LIMIT, `send:${principal.apiKeyId ?? principal.userId}`);
 
 	const addressId = await assertCanSend(db, input, principal);
 	const decoded = decodeAttachments(input.attachments);
+	const toAddr = addressListToCsv(input.to);
+	// 正規化後に実際に使える宛先が 0 件でも 202 を返すと、ジョブが
+	// 「送信先が指定されていません」で failed になる（精査 #80）。
+	if (parseAddressList(toAddr).length === 0) throw invalidRequest("宛先が指定されていません");
 
 	const result = await enqueueOutbound(db, c.env, {
 		addressId,
 		fromAddr: normalizeAddress(input.from)!,
-		toAddr: addressListToCsv(input.to),
+		toAddr,
 		ccAddr: input.cc ? addressListToCsv(input.cc) : null,
 		bccAddr: input.bcc ? addressListToCsv(input.bcc) : null,
 		subject: input.subject ?? null,
@@ -222,10 +238,8 @@ router.post("/:id/reply", async (c) => {
 	const principal = c.get("principal");
 	const id = c.req.param("id");
 
-	const body = await c.req.json().catch(() => null);
-	const parsed = replyInput.safeParse(body);
-	if (!parsed.success) throw invalidRequest("返信内容が不正です", parsed.error);
-	const input = parsed.data;
+	const input = await readJson(c.req, replyInput);
+	await checkSendRateLimit(c.env.SEND_RATE_LIMIT, `send:${principal.apiKeyId ?? principal.userId}`);
 
 	// 返信は元メッセージを読んで引用するので、send だけでなく read も要る。
 	requireScope(principal, "read");
@@ -276,6 +290,14 @@ router.post("/:id/reply", async (c) => {
 		: replyAllRecipients(originalFrom, message.toAddr, message.ccAddr, isSelf, input.replyAll);
 	const ccRecipients = input.cc ? dedupeRecipients(parseAddressList(addressListToCsv(input.cc)), isSelf) : [];
 
+	// 明示した / 自動計算した最終宛先が、自分を除いた結果 0 件だと 202 の後に 4 回試行して
+	// failed になる（精査 #66 / #80）。送る前に 400 で弾く。
+	if (recipients.length + ccRecipients.length === 0) throw invalidRequest("宛先が指定されていません");
+	// replyAll で to を省略した返信は受信 To / Cc 由来の宛先数に上限が無い（精査 #74）。
+	if (recipients.length + ccRecipients.length > MAX_RECIPIENTS) {
+		throw invalidRequest(`宛先は合計 ${MAX_RECIPIENTS} 件までです`);
+	}
+
 	const subject = replySubject(message.subject);
 	const inReplyTo = message.rfcMessageId ?? null;
 	const references = referencesFor(message.referencesHeader, message.rfcMessageId);
@@ -290,6 +312,18 @@ router.post("/:id/reply", async (c) => {
 
 	const textBody = input.text ? input.text.trim() + "\n\n" + quote.text : quote.text;
 	const htmlBody = input.html ? input.html + quote.html : quote.html;
+
+	// 引用は入力検査の外で足すので、zod の検査では収まっていても実バイト数は超えうる。
+	// D1 の 1 行 2MB 上限に当たって 500 になる前に、#89 と同じ上限で 400 にする。#115。
+	const encoder = new TextEncoder();
+	const textBytes = encoder.encode(textBody).byteLength;
+	const htmlBytes = encoder.encode(htmlBody).byteLength;
+	if (textBytes > MAX_BODY_BYTES || htmlBytes > MAX_BODY_BYTES) {
+		throw invalidRequest("引用を含めた本文が上限を超えています");
+	}
+	if (textBytes + htmlBytes + encoder.encode(subject).byteLength > MAX_COMBINED_BODY_BYTES) {
+		throw invalidRequest("引用を含めた本文と件名の合計サイズが上限を超えています");
+	}
 
 	const toAddr = formatAddressList(recipients);
 	const ccAddr = ccRecipients.length > 0 ? formatAddressList(ccRecipients) : null;

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { asc, count, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, count, eq, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { addresses, domains } from "@/db/schema";
 import { cleanupDomain } from "@/domain/domains/cleanup";
@@ -16,6 +16,9 @@ import {
 } from "@/domain/domains/provision";
 import { createCloudflareApi } from "@/services/cloudflare-api";
 import { requireOwner } from "@/api/middleware/auth";
+import { clientIp, getPrincipal } from "@/api/middleware/auth";
+import { readJson } from "@/lib/validate";
+import { recordAudit } from "@/domain/access/policy";
 import { afterCursor, toPage } from "@/lib/paging";
 import type { AppEnv } from "@/api/types";
 import { paginationQuery } from "@/shared/contracts/common";
@@ -36,18 +39,6 @@ app.onError((err, c) => {
 	console.error("unhandled error", err);
 	return c.json({ error: { code: "internal", message: "内部エラーが発生しました" } }, 500);
 });
-
-async function readBody<T extends z.ZodType>(c: Context<AppEnv>, schema: T): Promise<z.infer<T>> {
-	let raw: unknown;
-	try {
-		raw = await c.req.json();
-	} catch {
-		throw invalidRequest("JSON の本文が必要です");
-	}
-	const parsed = schema.safeParse(raw);
-	if (!parsed.success) throw invalidRequest("入力が不正です", z.treeifyError(parsed.error));
-	return parsed.data;
-}
 
 const toSeconds = (value: Date | null | undefined): number | null =>
 	value ? Math.floor(value.getTime() / 1000) : null;
@@ -81,7 +72,7 @@ app.get("/available", async (c) => {
 });
 
 app.post("/preview", async (c) => {
-	const input = await readBody(c, previewDomainInput);
+	const input = await readJson(c.req, previewDomainInput);
 	const api = createCloudflareApi(c.env);
 	const result = await previewDomain(api, input);
 
@@ -139,7 +130,7 @@ app.get("/", async (c) => {
 });
 
 app.post("/", async (c) => {
-	const input = await readBody(c, createDomainInput);
+	const input = await readJson(c.req, createDomainInput);
 	const api = createCloudflareApi(c.env);
 
 	const result = await provisionDomain({
@@ -153,6 +144,22 @@ app.post("/", async (c) => {
 			enableSending: input.enableSending,
 			localParts: input.localParts,
 		},
+	});
+
+	await recordAudit(c.get("db"), {
+		actorId: getPrincipal(c).userId,
+		action: "domain.connect",
+		targetType: "domain",
+		targetId: result.domainId,
+		meta: {
+			name: result.name,
+			zoneId: result.zoneId,
+			mode: result.mode,
+			confirmApex: input.confirmApex,
+			enableSending: input.enableSending,
+			localParts: input.localParts,
+		},
+		ip: clientIp(c),
 	});
 
 	return c.json(
@@ -207,21 +214,41 @@ app.delete("/:id", async (c) => {
 	const query = deleteDomainQuery.safeParse(c.req.query());
 	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
 	const doCleanup = query.data.cleanup;
+	const db = c.get("db");
 
-	if (domain.mode === "apex") {
-		const rows = await c.get("db").select().from(domains).where(ne(domains.id, domain.id));
+	// #61: 他ドメインのエイリアスがこのドメインのアドレスを向いていると、切断で宙に浮く。
+	const domainAddressIds = db
+		.select({ id: addresses.id })
+		.from(addresses)
+		.where(eq(addresses.domainId, domain.id));
+	const crossAlias = await db
+		.select()
+		.from(addresses)
+		.where(
+			and(
+				ne(addresses.domainId, domain.id),
+				inArray(addresses.aliasTargetId, domainAddressIds),
+			),
+		)
+		.limit(1);
+	if (crossAlias.length > 0) {
+		throw conflict(
+			`${crossAlias[0]!.address} がこのドメインのアドレスをエイリアス先にしています。先にそちらを外してください。`,
+		);
+	}
+
+	let cleanup = null;
+	if (doCleanup) {
+		// #18/#60: 配下に別接続があると、cleanup がその接続の MX / TXT を巻き込むので 409。
+		const rows = await db.select().from(domains).where(ne(domains.id, domain.id));
 		const below = rows.find((d) => d.name.toLowerCase().endsWith(`.${domain.name.toLowerCase()}`));
 		if (below) {
 			throw conflict(
 				`${below.name} がこのドメインの配下で接続されています。先にそちらを切断してください。`,
 			);
 		}
-	}
-
-	let cleanup = null;
-	if (doCleanup) {
 		if (domain.catchAllEnabled) {
-			await assertZoneCatchAllSafe(c.get("db"), { zoneId: domain.zoneId, domainId: domain.id });
+			await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
 		}
 		const api = createCloudflareApi(c.env);
 		cleanup = await cleanupDomain(api, {
@@ -234,7 +261,23 @@ app.delete("/:id", async (c) => {
 		});
 	}
 
-	await c.get("db").delete(domains).where(eq(domains.id, domain.id));
+	await db.delete(domains).where(eq(domains.id, domain.id));
+
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "domain.disconnect",
+		targetType: "domain",
+		targetId: domain.id,
+		meta: {
+			name: domain.name,
+			zoneId: domain.zoneId,
+			cleanup: doCleanup,
+			removedRoutingRules: cleanup?.removedRoutingRules ?? [],
+			removedDnsRecords: cleanup?.removedDnsRecords ?? [],
+			failures: cleanup?.failures.map((f) => f.label) ?? [],
+		},
+		ip: clientIp(c),
+	});
 
 	return c.json({
 		data: { id: domain.id, deleted: true, cleanup },
@@ -246,7 +289,7 @@ app.delete("/:id", async (c) => {
 
 app.post("/:id/catch-all", async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
-	const input = await readBody(c, catchAllInput);
+	const input = await readJson(c.req, catchAllInput);
 
 	if (!input.confirm) {
 		throw invalidRequest(
@@ -264,6 +307,15 @@ app.post("/:id/catch-all", async (c) => {
 		enabled: input.enabled,
 	});
 
+	await recordAudit(c.get("db"), {
+		actorId: getPrincipal(c).userId,
+		action: "domain.catchall",
+		targetType: "domain",
+		targetId: domain.id,
+		meta: { name: domain.name, zoneId: domain.zoneId, enabled: input.enabled },
+		ip: clientIp(c),
+	});
+
 	return c.json({ data: result, warning: CATCH_ALL_WARNING });
 });
 
@@ -273,6 +325,19 @@ app.post("/:id/verify", async (c) => {
 	// ゾーンが動いていることも確認しておく（トークンのスコープ切れをここで拾う）。
 	await resolveZone(api, { name: domain.name, zoneId: domain.zoneId });
 	const result = await verifyDomain({ db: c.get("db"), api, domain });
+	await recordAudit(c.get("db"), {
+		actorId: getPrincipal(c).userId,
+		action: "domain.verify",
+		targetType: "domain",
+		targetId: domain.id,
+		meta: {
+			name: domain.name,
+			zoneId: domain.zoneId,
+			routingStatus: result.routingStatus,
+			sendingStatus: result.sendingStatus,
+		},
+		ip: clientIp(c),
+	});
 	return c.json({ data: result });
 });
 

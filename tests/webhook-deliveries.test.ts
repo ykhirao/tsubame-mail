@@ -219,6 +219,69 @@ describe("dispatchMessageEvent の部分失敗", () => {
 	});
 });
 
+describe("失敗した配信のキュー重複配達で再 POST しない（#118）", () => {
+	useCleanState();
+
+	it("最終試行で failed になった配信に同じ {deliveryId, attempt} を流しても POST は増えない", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("dup118", "https://dup118.example/hook", { events: ["message.received"] });
+		const db = getDb(env);
+		const deliveryId = "dlv_dup118";
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId: "whk_dup118",
+			event: "message.received" as const,
+			messageId,
+			status: "failed",
+			httpStatus: 503,
+			error: "HTTP 503",
+			attempt: 5,
+			nextRetryAt: null,
+		});
+
+		const fetchMock = vi.fn(async () => new Response("x", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		// キューが最終試行の {deliveryId, attempt:5} を重複配達してくる。
+		await runDelivery(env, deliveryId, 5);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		const row = await db
+			.select()
+			.from(webhookDeliveries)
+			.where(eq(webhookDeliveries.id, deliveryId))
+			.get();
+		expect(row!.status).toBe("failed");
+		expect(row!.attempt).toBe(5);
+	});
+
+	it("成功済みの配信を同じ attempt で再配達しても POST しない", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("dupok118", "https://dupok118.example/hook", {
+			events: ["message.received"],
+		});
+		const db = getDb(env);
+		const deliveryId = "dlv_dupok118";
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId: "whk_dupok118",
+			event: "message.received" as const,
+			messageId,
+			status: "success",
+			httpStatus: 200,
+			attempt: 3,
+		});
+
+		const fetchMock = vi.fn(async () => new Response("x", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await runDelivery(env, deliveryId, 3);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
 describe("再試行のバックオフと打ち切り", () => {
 	useCleanState();
 

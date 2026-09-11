@@ -91,7 +91,7 @@ describe("POST /v1/auth/bootstrap", () => {
 });
 
 describe("POST /v1/auth/login", () => {
-	it("セッション Cookie は HttpOnly / Secure / SameSite=Lax / Path=/", async () => {
+	it("セッション Cookie は __Host- 接頭辞・HttpOnly / Secure / SameSite=Lax / Path=/ で Domain 無し", async () => {
 		await bootstrap();
 		const res = await request(
 			app,
@@ -100,11 +100,23 @@ describe("POST /v1/auth/login", () => {
 		);
 		expect(res.status).toBe(200);
 		const cookie = res.headers.get("set-cookie") ?? "";
-		expect(cookie).toContain("tsb_session=");
+		expect(cookie).toContain("__Host-tsb_session=");
 		expect(cookie).toMatch(/HttpOnly/i);
 		expect(cookie).toMatch(/Secure/i);
 		expect(cookie).toMatch(/SameSite=Lax/i);
 		expect(cookie).toMatch(/Path=\//i);
+		expect(cookie).not.toMatch(/Domain=/i);
+	});
+
+	it("ログインで旧名 tsb_session の Cookie を消す（#84）", async () => {
+		await bootstrap();
+		const res = await request(
+			app,
+			"/api/v1/auth/login",
+			json({ email: OWNER.email, password: OWNER.password }),
+		);
+		const all = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+		expect(all.some((c) => /^tsb_session=;/.test(c) && /Max-Age=0/i.test(c))).toBe(true);
 	});
 
 	it("平文のトークンは Cookie にしか出ず、レスポンス本文には出ない", async () => {
@@ -213,7 +225,7 @@ describe("POST /v1/auth/logout と GET /v1/auth/session", () => {
 
 		const out = await request(app, "/api/v1/auth/logout", { method: "POST", cookie });
 		expect(out.status).toBe(200);
-		expect(out.headers.get("set-cookie") ?? "").toMatch(/tsb_session=;|Max-Age=0/i);
+		expect(out.headers.get("set-cookie") ?? "").toMatch(/__Host-tsb_session=;|Max-Age=0/i);
 
 		expect((await request(app, "/api/v1/auth/session", { cookie })).status).toBe(401);
 	});
@@ -452,7 +464,7 @@ describe("PATCH /v1/me", () => {
 		expect(res.status).toBe(403);
 	});
 
-	it("パスワードを変えると既存セッションが切れる", async () => {
+	it("パスワードを変えると既存セッションが切れる（#114）", async () => {
 		const { cookie } = await bootstrap();
 		const res = await request(app, "/api/v1/me", {
 			method: "PATCH",
@@ -463,6 +475,9 @@ describe("PATCH /v1/me", () => {
 			}),
 		});
 		expect(res.status).toBe(200);
+		expect((await res.json()) as { passwordChanged: boolean; revokedApiKeys: number }).toMatchObject({
+			passwordChanged: true,
+		});
 		expect((await request(app, "/api/v1/me", { cookie })).status).toBe(401);
 
 		const relogin = await request(
@@ -471,5 +486,166 @@ describe("PATCH /v1/me", () => {
 			json({ email: OWNER.email, password: "brand-new-password-1234" }),
 		);
 		expect(relogin.status).toBe(200);
+	});
+
+	it("パスワードを変えると失効した API キーの本数を返す（#114）", async () => {
+		const user = await createUser({
+			role: "owner",
+			email: "pwkeeper@example.test",
+			password: "current-pass-1234",
+		});
+		await createApiKeyFor({ userId: user.id });
+		await createApiKeyFor({ userId: user.id });
+
+		const login = await request(
+			app,
+			"/api/v1/auth/login",
+			json({ email: user.email, password: "current-pass-1234" }),
+		);
+		const res = await request(app, "/api/v1/me", {
+			method: "PATCH",
+			cookie: sessionCookie(login),
+			body: JSON.stringify({ currentPassword: "current-pass-1234", newPassword: "new-pass-12345" }),
+		});
+		expect(res.status).toBe(200);
+		expect((await res.json()) as { revokedApiKeys: number }).toMatchObject({ revokedApiKeys: 2 });
+	});
+});
+
+describe("セッション Cookie のセッション固定（#84）", () => {
+	it("同名 Cookie が 2 つ以上あると /me が 401", async () => {
+		const { cookie } = await bootstrap();
+		expect((await request(app, "/api/v1/me", { cookie: `${cookie}; ${cookie}` })).status).toBe(401);
+	});
+
+	it("旧名 tsb_session だけでは認証されない", async () => {
+		const { cookie } = await bootstrap();
+		const legacy = cookie.replace("__Host-tsb_session", "tsb_session");
+		expect((await request(app, "/api/v1/me", { cookie: legacy })).status).toBe(401);
+		expect((await request(app, "/api/v1/me", { cookie })).status).toBe(200);
+	});
+
+	it("ログアウトで旧名 tsb_session も消す", async () => {
+		const { cookie } = await bootstrap();
+		const out = await request(app, "/api/v1/auth/logout", { method: "POST", cookie });
+		const all = (out.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+		expect(all.some((c) => /^tsb_session=;/.test(c) && /Max-Age=0/i.test(c))).toBe(true);
+	});
+});
+
+describe("仮パスワードのセッションはキーを発行・失効できない（#64）", () => {
+	async function setupMustChange() {
+		await bootstrap();
+		const user = await createUser({
+			role: "member",
+			email: "must@example.test",
+			password: "correct-horse-1234",
+		});
+		await db().update(schema.users).set({ mustChangePassword: true }).where(eq(schema.users.id, user.id));
+		const login = await request(
+			app,
+			"/api/v1/auth/login",
+			json({ email: user.email, password: "correct-horse-1234" }),
+		);
+		return { user, cookie: sessionCookie(login) };
+	}
+
+	it("POST /me/api-keys は 403", async () => {
+		const { cookie } = await setupMustChange();
+		const res = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			cookie,
+			body: JSON.stringify({ name: "子キー", scopes: ["read"] }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("DELETE /me/api-keys も 403", async () => {
+		const { user, cookie } = await setupMustChange();
+		const key = await createApiKeyFor({ userId: user.id });
+		const res = await request(app, `/api/v1/me/api-keys/${key.id}`, { method: "DELETE", cookie });
+		expect(res.status).toBe(403);
+	});
+
+	it("GET /me/api-keys は読める", async () => {
+		const { cookie } = await setupMustChange();
+		expect((await request(app, "/api/v1/me/api-keys", { cookie })).status).toBe(200);
+	});
+});
+describe("admin API キーからの発行は自分の範囲まで（#58）", () => {
+	async function setupLimitedAdminKey() {
+		await bootstrap();
+		const domainId = await createDomain();
+		const aId = await createAddress(domainId, "a");
+		const bId = await createAddress(domainId, "b");
+		const owner = await createUser({ role: "owner", email: "admin-owner@example.test" });
+		const parentExpiry = new Date(Date.now() + 60_000);
+		const parent = await createApiKeyFor({
+			userId: owner.id,
+			scopes: ["read", "admin"],
+			addressIds: [aId],
+			expiresAt: parentExpiry,
+		});
+		return { owner, aId, bId, parentExpiry, parent };
+	}
+
+	it("全アドレス・無期限のキーは自分のアドレス・期限に凍結される", async () => {
+		const { owner, aId, parentExpiry, parent } = await setupLimitedAdminKey();
+		const res = await request(app, "/api/v1/admin/api-keys", {
+			method: "POST",
+			bearer: parent.token,
+			body: JSON.stringify({
+				userId: owner.id,
+				name: "広げたい",
+				scopes: ["read", "admin"],
+				addressIds: null,
+				expiresAt: Math.floor(Date.now() / 1000) + 86_400 * 365,
+			}),
+		});
+		expect(res.status).toBe(201);
+		const body = (await res.json()) as {
+			scopes: string[];
+			addressIds: string[] | null;
+			expiresAt: number | null;
+		};
+		expect(body.addressIds).toEqual([aId]);
+		expect(body.expiresAt!).toBeLessThanOrEqual(Math.floor(parentExpiry.getTime() / 1000));
+		expect(body.scopes).toEqual(["read", "admin"]);
+	});
+
+	it("自分の持たないスコープは要求できない", async () => {
+		const { owner, aId, parent } = await setupLimitedAdminKey();
+		const res = await request(app, "/api/v1/admin/api-keys", {
+			method: "POST",
+			bearer: parent.token,
+			body: JSON.stringify({ userId: owner.id, name: "send を狙う", scopes: ["read", "admin", "send"], addressIds: [aId] }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("自分の持たないアドレスは要求できない", async () => {
+		const { owner, aId, bId, parent } = await setupLimitedAdminKey();
+		const res = await request(app, "/api/v1/admin/api-keys", {
+			method: "POST",
+			bearer: parent.token,
+			body: JSON.stringify({ userId: owner.id, name: "b を狙う", scopes: ["read", "admin"], addressIds: [aId, bId] }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("監査 meta に apiKeyId が残る", async () => {
+		const { owner, aId, parent } = await setupLimitedAdminKey();
+		const res = await request(app, "/api/v1/admin/api-keys", {
+			method: "POST",
+			bearer: parent.token,
+			body: JSON.stringify({ userId: owner.id, name: "監査確認", scopes: ["read", "admin"], addressIds: [aId] }),
+		});
+		expect(res.status).toBe(201);
+		const rows = await db()
+			.select()
+			.from(schema.auditLogs)
+			.where(eq(schema.auditLogs.action, "api_key.create"));
+		const last = rows[rows.length - 1];
+		expect((last?.meta as { apiKeyId?: string } | null)?.apiKeyId).toBe(parent.id);
 	});
 });

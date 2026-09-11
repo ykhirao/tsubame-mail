@@ -270,14 +270,14 @@ export function ApiKeysPage() {
 
 	const load = useCallback(async () => {
 		try {
-			const [keyList, userList, aRes] = await Promise.all([
+			const [keyList, userList, addressList] = await Promise.all([
 				getAllPages<ApiKeySummary>("/api/v1/admin/api-keys"),
 				getAllPages<AdminUser>("/api/v1/admin/users"),
-				api.get<{ data: AdminAddress[] }>("/api/v1/admin/addresses"),
+				getAllPages<AdminAddress>("/api/v1/admin/addresses"),
 			]);
 			setKeys(keyList);
 			setUsers(userList);
-			setAddresses(aRes.data);
+			setAddresses(addressList);
 			setUsersByName(Object.fromEntries(userList.map((u) => [u.id, u])));
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");

@@ -18,6 +18,7 @@ export function Search() {
 	const [draft, setDraft] = useState(q);
 	const [results, setResults] = useState<MessageListItem[]>([]);
 	const [nextCursor, setNextCursor] = useState<string | null>(null);
+	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [loadingMore, setLoadingMore] = useState(false);
 
@@ -28,18 +29,21 @@ export function Search() {
 				setLoadingMore(true);
 			} else {
 				setLoading(true);
+				setError(null);
 				setResults([]);
 				setNextCursor(null);
 			}
 			try {
 				const res = await MessagesApi.list({ q: term || undefined, limit: PAGE, cursor });
-				if (!cursor) {
-					setResults(res.data);
-					setNextCursor(res.next_cursor);
-				} else {
+				if (cursor) {
 					setResults((prev) => [...prev, ...res.data]);
 					setNextCursor(res.next_cursor);
+				} else {
+					setResults(res.data);
+					setNextCursor(res.next_cursor);
 				}
+			} catch (err) {
+				setError(err instanceof Error ? err.message : "検索に失敗しました");
 			} finally {
 				setLoading(false);
 				setLoadingMore(false);
@@ -96,6 +100,12 @@ export function Search() {
 			<p className="text-xs text-[var(--text-muted)]">
 				3 文字以上は全文検索、1〜2 文字は部分一致で動きます。
 			</p>
+
+			{error && (
+				<div className="rounded border border-[var(--danger)] bg-[var(--surface-hover)] px-3 py-2 text-sm text-[var(--danger)]">
+					{error}
+				</div>
+			)}
 
 			{loading ? (
 				<Spinner />

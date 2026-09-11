@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import type { Context } from "hono";
+import { deleteCookie, setCookie } from "hono/cookie";
 import type { CookieOptions } from "hono/utils/cookie";
 import { eq, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
@@ -9,6 +10,7 @@ import { DUMMY_PASSWORD_HASH, hashPassword, needsRehash, verifyPassword } from "
 import {
 	generateSessionToken,
 	hashToken,
+	LEGACY_SESSION_COOKIE,
 	SESSION_COOKIE,
 	SESSION_TTL_SECONDS,
 	secretEquals,
@@ -17,7 +19,7 @@ import { readJson, unixSeconds } from "@/lib/validate";
 import { recordAudit } from "@/domain/access/policy";
 import { bootstrapBody, loginBody } from "@/shared/contracts/auth";
 import { ApiError, conflict, unauthorized } from "@/shared/errors";
-import { clientIp, getPrincipal, requireAuth } from "../middleware/auth";
+import { clientIp, getPrincipal, requireAuth, sessionToken } from "../middleware/auth";
 import type { AppEnv } from "../types";
 
 const app = new Hono<AppEnv>();
@@ -31,6 +33,12 @@ function sessionCookieOptions(maxAge?: number): CookieOptions {
 		path: "/",
 		...(maxAge === undefined ? {} : { maxAge }),
 	};
+}
+
+// login / logout / bootstrap で旧名 tsb_session も消す。新名は __Host- 接頭辞でサブドメインからは書けないが、
+// 名前変更前に残った値はここで確実に落とす（#84）。
+function clearLegacyCookie(c: Context<AppEnv>): void {
+	deleteCookie(c, LEGACY_SESSION_COOKIE, sessionCookieOptions());
 }
 
 /** メールアドレスの存在を漏らさないための一律のメッセージ。 */
@@ -109,6 +117,7 @@ app.post("/login", async (c) => {
 	await db.update(schema.users).set({ lastLoginAt: new Date() }).where(eq(schema.users.id, user.id));
 
 	setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SECONDS));
+	clearLegacyCookie(c);
 
 	return c.json({
 		userId: user.id,
@@ -120,12 +129,13 @@ app.post("/login", async (c) => {
 });
 
 app.post("/logout", async (c) => {
-	const token = getCookie(c, SESSION_COOKIE);
+	const token = sessionToken(c);
 	if (token) {
 		const db = c.get("db");
 		await db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, await hashToken(token)));
 	}
 	deleteCookie(c, SESSION_COOKIE, sessionCookieOptions());
+	clearLegacyCookie(c);
 	return c.json({ ok: true });
 });
 
@@ -234,6 +244,7 @@ app.post("/bootstrap", async (c) => {
 		ip,
 	);
 	setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(SESSION_TTL_SECONDS));
+	clearLegacyCookie(c);
 
 	return c.json(
 		{ userId, email, name: body.name, role: "owner", expiresAt: unixSeconds(expiresAt) },

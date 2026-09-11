@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { outboundJobs } from "@/db/schema";
+import { addresses, attachments, messages, outboundJobs } from "@/db/schema";
 import { processOutboundSend } from "@/domain/mail/outbound";
 import { isOutboundSend } from "@/services/queue";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
@@ -102,5 +102,92 @@ describe("送信の部分失敗・二重送信（#21）", () => {
 
 		expect(sent).toHaveLength(1);
 		expect(h.pending).toHaveLength(0);
+	});
+});
+
+describe("送信の再回収と恒久失敗（#59 / #67 / #102）", () => {
+	it("attempts が上限の期限切れ sending は送信 0 回で failed（#59）", async () => {
+		const h = await freshHarness();
+		const sent = captureSentEmails(h);
+		const { messageId, jobId } = await sendOne(h);
+
+		const db = getDb(h.env);
+		// Worker が落ち続けて attempts が上限に達した固まった job。期限切れ sending の
+		// 拾い直しでも送らない（claims が attempts を数える）。
+		await db
+			.update(outboundJobs)
+			.set({ status: "sending", nextAttemptAt: new Date(Date.now() - 1000), attempts: 99 })
+			.where(eq(outboundJobs.id, jobId));
+
+		await runProcessOnce(h, jobId, messageId);
+
+		expect(sent).toHaveLength(0);
+		const job = await db.select().from(outboundJobs).where(eq(outboundJobs.id, jobId)).get();
+		expect(job!.status).toBe("failed");
+		expect(job!.attempts).toBe(100);
+		const m = await db.select().from(messages).where(eq(messages.id, messageId)).get();
+		expect(m!.status).toBe("failed");
+	});
+
+	it("キュー投入後に差出人をアーカイブしても送信されない（#67）", async () => {
+		const h = await freshHarness();
+		const sent = captureSentEmails(h);
+		const { messageId, jobId } = await sendOne(h);
+
+		const db = getDb(h.env);
+		const sender = await db
+			.select()
+			.from(addresses)
+			.where(eq(addresses.address, "ai@mail.tsubame.test"))
+			.get();
+		await db
+			.update(addresses)
+			.set({ archivedAt: new Date() })
+			.where(eq(addresses.id, sender!.id));
+
+		await runProcessOnce(h, jobId, messageId);
+
+		expect(sent).toHaveLength(0);
+		const job = await db.select().from(outboundJobs).where(eq(outboundJobs.id, jobId)).get();
+		expect(job!.status).toBe("failed");
+		expect(job!.lastError).toContain("アーカイブ");
+	});
+
+	it("R2 から添付が消えていれば送信せず再試行する（#102）", async () => {
+		const h = await freshHarness();
+		const owner = await loginAsOwner(h);
+		await seedDomain(h, { addresses: ["ai"] });
+		const sent = captureSentEmails(h);
+
+		const res = await owner.post("/api/v1/messages", {
+			from: "ai@mail.tsubame.test",
+			to: "x@ext.example.jp",
+			text: "本文",
+			attachments: [{ filename: "a.txt", contentType: "text/plain", base64: btoa("hello") }],
+		});
+		expect(res.status).toBe(202);
+		const messageId = res.body.id as string;
+		const db = getDb(h.env);
+		const job = await db
+			.select()
+			.from(outboundJobs)
+			.where(eq(outboundJobs.messageId, messageId))
+			.get();
+		const att = await db
+			.select()
+			.from(attachments)
+			.where(eq(attachments.messageId, messageId))
+			.get();
+		await h.env.BUCKET.delete(att!.r2Key);
+
+		await runProcessOnce(h, job!.id, messageId);
+
+		// 空の添付を黙って送らない。再試行（queued）に戻り、EMAIL.send は呼ばれない。
+		expect(sent).toHaveLength(0);
+		const jobAfter = await db.select().from(outboundJobs).where(eq(outboundJobs.id, job!.id)).get();
+		expect(jobAfter!.status).toBe("queued");
+		expect(jobAfter!.lastError).toContain("添付データが見つかりません");
+		const m = await db.select().from(messages).where(eq(messages.id, messageId)).get();
+		expect(m!.status).not.toBe("sent");
 	});
 });

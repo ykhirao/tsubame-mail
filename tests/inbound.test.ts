@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { getDb } from "@/db/client";
-import { addresses, attachments, domains, messages, routingRules, threads } from "@/db/schema";
+import { addresses, attachments, domains, messages, routingRules, threads, webhookDeliveries, webhooks } from "@/db/schema";
 import { fakeCtx, resetDb, sampleMime } from "./helpers";
 import { MAX_ATTACHMENTS, STORED_BYTES, processInbound } from "@/domain/mail/inbound";
 import { handleIncomingEmail, MAX_RAW_BYTES } from "@/domain/routing/incoming";
 import { saveRaw } from "@/services/r2";
+import * as webhooksSvc from "@/services/webhooks";
 import { newId } from "@/lib/id";
 import { eq } from "drizzle-orm";
+import { normalizeAddress, parseAddressList } from "@/domain/mail/address";
+import { replyAllRecipients } from "@/api/v1/outbound";
 import type { InboundQueueMessage } from "@/services/queue";
 
 const DOM_ID = "dom_test";
@@ -294,6 +297,37 @@ describe("processInbound", () => {
 		expect(rows[0]!.textBody).toContain("解析できません");
 	});
 
+	it("placeholder の from / to を正規化し、カンマ入り MAIL FROM を返信宛先に漏らさない（#82 再検査失敗）", async () => {
+		await seed();
+		// 解析不能な MIME（入れ子で postal-mime が throw）の placeholder 経路を再現する。
+		const key = await storeRaw(deeplyNestedMime(260));
+		await processInbound(
+			{
+				...payload(key),
+				envelope: { from: "box,leak@evil.jp,zz@evil.com", to: "a@example.com" },
+			},
+			env,
+			fakeCtx,
+		);
+
+		const row = await storedRow(key);
+		// fromAddr は正規化できず空になり、toAddr は正規化されたまま残る。
+		expect(row.fromAddr).toBe("");
+		expect(row.toAddr).toBe("a@example.com");
+		// 保存した from / to から replyAll の宛先を組み立てても leak は現れず、自分だけなので 0 件になる。
+		const isSelf = (a: string) => normalizeAddress(a) === "a@example.com";
+		const recipients = replyAllRecipients(
+			parseAddressList(row.fromAddr),
+			row.toAddr,
+			row.ccAddr,
+			isSelf,
+			true,
+		);
+		expect(recipients.some((r) => r.address.includes("leak@"))).toBe(false);
+		expect(recipients.some((r) => r.address.includes("zz@evil"))).toBe(false);
+		expect(recipients).toHaveLength(0);
+	});
+
 	it("極端に古い Date ヘッダは投入時刻に落とし、カーソルが負数にならない（#19）", async () => {
 		await seed();
 		const raw = [
@@ -544,6 +578,151 @@ describe("processInbound", () => {
 		const row = await storedRow(key);
 		expect(row.toAddr).toContain("a@b.jp");
 		expect(row.textBody).not.toContain("解析できません");
+	});
+
+	it("catch-all 経由で全角ローカル部宛に届いても address ルールに当たる（#73）", async () => {
+		await seed();
+		await getDb(env).insert(routingRules).values({
+			id: newId("rule"),
+			scope: "address",
+			addressId: ADR,
+			name: "drop",
+			action: "drop",
+			matcher: { to: "a@example.com" },
+		});
+		const key = await storeRaw(mimeWith({}));
+		await processInbound(
+			{ ...payload(key), envelope: { from: "taro@example.com", to: "ａ@example.com" } },
+			env,
+			fakeCtx,
+		);
+		expect((await storedRow(key)).status).toBe("trash");
+	});
+
+	it("Unicode ドメイン宛のエンベロープでも address ルールに当たる（#73）", async () => {
+		await seed();
+		await getDb(env).insert(routingRules).values({
+			id: newId("rule"),
+			scope: "address",
+			addressId: ADR,
+			name: "既読にする",
+			action: "mark",
+			matcher: { to: "a@xn--r8jz45g.jp" },
+			target: "read",
+		});
+		const key = await storeRaw(mimeWith({}));
+		await processInbound(
+			{ ...payload(key), envelope: { from: "taro@example.com", to: "a@例え.jp" } },
+			env,
+			fakeCtx,
+		);
+		expect((await storedRow(key)).isRead).toBe(true);
+	});
+
+	it("添付の R2 put が一時失敗しても、再配達で完全になり二重に増えない（#77）", async () => {
+		await seed();
+		const key = await storeRaw(mimeWith({ attachments: 2 }));
+		const db = getDb(env);
+
+		const realBucket = env.BUCKET;
+		let failOnce = true;
+		const flakyEnv = {
+			...env,
+			BUCKET: new Proxy(realBucket, {
+				get(t, p) {
+					if (p === "put") {
+						return async (...args: Parameters<R2Bucket["put"]>) => {
+							const [key2] = args;
+							if (failOnce && typeof key2 === "string" && key2.startsWith("att/")) {
+								failOnce = false;
+								throw new Error("R2 put 一時障害");
+							}
+							return realBucket.put(...args);
+						};
+					}
+					const v = Reflect.get(t, p);
+					return typeof v === "function" ? v.bind(t) : v;
+				},
+			}) as R2Bucket,
+		} as unknown as CloudflareEnv;
+
+		// 添付の R2 put は batch より先に走る。失敗すると行は残らず、再配達で最初からやり直す。
+		await expect(processInbound(payload(key), flakyEnv, fakeCtx)).rejects.toThrow("R2 put 一時障害");
+		expect((await db.select().from(messages).where(eq(messages.rawR2Key, key)).all()).length).toBe(0);
+
+		// 再配達（実 env）で添付が揃い、thread も正しい。
+		await processInbound(payload(key), env, fakeCtx);
+		const row = await storedRow(key);
+		const saved = await db.select().from(attachments).where(eq(attachments.messageId, row.id)).all();
+		expect(saved).toHaveLength(2);
+		expect(row.hasAttachments).toBe(true);
+
+		// もう一度処理しても何も増えない。
+		await processInbound(payload(key), env, fakeCtx);
+		expect((await db.select().from(messages).where(eq(messages.rawR2Key, key)).all()).length).toBe(1);
+		expect((await db.select().from(attachments).where(eq(attachments.messageId, row.id)).all()).length).toBe(2);
+	});
+
+	it("batch が一度失敗しても、再配達で完全になり二重に増えない（#77）", async () => {
+		await seed();
+		const key = await storeRaw(mimeWith({ attachments: 2 }));
+		const db = getDb(env);
+
+		const batchSpy = vi.spyOn(env.DB, "batch").mockRejectedValueOnce(new Error("D1 batch 一時障害"));
+		await expect(processInbound(payload(key), env, fakeCtx)).rejects.toThrow("D1 batch 一時障害");
+		expect((await db.select().from(messages).where(eq(messages.rawR2Key, key)).all()).length).toBe(0);
+		expect((await db.select().from(threads).all()).length).toBe(0);
+
+		batchSpy.mockRestore();
+		await processInbound(payload(key), env, fakeCtx);
+		const row = await storedRow(key);
+		expect((await db.select().from(attachments).where(eq(attachments.messageId, row.id)).all()).length).toBe(2);
+		const t = await db.select().from(threads).where(eq(threads.id, row.threadId as string)).get();
+		expect(t?.messageCount).toBe(1);
+		expect(t?.unreadCount).toBe(1);
+
+		// さらに処理しても何も増えない。
+		await processInbound(payload(key), env, fakeCtx);
+		expect((await db.select().from(messages).where(eq(messages.rawR2Key, key)).all()).length).toBe(1);
+		expect((await db.select().from(attachments).where(eq(attachments.messageId, row.id)).all()).length).toBe(2);
+		expect((await db.select().from(threads).all()).length).toBe(1);
+	});
+
+	it("Webhook 配信が一時失敗しても、再配達で同じ payload の配信行が二重に作られない（#77）", async () => {
+		await seed();
+		const key = await storeRaw(mimeWith({}));
+		const db = getDb(env);
+		await db.insert(webhooks).values({
+			id: newId("webhook"),
+			name: "hook",
+			url: "https://hook.example",
+			secret: "s",
+			events: ["message.received"],
+			enabled: true,
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{}", { status: 200 })),
+		);
+
+		const dispatchSpy = vi.spyOn(webhooksSvc, "dispatchMessageEvent");
+		dispatchSpy.mockRejectedValueOnce(new Error("webhook dispatch 一時障害"));
+
+		// batch は確定済みなので行が残るが、dispatch だけが失敗する。
+		await expect(processInbound(payload(key), env, fakeCtx)).rejects.toThrow("webhook dispatch 一時障害");
+
+		// 再配達は dup 判定で行を再利用し、dispatch だけを re-run して配信行を 1 本作る。
+		await processInbound(payload(key), env, fakeCtx);
+		const row = await storedRow(key);
+		const dlv = () => db.select().from(webhookDeliveries).where(eq(webhookDeliveries.messageId, row.id)).all();
+		expect((await dlv()).length).toBe(1);
+
+		// さらにもう一度処理しても配信行は増えない。
+		await processInbound(payload(key), env, fakeCtx);
+		expect((await dlv()).length).toBe(1);
+		expect((await db.select().from(messages).where(eq(messages.rawR2Key, key)).all()).length).toBe(1);
+
+		dispatchSpy.mockRestore();
 	});
 });
 

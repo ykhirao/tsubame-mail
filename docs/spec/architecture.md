@@ -102,7 +102,7 @@ docs/                    [W10]
 | テーブル | 目的 | 要点 |
 | --- | --- | --- |
 | `users` | 人と AI のアカウント | `role: owner \| member \| agent`, `password_hash`(agent は null 可), `status` |
-| `sessions` | UI セッション | Cookie `tsb_session`。ハッシュ保存、期限あり |
+| `sessions` | UI セッション | Cookie `__Host-tsb_session`（精査 #84）。ハッシュ保存、期限あり |
 | `api_keys` | API トークン | `key_hash`, `prefix`, `scopes[]`, `address_ids[] \| null`, `expires_at`, `revoked_at` |
 | `domains` | 接続済みゾーン | `zone_id`, `zone_name`, `name`, `mode: apex \| subdomain`, `routing_status`, `sending_status` |
 | `addresses` | 受信アドレス | `domain_id`, `local_part`, `address`(一意), `kind: mailbox \| alias`, `alias_target_id`, `is_catch_all` |

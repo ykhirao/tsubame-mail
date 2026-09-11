@@ -93,6 +93,17 @@ export async function resolveIncoming(db: Db, input: ResolveInput): Promise<Reso
 		.orderBy(desc(routingRules.priority), asc(routingRules.createdAt))
 		.all();
 
+	// 完全一致の経路と同様に、エイリアスは辿り、アーカイブ済みは「実在しない」扱いにする（#62）。
+	// 辿れない deliver 先は配送せず、次のルール / catch-all の判定へ落とす。
+	async function resolveDeliverTarget(addressId: string): Promise<string | null> {
+		const row = await db.select().from(addresses).where(eq(addresses.id, addressId)).get();
+		if (!row || row.archivedAt) return null;
+		if (row.kind !== "alias" || !row.aliasTargetId) return row.id;
+		const target = await db.select().from(addresses).where(eq(addresses.id, row.aliasTargetId)).get();
+		if (!target || target.archivedAt) return null;
+		return target.id;
+	}
+
 	// 配送は `+タグ` を落とした基本アドレスにも届くので、ルールも両方に当てる。
 	// リテラルだけで判定すると、1 文字足すだけで拒否をすり抜けられる。
 	const candidates = [to];
@@ -139,7 +150,11 @@ export async function resolveIncoming(db: Db, input: ResolveInput): Promise<Reso
 			return { action: "forward", to: rule.target };
 		}
 		if (rule.action === "deliver" && rule.target) {
-			return { action: "deliver", addressId: rule.target };
+			const resolved = await resolveDeliverTarget(rule.target);
+			if (resolved !== null) return { action: "deliver", addressId: resolved };
+			// アーカイブ済み・消えたエイリアス先を指すルールは満たせない。
+			// 次以降の判定（catch-all などの完全一致以外の経路）に落とし、ここで配送しない。
+			continue;
 		}
 		if (rule.action === "drop") {
 			return { action: "drop" };

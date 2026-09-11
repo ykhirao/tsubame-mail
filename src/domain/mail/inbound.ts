@@ -1,6 +1,6 @@
 // キューは at-least-once なので、同じ rawKey を二重処理しないこと。
 import { and, asc, desc, eq } from "drizzle-orm";
-import { attachments, messages, routingRules, threads } from "@/db/schema";
+import { attachments, messages, routingRules } from "@/db/schema";
 import type { Db } from "@/db/client";
 import { getDb } from "@/db/client";
 import { newId } from "@/lib/id";
@@ -8,9 +8,10 @@ import { getRaw, putAttachment } from "@/services/r2";
 import { MAX_RAW_BYTES } from "@/domain/routing/incoming";
 import { parseRawMime, type ParsedAttachment, type ParsedMessage } from "./parse";
 import { escapeHtml } from "./quote";
-import { adjustThreadUnread, findExistingThreadId, updateThreadStats } from "./thread";
+import { createThreadStatement, findExistingThreadId, updateThreadStatsStatement } from "./thread";
 import { matchRule, type Matcher } from "@/domain/routing/rules";
 import { baseAddressOf, normalizeAddress } from "./address";
+import { canonicalAddress } from "@/domain/routing/resolve";
 import { dispatchMessageEvent } from "@/services/webhooks";
 import type { InboundQueueMessage } from "@/services/queue";
 
@@ -89,6 +90,12 @@ function skippedAttachmentsNotice(skipped: ParsedAttachment[]): string {
 	}MB）の上限を超えたため保存していません: ${names}${more}]`;
 }
 
+// placeholder は envelope の値のまま保存する。MAIL FROM は送信者が自由に書けるので、
+// カンマが混じると保存を読み直したときに宛先が割れる。正規化して落とす（#82 再検査失敗）。
+function sanitizeEnvelope(value: string): string {
+	return normalizeAddress(value) ?? "";
+}
+
 function withNotices(
 	text: string | null,
 	html: string | null,
@@ -110,8 +117,8 @@ function oversizedPlaceholder(msg: InboundQueueMessage, sizeBytes: number): Pars
 		"本文と添付を取り込んでいません。生 MIME は保存してあります。";
 	return {
 		messageId: null,
-		from: { address: msg.envelope.from },
-		to: msg.envelope.to,
+		from: { address: sanitizeEnvelope(msg.envelope.from) },
+		to: sanitizeEnvelope(msg.envelope.to),
 		cc: "",
 		subject: "（サイズ上限を超えたメール）",
 		text,
@@ -134,8 +141,8 @@ function parseErrorPlaceholder(msg: InboundQueueMessage, err: unknown): ParsedMe
 	const text = `このメールは解析できませんでした（${reason}）。生 MIME は保存してあります。`;
 	return {
 		messageId: null,
-		from: { address: msg.envelope.from },
-		to: msg.envelope.to,
+		from: { address: sanitizeEnvelope(msg.envelope.from) },
+		to: sanitizeEnvelope(msg.envelope.to),
 		cc: "",
 		subject: "（解析できなかったメール）",
 		text,
@@ -155,11 +162,11 @@ type AddressRuleMatch = {
 	text?: string | null;
 };
 
-/** 返値の read は「最終的な既読状態」。スレッド未読数の調整に使う。 */
-async function applyAddressRules(
+/** 判定は messages の insert に status / isRead / isStarred として反映し、書き込みは batch に任せる（#77）。 */
+async function matchAddressRules(
 	db: Db,
-	opts: { addressId: string; messageId: string; match: AddressRuleMatch },
-): Promise<{ read: boolean; dropped: boolean }> {
+	opts: { addressId: string; match: AddressRuleMatch },
+): Promise<{ read: boolean; starred: boolean; dropped: boolean }> {
 	const rules = await db
 		.select()
 		.from(routingRules)
@@ -180,14 +187,27 @@ async function applyAddressRules(
 	// resolve.ts の配送判定と同じく、正規化した宛先と +タグ を落とした基本アドレスにもルールを当てる。
 	// envelope の生の値は引用ローカル部・末尾ドットを持てるので、リテラル一致だけだと
 	// `"a"@example.com` / `a.@example.com` 宛の drop ルールをすり抜けられる（#28）。
-	const toCandidates = [
-		opts.match.to,
-		opts.match.to ? normalizeAddress(opts.match.to) ?? undefined : undefined,
-		opts.match.to ? baseAddressOf(opts.match.to) ?? undefined : undefined,
-	];
+	// 配送判定が使う canonicalAddress（punycode）と NFKC 畳み込みも候補に足して、catch-all 経由で
+	// 全角ローカル部や Unicode ドメインが届いても a のルールに当てる（#73）。
+	const to = opts.match.to;
+	const candidates = new Set<string>();
+	const addCandidate = (s: string | undefined) => {
+		if (!s) return;
+		candidates.add(s);
+		candidates.add(s.normalize("NFKC").toLowerCase());
+	};
+	addCandidate(to);
+	if (to) {
+		addCandidate(normalizeAddress(to) ?? undefined);
+		addCandidate(baseAddressOf(to) ?? undefined);
+	}
+	const canonical = to ? canonicalAddress(to) ?? undefined : undefined;
+	addCandidate(canonical);
+	if (canonical) addCandidate(baseAddressOf(canonical) ?? undefined);
+	const toCandidates = [...candidates];
 	for (const rule of rules) {
 		const matcher = rule.matcher as Matcher;
-		const matched = toCandidates.some((to) => matchRule(matcher, { ...opts.match, to }));
+		const matched = toCandidates.some((c) => matchRule(matcher, { ...opts.match, to: c }));
 		if (!matched) continue;
 		if (rule.action === "mark") {
 			if (rule.target === "read") read = true;
@@ -199,14 +219,7 @@ async function applyAddressRules(
 		}
 	}
 
-	const updates: { isRead: boolean; isStarred: boolean; status?: "trash" } = {
-		isRead: read,
-		isStarred: starred,
-	};
-	if (dropped) updates.status = "trash";
-	await db.update(messages).set(updates).where(eq(messages.id, opts.messageId));
-
-	return { read, dropped };
+	return { read, starred, dropped };
 }
 
 export async function processInbound(
@@ -217,13 +230,17 @@ export async function processInbound(
 	void ctx;
 	const db = getDb(env);
 
-	// キューは at-least-once。同じ rawKey が保存済みならスキップする。
+	// キューは at-least-once。行が既にあれば、本文・添付・統計・ルールは batch で一括済み。
+	// 残るのは Webhook 配信だけなので、再配達ではその re-run に徹する（精査 #77）。dispatch は冪等。
 	const dup = await db
 		.select({ id: messages.id })
 		.from(messages)
 		.where(eq(messages.rawR2Key, msg.rawKey))
 		.get();
-	if (dup) return;
+	if (dup) {
+		await dispatchMessageEvent(env, "message.received", dup.id);
+		return;
+	}
 
 	const rawObj = await getRaw(env, msg.rawKey);
 	if (!rawObj) throw new Error(`生 MIME が見つかりません: ${msg.rawKey}`);
@@ -274,12 +291,64 @@ export async function processInbound(
 	}
 
 	const messageId = newId("message");
+
+	// ルールの判定は insert 前に計算し、messages の insert に status / isRead / isStarred として反映する。
+	// To ヘッダは送信者が書き換えられる。実際の宛先であるエンベロープで照合する（#77）。
+	const { read, starred, dropped } = await matchAddressRules(db, {
+		addressId: msg.addressId,
+		match: {
+			from: parsed.from?.address,
+			to: msg.envelope.to,
+			subject: parsed.subject,
+			text: parsed.text,
+		},
+	});
+	const status = dropped ? "trash" : "received";
+
+	// 添付の R2 put を messages の insert より先に済ませる。ここで落ちたら再配達が最初から
+	// やり直す。messageId は毎回採番し直すので前回の put は孤児として R2 に残る（許容・#77）。
+	const attachmentRows: (typeof attachments.$inferInsert)[] = [];
+	for (const att of kept) {
+		const attachmentId = newId("attachment");
+		const r2Key = await putAttachment(env, messageId, attachmentId, att.content, att.contentType);
+		attachmentRows.push({
+			id: attachmentId,
+			messageId,
+			filename: clampUtf8(att.filename, STORED_BYTES.short),
+			contentType: clampUtf8(att.contentType, STORED_BYTES.contentType),
+			sizeBytes: att.sizeBytes,
+			contentId: clampNullable(att.contentId, STORED_BYTES.short),
+			isInline: att.isInline,
+			r2Key,
+		});
+	}
+
+	// drop はスレッド未読数も減らす。queryThreads / サイドバーは trash を除外するので、
+	// 足したままだと一覧の未読と食い違う（精査 #92）。未読の net 増分はここで畳む。
+	const loweredUnread = read || dropped;
+
+	// 新規スレッドも含めて thread・message・attachments を同じ batch にし、どれかが落ちると
+	// 全部残らないようにする。行が残る = 本文・添付・統計・ルールが済んでいる、の合図になる（#77）。
+	const threadStatement = isNewThread
+		? createThreadStatement(db, {
+				id: newThreadId!,
+				addressId: msg.addressId,
+				subject,
+				lastMessageAt: receivedAt,
+				messageCount: 1,
+				unreadCount: loweredUnread ? 0 : 1,
+			})
+		: updateThreadStatsStatement(db, {
+				threadId,
+				lastMessageAt: receivedAt,
+				unreadDelta: loweredUnread ? 0 : 1,
+			});
 	const messageInsert = db.insert(messages).values({
 		id: messageId,
 		threadId,
 		addressId: msg.addressId,
 		direction: "inbound",
-		status: "received",
+		status,
 		rfcMessageId: clampNullable(parsed.messageId, STORED_BYTES.short),
 		inReplyTo: clampNullable(parsed.inReplyTo, STORED_BYTES.short),
 		referencesHeader: clampNullable(parsed.references, STORED_BYTES.references),
@@ -294,61 +363,15 @@ export async function processInbound(
 		rawR2Key: msg.rawKey,
 		sizeBytes,
 		hasAttachments: kept.length > 0,
-		isRead: false,
-		isStarred: false,
+		isRead: read,
+		isStarred: starred,
 		receivedAt,
 	});
-	if (isNewThread) {
-		// 新規スレッドは messageCount:1・unreadCount:1 で初期化するので、後に足さない。
-		const threadInsert = db.insert(threads).values({
-			id: newThreadId!,
-			addressId: msg.addressId,
-			subject,
-			lastMessageAt: receivedAt,
-			messageCount: 1,
-			unreadCount: 1,
-		});
-		await db.batch([threadInsert, messageInsert]);
-	} else {
-		await messageInsert;
-	}
-
-	for (const att of kept) {
-		const attachmentId = newId("attachment");
-		const r2Key = await putAttachment(env, messageId, attachmentId, att.content, att.contentType);
-		await db.insert(attachments).values({
-			id: attachmentId,
-			messageId,
-			filename: clampUtf8(att.filename, STORED_BYTES.short),
-			contentType: clampUtf8(att.contentType, STORED_BYTES.contentType),
-			sizeBytes: att.sizeBytes,
-			contentId: clampNullable(att.contentId, STORED_BYTES.short),
-			isInline: att.isInline,
-			r2Key,
-		});
-	}
-
-	// 新規スレッドは作成時に 1 件・未読 1 で初期化済みなので、二重に足さない。
-	if (!isNewThread) {
-		await updateThreadStats(db, { threadId, lastMessageAt: receivedAt, unreadDelta: 1 });
-	}
-
-	const { read, dropped } = await applyAddressRules(db, {
-		addressId: msg.addressId,
-		messageId,
-		// To ヘッダは送信者が書き換えられる。実際の宛先であるエンベロープで照合する。
-		match: {
-			from: parsed.from?.address,
-			to: msg.envelope.to,
-			subject: parsed.subject,
-			text: parsed.text,
-		},
-	});
-	// drop はスレッド未読数も減らす。queryThreads / サイドバーは trash を除外するので、
-	// 足したままだと一覧の未読と食い違う（精査 #92）。
-	if (read || dropped) {
-		await adjustThreadUnread(db, threadId, -1);
-	}
+	await db.batch([
+		threadStatement,
+		messageInsert,
+		...attachmentRows.map((r) => db.insert(attachments).values(r)),
+	]);
 
 	await dispatchMessageEvent(env, "message.received", messageId);
 }

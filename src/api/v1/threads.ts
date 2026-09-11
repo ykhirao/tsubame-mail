@@ -3,6 +3,7 @@ import type { AppEnv } from "@/api/types";
 import { invalidRequest, notFound } from "@/shared/errors";
 import {
 	threadListQuery,
+	detailQuery,
 	type ThreadListResponse,
 	type ThreadDetailResponse,
 } from "@/shared/contracts/messages";
@@ -47,6 +48,7 @@ routes.get("/", async (c) => {
 	const { rows, nextCursor } = await queryThreads(db, {
 		principal,
 		addressId,
+		view: q.view,
 		limit: q.limit,
 		cursor: q.cursor,
 	});
@@ -76,11 +78,19 @@ routes.get("/:id", async (c) => {
 	const principal = c.get("principal");
 	requireScope(principal, "read");
 	const id = c.req.param("id");
+	const q = detailQuery.safeParse(c.req.query());
+	if (!q.success) {
+		throw invalidRequest(
+			"スレッド詳細のパラメータが不正です",
+			q.error.issues?.map((i) => ({ path: i.path?.join("."), message: i.message })) ?? [],
+		);
+	}
+	const includeTrash = q.data.includeTrash === true;
 
-	const thread = await getThread(db, principal, id);
+	const thread = await getThread(db, principal, id, includeTrash);
 	if (!thread) throw notFound("スレッドが見つかりません");
 
-	const msgs = await queryThreadMessages(db, principal, id);
+	const msgs = await queryThreadMessages(db, principal, id, includeTrash);
 	const messages = [];
 	for (const m of msgs) {
 		const atts = await attachmentsForMessage(db, m.id);

@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import adminDomainRoutes from "@/api/v1/admin/domains";
-import { domains } from "@/db/schema";
+import { addresses, domains } from "@/db/schema";
 import {
 	applyMigrations,
 	callJson,
@@ -44,6 +44,31 @@ async function seedDomain(id: string, name: string, catchAllEnabled = false) {
 	return id;
 }
 
+async function seedEnabled(id: string, name: string) {
+	await seedDomain(id, name, true);
+	await getTestDb().insert(addresses).values({
+		id: `adr_${id}`,
+		domainId: id,
+		localPart: "any",
+		address: `any@${name}`,
+		isCatchAll: true,
+	});
+	fake.catchAll.enabled = true;
+	return id;
+}
+
+async function seedReceivable(id: string, name: string) {
+	await seedDomain(id, name);
+	await getTestDb().insert(addresses).values({
+		id: `adr_${id}`,
+		domainId: id,
+		localPart: "any",
+		address: `any@${name}`,
+		isCatchAll: true,
+	});
+	return id;
+}
+
 describe("POST /admin/domains/:id/catch-all（#85 ゾーン単位の食い違い）", () => {
 	it("無効化にも confirm を要求する（有効化と同じ）", async () => {
 		const id = await seedDomain(`dom_off${seq}`, `send${seq}.example.com`, true);
@@ -83,6 +108,65 @@ describe("POST /admin/domains/:id/catch-all（#85 ゾーン単位の食い違い
 
 		expect(res.status).toBe(200);
 		expect(fake.catchAll.enabled).toBe(false);
+	});
+});
+
+describe("POST catch-all の有効化（#117 ゾーンで 1 本）", () => {
+	it("同じゾーンで他ドメインが有効な間は有効化できない（409・CF は触らない）", async () => {
+		const a = await seedEnabled(`dom_ea${seq}`, `mail${seq}.example.com`);
+		const b = await seedReceivable(`dom_eb${seq}`, `send${seq}.example.com`);
+
+		const res = await callJson(adminDomains(), `/${b}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: true, confirm: true }),
+		});
+
+		expect(res.status).toBe(409);
+		expect(res.json.error.message).toContain(`mail${seq}.example.com`);
+		expect(fake.catchAll.enabled).toBe(true);
+		const bRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, b) });
+		expect(bRow?.catchAllEnabled).toBe(false);
+		const aRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, a) });
+		expect(aRow?.catchAllEnabled).toBe(true);
+	});
+
+	it("先に有効な方を無効化すれば他ドメインを有効化できる", async () => {
+		const a = await seedEnabled(`dom_ca${seq}`, `mail${seq}.example.com`);
+		const b = await seedReceivable(`dom_cb${seq}`, `send${seq}.example.com`);
+
+		const off = await callJson(adminDomains(), `/${a}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+		expect(off.status).toBe(200);
+
+		const on = await callJson(adminDomains(), `/${b}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: true, confirm: true }),
+		});
+		expect(on.status).toBe(200);
+		const bRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, b) });
+		expect(bRow?.catchAllEnabled).toBe(true);
+		const aRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, a) });
+		expect(aRow?.catchAllEnabled).toBe(false);
+	});
+
+	it("両方「有効」の破綻状態からは、どちらか一方を無効化して抜け出せる（#117）", async () => {
+		const a = await seedEnabled(`dom_da${seq}`, `mail${seq}.example.com`);
+		const b = await seedDomain(`dom_db${seq}`, `send${seq}.example.com`, true);
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${b}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+
+		expect(res.status).toBe(200);
+		expect(fake.catchAll.enabled).toBe(true);
+		const bRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, b) });
+		expect(bRow?.catchAllEnabled).toBe(false);
+		const aRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, a) });
+		expect(aRow?.catchAllEnabled).toBe(true);
 	});
 });
 

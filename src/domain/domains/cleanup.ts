@@ -68,13 +68,10 @@ export function isOwnDnsRecord(
 	if (target.mode === "subdomain" && (name === zoneName || isZoneApex(name, zoneName))) {
 		return false;
 	}
-	// apex 切断はゾーン全体が underMailName になってしまうため、他のサブドメインを
-	// 巻き込まないよう名前の完全一致（と DKIM の固定ホスト名）だけを対象にする。
-	const underMailName =
-		target.mode === "apex"
-			? name === mailName || name === `cf-bounce._domainkey.${mailName}`
-			: name === mailName || name.endsWith(`.${mailName}`);
-	if (!underMailName) return false;
+	// 名前の完全一致（と DKIM の固定ホスト名）だけを対象にする。配下の別接続の
+	// MX / TXT を巻き込まないため、`endsWith(.$mailName)` にはしない（#60）。
+	const isMailHost = name === mailName || name === `cf-bounce._domainkey.${mailName}`;
+	if (!isMailHost) return false;
 
 	if (type === "MX") return content.endsWith("mx.cloudflare.net");
 	if (type === "TXT") {
@@ -167,7 +164,7 @@ export async function cleanupDomain(
 	for (const record of records) {
 		const name = normalizeDnsName(record.name);
 		const mailName = normalizeDnsName(target.name);
-		const underMailName = name === mailName || name.endsWith(`.${mailName}`);
+		const underMailName = name === mailName || name === `cf-bounce._domainkey.${mailName}`;
 		if (!underMailName) continue;
 
 		if (!isOwnDnsRecord(record, target)) {

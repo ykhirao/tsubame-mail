@@ -13,6 +13,12 @@ const boolParam = z
 	.transform((v) => v === "true" || v === "1")
 	.optional();
 
+/** 単体取得系は既定でゴミ箱を除く。true でゴミ箱のメッセージも含める。 */
+export const detailQuery = z.object({
+	includeTrash: boolParam,
+});
+export type DetailQuery = z.infer<typeof detailQuery>;
+
 export const attachmentMeta = z.object({
 	id: z.string(),
 	filename: z.string(),
@@ -55,7 +61,7 @@ export type MessageListResponse = z.infer<typeof messageListResponse>;
 
 /** 個別パラメータは q 内の同名条件より優先される。 */
 export const messageListQuery = paginationQuery.extend({
-	q: z.string().optional(),
+	q: z.string().max(500).optional(),
 	/** アドレス文字列（含@）か addressId。 */
 	address: z.string().optional(),
 	/** 以下 4 つはいずれも部分一致。 */
@@ -117,6 +123,7 @@ export type ThreadListResponse = z.infer<typeof threadListResponse>;
 
 export const threadListQuery = paginationQuery.extend({
 	address: z.string().optional(),
+	view: z.enum(["inbox", "starred", "sent", "trash"]).optional(),
 });
 export type ThreadListQuery = z.infer<typeof threadListQuery>;
 

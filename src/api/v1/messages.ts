@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { eq, sql } from "drizzle-orm";
-import { messages, threads } from "@/db/schema";
+import { messages, outboundJobs, threads } from "@/db/schema";
 import type { Db } from "@/db/client";
 import type { AppEnv } from "@/api/types";
 import { readJson } from "@/lib/validate";
@@ -9,6 +9,7 @@ import { canWrite, requireScope } from "@/domain/access/policy";
 import {
 	messageListQuery,
 	messagePatch,
+	detailQuery,
 	type MessageListResponse,
 	type MessageListItem,
 	type MessageDetail,
@@ -141,11 +142,27 @@ routes.get("/:id", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
 	requireScope(principal, "read");
+	const q = detailQuery.safeParse(c.req.query());
+	if (!q.success) throw invalidRequest("メッセージのパラメータが不正です", zodIssues(q));
 	const id = c.req.param("id");
-	const m = await getMessage(db, principal, id, true);
+	const m = await getMessage(db, principal, id, {
+		withBody: true,
+		includeTrash: q.data.includeTrash === true,
+	});
 	if (!m) throw notFound("メッセージが見つかりません");
 	return c.json(await toDetail(db, m));
 });
+
+async function outboundRestoreStatus(db: Db, messageId: string): Promise<MessageStatus> {
+	const job = await db
+		.select({ status: outboundJobs.status })
+		.from(outboundJobs)
+		.where(eq(outboundJobs.messageId, messageId))
+		.get();
+	if (job?.status === "failed") return "failed";
+	if (job?.status === "queued" || job?.status === "sending") return "queued";
+	return "sent";
+}
 
 // 既読・スターは閲覧に付随する操作なので read で通す。read 割り当ての共有メンバーでも
 // スレッドを開くと既読付けが走る（ThreadDetail.tsx）ため、write を要求すると画面が壊れる。
@@ -157,7 +174,7 @@ routes.patch("/:id", async (c) => {
 	const id = c.req.param("id");
 	const p = await readJson(c.req, messagePatch);
 
-	const cur = await getMessage(db, principal, id);
+	const cur = await getMessage(db, principal, id, { includeTrash: true });
 	if (!cur) throw notFound("メッセージが見つかりません");
 	if (p.status !== undefined) {
 		requireScope(principal, "send");
@@ -173,7 +190,12 @@ routes.patch("/:id", async (c) => {
 	}> = {};
 	if (p.isRead !== undefined) update.isRead = p.isRead;
 	if (p.isStarred !== undefined) update.isStarred = p.isStarred;
-	if (p.status !== undefined) update.status = p.status;
+	if (p.status !== undefined) {
+		// outbound を「受信」にすると status=sent の検索から消え、送信に失敗したメールまで
+		// 受信扱いになる（#68）。ゴミ箱から戻すときは送信ジョブの状態に戻す。
+		update.status =
+			p.status === "received" && cur.direction === "outbound" ? await outboundRestoreStatus(db, id) : p.status;
+	}
 
 	await db.update(messages).set(update).where(eq(messages.id, id)).run();
 
@@ -186,7 +208,7 @@ routes.patch("/:id", async (c) => {
 			.run();
 	}
 
-	const updated = await getMessage(db, principal, id, true);
+	const updated = await getMessage(db, principal, id, { withBody: true, includeTrash: true });
 	return c.json(updated ? await toDetail(db, updated) : undefined);
 });
 

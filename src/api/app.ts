@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import { getDb } from "@/db/client";
-import { ApiError, invalidRequest } from "@/shared/errors";
+import { parseBearer, SESSION_COOKIE } from "@/lib/tokens";
+import { ApiError, forbidden, invalidRequest } from "@/shared/errors";
 import { requireAuth, requireOwner } from "./middleware/auth";
 import type { AppEnv } from "./types";
 
@@ -36,6 +37,15 @@ async function hasNonEmptyBody(raw: Request): Promise<boolean> {
 	}
 }
 
+// サンドボックス化した iframe などは `Origin: null` を送り、URL として読めない。一致しない扱いにする。
+function isSameOrigin(origin: string, requestUrl: string): boolean {
+	try {
+		return new URL(origin).origin === new URL(requestUrl).origin;
+	} catch {
+		return false;
+	}
+}
+
 export function createApp() {
 	const app = new Hono<AppEnv>();
 
@@ -59,6 +69,30 @@ export function createApp() {
 	app.use("*", async (c, next) => {
 		c.set("db", getDb(c.env));
 		c.set("requestId", crypto.randomUUID());
+		await next();
+	});
+
+	// Cookie 認証で動く変更系は、同一登録ドメインの別サブドメインから no-cors で叩けないようにする（#76）。
+	// API キー（Bearer）の要求は CSRF の対象外なので検査しない。
+	// Sec-Fetch-Site を先に見る: Vite の dev proxy は Host / Origin を書き換えるので、
+	// オリジン照合だけで判定すると dev が壊れる。ヘッダが無い非ブラウザは Origin 照合に落とす。
+	app.use("/api/*", async (c, next) => {
+		const method = c.req.method;
+		if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
+			const isApiKey = parseBearer(c.req.header("authorization")) !== null;
+			const hasSessionCookie = (c.req.header("cookie") ?? "").includes(`${SESSION_COOKIE}=`);
+			if (!isApiKey && hasSessionCookie) {
+				const site = c.req.header("sec-fetch-site");
+				if (site !== undefined) {
+					if (site !== "same-origin") throw forbidden("不正なリクエスト元です");
+				} else {
+					const origin = c.req.header("origin");
+					if (origin !== undefined && !isSameOrigin(origin, c.req.url)) {
+						throw forbidden("不正なリクエスト元です");
+					}
+				}
+			}
+		}
 		await next();
 	});
 

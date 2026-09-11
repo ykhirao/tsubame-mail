@@ -13,7 +13,13 @@ import {
 import { adminApiKeyListQuery, adminCreateApiKeyBody } from "@/shared/contracts/api-keys";
 import { invalidRequest, notFound } from "@/shared/errors";
 import { clientIp, getPrincipal, requireOwner } from "../../middleware/auth";
-import { serializeKey, assertAddressesExist } from "../me";
+import {
+	assertAddressesExist,
+	clampAddressIds,
+	clampExpiresAt,
+	clampScopes,
+	serializeKey,
+} from "../me";
 import type { AppEnv } from "../../types";
 
 const app = new Hono<AppEnv>();
@@ -52,34 +58,42 @@ app.post("/", async (c) => {
 		.limit(1);
 	if (!user) throw notFound("ユーザーが見つかりません");
 
+	let scopes = [...new Set(body.scopes)];
+	let addressIds = body.addressIds ? [...new Set(body.addressIds)] : null;
+	let expiresAt = body.expiresAt ? new Date(body.expiresAt * 1000) : null;
+	// zod の max で範囲の手前は落ちるが、NaN のまま保存すると「無期限」として読まれるのでここでも落とす（#83）。
+	if (expiresAt && !Number.isFinite(expiresAt.getTime())) throw invalidRequest("expiresAt が不正です");
+
+	// #58 要求者が API キーのとき、作れるキーはそのキーの範囲を超えられない。
+	// 絞られた admin キーから全アドレス・全スコープ・無期限のキーが作れてしまうのを塞ぐ。
+	if (principal.via === "api_key") {
+		scopes = clampScopes(principal.scopes, scopes);
+		addressIds = clampAddressIds(principal.addressIds, addressIds, true);
+		expiresAt = await clampExpiresAt(db, principal, body.expiresAt);
+	}
+
 	// キーの addressIds は所有ユーザーの権限との積集合になるので、
 	// 権限外のアドレスを入れても無効になるだけ。気づけるようにここで弾く。
-	const access = await resolveUserAddressAccess(db, { id: user.id, role: user.role });
-	const requested = body.addressIds ?? null;
-	if (requested) {
-		const outside = requested.filter((id) => !addressSetHas(access.readable, id));
+	if (addressIds) {
+		const access = await resolveUserAddressAccess(db, { id: user.id, role: user.role });
+		const outside = addressIds.filter((id) => !addressSetHas(access.readable, id));
 		if (outside.length > 0) {
 			throw invalidRequest(
 				`ユーザーに権限の無いアドレスです。先に grants を付けてください: ${outside.join(", ")}`,
 			);
 		}
+		await assertAddressesExist(db, addressIds);
 	}
 
 	const generated = await generateApiKey();
 	const id = newId("apiKey");
-	const addressIds = requested ? [...new Set(requested)] : null;
-	if (addressIds) await assertAddressesExist(db, addressIds);
-	// zod の max で範囲の手前は落ちるが、NaN のまま保存すると「無期限」として読まれるのでここでも落とす（#83）。
-	const expiresAt = body.expiresAt ? new Date(body.expiresAt * 1000) : null;
-	if (expiresAt && !Number.isFinite(expiresAt.getTime())) throw invalidRequest("expiresAt が不正です");
-
 	await db.insert(schema.apiKeys).values({
 		id,
 		userId: user.id,
 		name: body.name,
 		prefix: generated.prefix,
 		keyHash: generated.hash,
-		scopes: [...new Set(body.scopes)],
+		scopes,
 		addressIds,
 		expiresAt,
 	});
@@ -89,7 +103,14 @@ app.post("/", async (c) => {
 		action: "api_key.create",
 		targetType: "api_key",
 		targetId: id,
-		meta: { userId: user.id, name: body.name, scopes: body.scopes, addressIds },
+		meta: {
+			userId: user.id,
+			name: body.name,
+			scopes,
+			addressIds,
+			expiresAt: expiresAt ? unixSeconds(expiresAt) : null,
+			apiKeyId: principal.apiKeyId ?? null,
+		},
 		ip: clientIp(c),
 	});
 

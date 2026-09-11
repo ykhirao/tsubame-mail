@@ -6,11 +6,13 @@ import { conflict, invalidRequest, notFound } from "@/shared/errors";
 import { paginationQuery } from "@/shared/contracts/common";
 import { webhookInput, webhookListQuery, webhookUpdateInput } from "@/shared/contracts/webhooks";
 import { newId } from "@/lib/id";
+import { readJson } from "@/lib/validate";
 import { runDelivery } from "@/services/webhooks";
 import { afterCursor, toPage } from "@/lib/paging";
 import type { Webhook, WebhookDelivery } from "@/shared/contracts/webhooks";
 import type { AppEnv } from "@/api/types";
-import { requireOwner } from "../middleware/auth";
+import { clientIp, getPrincipal, requireOwner } from "../middleware/auth";
+import { recordAudit } from "@/domain/access/policy";
 
 export const webhookRoutes = new Hono<AppEnv>();
 export default webhookRoutes;
@@ -104,15 +106,8 @@ webhookRoutes.get("/", async (c) => {
 });
 
 webhookRoutes.post("/", async (c) => {
-	const body = await c.req.json().catch(() => {
-		throw invalidRequest("JSON ボディをパースできません");
-	});
-	const parsed = webhookInput.safeParse(body);
-	if (!parsed.success) {
-		throw invalidRequest("リクエストが不正です", parsed.error.issues);
-	}
-	const v = parsed.data;
 	const db = getDb(c.env);
+	const v = await readJson(c.req, webhookInput);
 	await assertAddressIdsValid(db, v.addressIds, c.get("principal"));
 	const id = newId("webhook");
 	const secret = generateSecret();
@@ -129,6 +124,20 @@ webhookRoutes.post("/", async (c) => {
 		})
 		.returning();
 	if (!row) throw new Error("webhook の作成に失敗しました");
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "webhook.create",
+		targetType: "webhook",
+		targetId: id,
+		meta: {
+			name: v.name,
+			url: v.url,
+			events: v.events,
+			addressIds: v.addressIds ?? null,
+			enabled: v.enabled,
+		},
+		ip: clientIp(c),
+	});
 	return c.json({ ...toResponse(row), secret }, 201);
 });
 
@@ -149,14 +158,7 @@ webhookRoutes.patch("/:id", async (c) => {
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
 	if (!existing) throw notFound("Webhook が見つかりません");
 
-	const body = await c.req.json().catch(() => {
-		throw invalidRequest("JSON ボディをパースできません");
-	});
-	const parsed = webhookUpdateInput.safeParse(body);
-	if (!parsed.success) {
-		throw invalidRequest("リクエストが不正です", parsed.error.issues);
-	}
-	const v = parsed.data;
+	const v = await readJson(c.req, webhookUpdateInput);
 	if (v.addressIds !== undefined) {
 		await assertAddressIdsValid(db, v.addressIds, c.get("principal"));
 	}
@@ -171,6 +173,14 @@ webhookRoutes.patch("/:id", async (c) => {
 	await db.update(webhooks).set(changes).where(eq(webhooks.id, id));
 
 	const updated = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "webhook.update",
+		targetType: "webhook",
+		targetId: id,
+		meta: { name: existing.name, url: existing.url },
+		ip: clientIp(c),
+	});
 	return c.json(toResponse(updated!));
 });
 
@@ -181,6 +191,14 @@ webhookRoutes.delete("/:id", async (c) => {
 	if (!existing) throw notFound("Webhook が見つかりません");
 	// 配信履歴は onDelete cascade で一緒に消える。
 	await db.delete(webhooks).where(eq(webhooks.id, id));
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "webhook.delete",
+		targetType: "webhook",
+		targetId: id,
+		meta: { name: existing.name },
+		ip: clientIp(c),
+	});
 	return c.body(null, 204);
 });
 
@@ -219,16 +237,37 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
 		.where(eq(webhookDeliveries.id, deliveryId))
 		.get();
 	if (!delivery) throw notFound("配信履歴が見つかりません");
+	const webhook = await db.select().from(webhooks).where(eq(webhooks.id, delivery.webhookId)).get();
+	if (!webhook) throw notFound("Webhook が見つかりません");
+	if (!webhook.enabled) throw conflict("無効化した Webhook の配信は再送できません");
 	if (delivery.status !== "failed") {
 		throw conflict("failed の配信のみ再送できます");
 	}
 
-	await runDelivery(c.env, deliveryId, delivery.attempt);
+	// failed → pending を条件付きで更新して取り分ける。同時 2 回では片方だけが取れる。
+	const claimed = await db
+		.update(webhookDeliveries)
+		.set({ status: "pending" })
+		.where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.status, "failed")))
+		.returning();
+	if (claimed.length === 0) throw conflict("この配信は別の操作で処理されています");
+
+	// runDelivery は pending かつ attempt が与えた値以上だと「次の試行をキューに投入」する
+	// ので、この再送を実際に POST させるには attempt を 1 繰り上げて渡す必要がある。
+	await runDelivery(c.env, deliveryId, delivery.attempt + 1);
 
 	const updated = await db
 		.select()
 		.from(webhookDeliveries)
 		.where(eq(webhookDeliveries.id, deliveryId))
 		.get();
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "webhook.retry",
+		targetType: "webhook",
+		targetId: delivery.webhookId,
+		meta: { deliveryId, attempt: delivery.attempt + 1 },
+		ip: clientIp(c),
+	});
 	return c.json(toDeliveryResponse(updated!));
 });
