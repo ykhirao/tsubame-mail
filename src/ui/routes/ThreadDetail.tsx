@@ -78,7 +78,7 @@ export function ThreadDetail() {
 		messages.filter((m) => m.direction === "inbound").at(-1) ?? messages.at(-1);
 
 	return (
-		<article className="card mx-auto w-full max-w-[1000px]">
+		<article className="card w-full">
 			<header className="flex items-center justify-between gap-2 border-b border-[var(--line-soft)] px-5 py-3">
 				<h1 className="min-w-0 truncate text-lg font-bold text-[var(--text)]">
 					{subject?.trim() || "（件名なし）"}
