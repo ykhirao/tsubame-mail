@@ -61,6 +61,5 @@
 
 ## セキュリティ以外
 
-- `未確認` **`wrangler.jsonc.example` の Worker 名が `ridley` のまま。** `name` と `EMAIL_WORKER_NAME` が本体と違う。
-  場所: `wrangler.jsonc.example`、AGENTS.md 落とし穴 2。
-  確かめ方: リファレンス用でも 3 箇所一致の規約に合わせて `tsubame` にする。
+- `対応済` **`wrangler.jsonc.example` の Worker 名が `ridley` のまま。** `name` と `EMAIL_WORKER_NAME` が本体と違った。
+  `tsubame` に揃え、本体から抜けていた DLQ 設定も反映した。環境変数も `RIDLEY_*` → `D1_DATABASE_ID` / `TSUBAME_*` に改名。

@@ -3,14 +3,19 @@
 本番 Worker（`tsubame`）を Cloudflare に新規デプロイするための手順。
 **上から順番に実行すれば最後まで完了する**ことを想定している。
 
-## 0. 前提と方針
+## 0. 前提
 
-- **既存の `旧 Worker` Worker と、その D1 / R2 / Queues には一切触らない。**
-  新リソースはすべて別名（`tsubame` 系）で作る。
-- 過去メールの移行はしない（捨てる方針で決定済み）。
-- `example.com` の apex は Google Workspace が本番。**絶対に触らない。**
-- Workers（旧 Workers Paid）契約が必要。Queues が作れることで確認済み。
-- 実行マシンには wrangler（`npx wrangler`）と npm が使えること。
+- **Workers の有料プランが必要。** Queues が作れるかどうかで確認できる。
+- 受信に使うドメインが Cloudflare のゾーンとして登録されていること。
+- 実行マシンで wrangler（`npx wrangler`）と npm が使えること。
+- Worker 名を `tsubame` 以外にする場合は、`wrangler.jsonc` の `name`・
+  `vars.EMAIL_WORKER_NAME`・Email Routing のルール宛先の **3 箇所すべて**を揃える
+  （ズレると受信が止まる。AGENTS.md 落とし穴 2）。
+
+> **既にメールを受けているドメインに入れる場合**は、apex の MX を奪うと
+> そのドメインの全メールがこのアプリに流れ込む（Cloudflare の catch-all は
+> ゾーン単位）。サブドメイン（`mail.example.com` など）から始めるのが安全。
+> 既存の受信経路からの切り替えは `docs/ops/cutover.md` を参照。
 
 ### 使うツール
 
@@ -28,13 +33,11 @@
 npm ci
 ```
 
-`node_modules` は既に symlink されていて使えるが、確実に揃えるならこの 1 行を実行する。
-
 ---
 
-## 2. リソースを作る（別名）
+## 2. リソースを作る
 
-すべて実行済みなら既に存在する（`wrangler` は存在するとエラーを返す）。未作成のものだけ実行する。
+既にあるものは `wrangler` がエラーを返す。未作成のものだけ実行する。
 
 ```bash
 # D1（データベース）。database_id を控える。↓
@@ -90,7 +93,7 @@ Cloudflare ダッシュボード → *My Profile → API Tokens → Create Token
 | Zone | Zone Settings – **Edit** |
 | Zone | Zone – **Read** |
 
-Zone リソースは **初期は `example.com` の 1 ゾーンだけ**に限定する。
+Zone リソースは **最初に使う 1 ゾーンだけ**に限定する。
 ドメインを増やすたびにこの Zone リソースの範囲を広げ直す必要がある
 （詳細は `docs/ops/operations.md` の「新しいドメインを足すとき」参照）。
 
@@ -110,7 +113,7 @@ openssl rand -base64 32
 **誰もオーナーを作れない**（安全側に倒してある）。詳細は第 8 節。
 
 > GitHub Actions でデプロイする場合は、上記 3 つに加えて
-> `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `RIDLEY_DATABASE_ID` を
+> `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` を
 > リポジトリの Secrets に登録する（第 7 節の GitHub Actions を参照）。
 
 ---
@@ -122,14 +125,14 @@ openssl rand -base64 32
 ### 採用方式: デプロイ時に `wrangler.local.jsonc` を生成して注入
 
 - `scripts/deploy.sh` が、コミット済み `wrangler.jsonc` のプレースホルダ UUID を
-  環境変数 `RIDLEY_DATABASE_ID` で受け取った実 ID に**置き換えて**
+  環境変数 `D1_DATABASE_ID` で受け取った実 ID に**置き換えて**
   `wrangler.local.jsonc` を生成する。
 - `wrangler.local.jsonc` は `.gitignore` に明示してあるため**コミットされない**。
 - 生成した設定ファイルを使って D1 マイグレーション適用と `wrangler deploy --config` を実行する。
 
 **この方式を選んだ理由**:
 1. リポジトリにアカウント固有の ID を一切書かない（要件・設計の制約を満たす）。
-2. ローカル実行と CI が**同じ 1 本のスクリプト**で動く。CI では `RIDLEY_DATABASE_ID` を
+2. ローカル実行と CI が**同じ 1 本のスクリプト**で動く。CI では `D1_DATABASE_ID` を
    GitHub Actions の Secrets から渡すだけでよい。
 3. `wrangler.jsonc` 本体（他の担当が編集する可能性があるファイル）に手を入れない。
 4. 生成ファイルをリポジトリ直下に置くので `migrations_dir` / `main` など相対パスが
@@ -152,7 +155,7 @@ openssl rand -base64 32
 開発時にログイン済みの状態で、実 ID を入れて試す:
 
 ```bash
-RIDLEY_DATABASE_ID="<手順2で控えたUUID>" ./scripts/deploy.sh --skip-build
+D1_DATABASE_ID="<手順2で控えたUUID>" ./scripts/deploy.sh --skip-build
 ```
 
 （`--skip-build` はビルド済みのとき用。初回は外してビルドから通す。）
@@ -165,7 +168,7 @@ RIDLEY_DATABASE_ID="<手順2で控えたUUID>" ./scripts/deploy.sh --skip-build
 手動で行う場合:
 
 ```bash
-RIDLEY_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.local.jsonc --remote
+D1_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.local.jsonc --remote
 ```
 
 ただし `wrangler.local.jsonc` は生成物なので、**必ず `scripts/deploy.sh` 経由で**
@@ -178,7 +181,7 @@ RIDLEY_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangle
 `scripts/deploy.sh` が「ビルド → マイグレーション適用 → `wrangler deploy`」を順に実行する。
 
 ```bash
-RIDLEY_DATABASE_ID="<UUID>" ./scripts/deploy.sh
+D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 ```
 
 中身の流れ:
@@ -196,13 +199,13 @@ RIDLEY_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 
 自動デプロイはしない。**手動（`workflow_dispatch`）だけ**で本番に書き込む。
 
-リポジトリ（この worktree の親 `tsubame`）の *Settings → Secrets and variables → Actions* に以下を登録する:
+リポジトリの *Settings → Secrets and variables → Actions* に以下を登録する:
 
 | シークレット名 | 値 |
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | 第 3 節の CF_API_TOKEN と同じ値 |
 | `CLOUDFLARE_ACCOUNT_ID` | アカウント ID |
-| `RIDLEY_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
+| `D1_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
 
 `CLOUDFLARE_API_TOKEN` は wrangler 本体の認証にも使う（Workers Scripts Edit 等の
 権限が必要になる場合がある。トークンに Workers Scripts: Edit を加える）。
@@ -214,7 +217,15 @@ RIDLEY_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 ## 8. 最初のオーナーを作る（bootstrap）
 
 `POST /api/v1/auth/bootstrap` は **owner が 1 人も居ないときだけ通る**（以後 409）。
-初回デプロイ直後の空 DB なら owner を作成できる。UI からは `/bootstrap` ページを開く。
+初回デプロイ直後の空 DB なら owner を作成できる。UI からは `/bootstrap` ページを開き、
+メールアドレス・名前・パスワード・合言葉（第 3 節の `INTERNAL_SECRET`）を入れる。
+
+オーナーは Cloudflare の DNS とメールルーティングまで触れる。デプロイ直後に URL を
+見つけただけの相手にオーナーを取られないよう、**合言葉を知っている人しか作れない**。
+
+メールアドレスは普段使っているもの（Gmail など）でよい。**このアプリで受信する
+アドレスである必要はない。** この時点ではまだ送信ドメインを 1 つも繋いでいないため、
+アプリからメールを出せず、使い捨てパスワードを送る方式が使えないため。
 
 cURL で:
 
@@ -224,11 +235,14 @@ curl -X POST "https://<あなたの公開ホスト>/api/v1/auth/bootstrap" \
   -d '{
     "email": "owner@example.com",
     "name": "オーナー",
-    "password": "強力なパスワード"
+    "password": "強力なパスワード",
+    "secret": "<INTERNAL_SECRET と同じ値>"
   }'
 ```
 
-レスポンスに `Set-Cookie: tsb_session=...` が返れば成功。owner が既に居る状態で叩くと 409 になる。
+レスポンスに `Set-Cookie: tsb_session=...` が返れば成功。owner が既に居る状態で叩くと
+409 になり、ログイン画面からも `/bootstrap` への導線が消える。
+以後のメンバーはオーナーが管理画面から追加する。
 
 > まだカスタムドメインを付けていない段階では、一時的に `wrangler dev --remote`
 > かローカルでポートを開いて bootstrap だけ先に行う、という手もある
@@ -309,28 +323,4 @@ function verify(secret, header, body, toleranceSec = 300) {
 ## 次のステップ
 
 リソースと Worker が動けば、`docs/ops/cutover.md` の手順で
-`mail.example.com` を `旧 Worker` → `tsubame` に切り替える。
-
-
-## 最初のオーナーを作る（INTERNAL_SECRET）
-
-オーナーは Cloudflare の DNS とメールルーティングまで触れる。デプロイ直後に URL を
-見つけただけの相手にオーナーを取られないよう、**合言葉を知っている人しか作れない**。
-
-```bash
-# 20 文字以上のランダムな値を作って Worker のシークレットに入れる
-openssl rand -base64 32
-npx wrangler secret put INTERNAL_SECRET
-```
-
-未設定、または 20 文字未満だと `POST /api/v1/auth/bootstrap` は 403 を返し、
-**誰もオーナーを作れない**（安全側に倒してある）。
-
-デプロイ後 `/bootstrap` を開き、メールアドレス（普段使っている Gmail などでよい。
-このアプリで受信するアドレスである必要はない）・名前・パスワード・合言葉を入れる。
-
-オーナーが 1 人でも居ると `/bootstrap` は 409 を返し、ログイン画面からも導線が消える。
-以後のメンバーはオーナーが管理画面から追加する。
-
-**メールで使い捨てパスワードを送る方式は使えない。** この時点ではまだ送信ドメインを
-1 つも繋いでいないため、アプリからメールを出せない。
+受信ドメインをこの Worker に向ける。既存の受信経路がある場合の切り替えもそこに書いてある。

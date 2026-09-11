@@ -2,15 +2,16 @@
 	// ==========================================================================
 	// リファレンス用の設定例（wrangler.jsonc.example）
 	//
-	// 本物の実行設定はコミット済みの wrangler.jsonc を scripts/deploy.sh が
-	// 複製・生成する。d1_databases[].database_id にはアカウント固有の ID を
-	// 決してコミットしない。実デプロイ時は環境変数 RIDLEY_DATABASE_ID から
-	// 注入される（詳細は docs/deployment.md 第 4 節）。
+	// 実行に使うのはコミット済みの wrangler.jsonc。scripts/deploy.sh がその
+	// database_id のプレースホルダを環境変数 D1_DATABASE_ID の実 ID に
+	// 置き換えた wrangler.local.jsonc を生成して使う（docs/ops/deployment.md 第 4 節）。
+	// アカウント固有の ID は決してコミットしない。
 	//
-	// このファイルは直接デプロイに使わない。
+	// このファイルは直接デプロイに使わない。名前を変えて使うときに、
+	// どこを揃える必要があるかを確認するために置いてある。
 	// ==========================================================================
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "ridley",
+	"name": "tsubame",
 	"main": "./src/worker.ts",
 	"compatibility_date": "2026-08-22",
 	"compatibility_flags": ["nodejs_compat"],
@@ -23,34 +24,48 @@
 		"binding": "ASSETS",
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application",
+		// 無いと、添付のダウンロードリンクのようなナビゲーションは Worker を通らず
+		// index.html が返る（SPA モードの既定動作）。
 		"run_worker_first": ["/api/*"]
 	},
 
+	// name・EMAIL_WORKER_NAME・Email Routing のルール宛先の 3 箇所が
+	// 一致していないと受信が止まる。
 	"vars": {
-		"APP_NAME": "ridley",
-		"EMAIL_WORKER_NAME": "ridley"
+		"APP_NAME": "tsubame",
+		"EMAIL_WORKER_NAME": "tsubame"
 	},
 
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "ridley",
+			"database_name": "tsubame",
 			// database_id はスクリプトが置き換えるプレースホルダ。コミットしない。
 			"database_id": "00000000-0000-0000-0000-000000000000",
 			"migrations_dir": "migrations"
 		}
 	],
 
-	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "ridley-mail" }],
+	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "tsubame-mail" }],
 
 	"queues": {
 		"producers": [
-			{ "binding": "INBOUND_QUEUE", "queue": "ridley-inbound" },
-			{ "binding": "OUTBOUND_QUEUE", "queue": "ridley-outbound" }
+			{ "binding": "INBOUND_QUEUE", "queue": "tsubame-inbound" },
+			{ "binding": "OUTBOUND_QUEUE", "queue": "tsubame-outbound" }
 		],
 		"consumers": [
-			{ "queue": "ridley-inbound", "max_batch_size": 5, "max_retries": 3 },
-			{ "queue": "ridley-outbound", "max_batch_size": 5, "max_retries": 3 }
+			{
+				"queue": "tsubame-inbound",
+				"max_batch_size": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "tsubame-inbound-dlq"
+			},
+			{
+				"queue": "tsubame-outbound",
+				"max_batch_size": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "tsubame-outbound-dlq"
+			}
 		]
 	},
 

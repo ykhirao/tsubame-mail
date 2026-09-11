@@ -2,16 +2,16 @@
 # tsubame の本番デプロイ。
 #
 # wrangler.jsonc の d1_databases[].database_id はプレースホルダ（コミット不可の
-# アカウント固有 ID）のため、実行時に環境変数 RIDLEY_DATABASE_ID から実 ID を
+# アカウント固有 ID）のため、実行時に環境変数 D1_DATABASE_ID から実 ID を
 # 注入した設定 wrangler.local.jsonc を生成して使う。生成物は .gitignore に
 # 明示してあるためコミットされない。
 #
 # 使い方:
-#   RIDLEY_DATABASE_ID="<UUID>" ./scripts/deploy.sh          # ビルド含む一連
-#   RIDLEY_DATABASE_ID="<UUID>" ./scripts/deploy.sh --skip-build
+#   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh          # ビルド含む一連
+#   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh --skip-build
 #
 # 環境変数:
-#   RIDLEY_DATABASE_ID  デプロイ対象 D1 の database_id（必須）
+#   D1_DATABASE_ID  デプロイ対象 D1 の database_id（必須）
 #   CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  任意。GitHub Actions から渡す場合
 #                                                    wrangler が自動で読む。
 set -euo pipefail
@@ -23,19 +23,19 @@ OUT="wrangler.local.jsonc"
 PLACEHOLDER="00000000-0000-0000-0000-000000000000"
 
 # ---- database_id の検証 ----------------------------------------------------
-DATABASE_ID="${RIDLEY_DATABASE_ID:-}"
+DATABASE_ID="${D1_DATABASE_ID:-}"
 if [[ -z "$DATABASE_ID" ]]; then
-	echo "エラー: RIDLEY_DATABASE_ID を設定してください。" >&2
-	echo "  RIDLEY_DATABASE_ID=\"<D1 の database_id>\" ./scripts/deploy.sh" >&2
+	echo "エラー: D1_DATABASE_ID を設定してください。" >&2
+	echo "  D1_DATABASE_ID=\"<D1 の database_id>\" ./scripts/deploy.sh" >&2
 	exit 1
 fi
 if [[ "$DATABASE_ID" == "$PLACEHOLDER" ]]; then
-	echo "エラー: RIDLEY_DATABASE_ID がプレースホルダのままです。" >&2
+	echo "エラー: D1_DATABASE_ID がプレースホルダのままです。" >&2
 	exit 1
 fi
 # sed の置換先にそのまま埋め込むため、UUID 以外の文字（/ & など）を許さない。
 if [[ ! "$DATABASE_ID" =~ ^[0-9a-f-]{36}$ ]]; then
-	echo "エラー: RIDLEY_DATABASE_ID が UUID の形式ではありません。" >&2
+	echo "エラー: D1_DATABASE_ID が UUID の形式ではありません。" >&2
 	exit 1
 fi
 

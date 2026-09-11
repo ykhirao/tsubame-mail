@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const BASE = process.env.RIDLEY_BASE ?? "http://127.0.0.1:8787";
+const BASE = process.env.TSUBAME_BASE ?? "http://127.0.0.1:8787";
 
 // bootstrap は配布済みの既知の合言葉を拒否する（精査 #48）ので、既定値は持たず
 // wrangler dev が読む .dev.vars と同じ値を使う。
@@ -18,9 +18,9 @@ function readDevVarsSecret() {
 		return undefined;
 	}
 }
-const secret = process.env.RIDLEY_INTERNAL_SECRET ?? readDevVarsSecret();
+const secret = process.env.TSUBAME_INTERNAL_SECRET ?? readDevVarsSecret();
 if (!secret) {
-	console.error("INTERNAL_SECRET が見つかりません。.dev.vars に 20 文字以上の値を入れるか RIDLEY_INTERNAL_SECRET を指定してください。");
+	console.error("INTERNAL_SECRET が見つかりません。.dev.vars に 20 文字以上の値を入れるか TSUBAME_INTERNAL_SECRET を指定してください。");
 	process.exit(1);
 }
 const OWNER = {
