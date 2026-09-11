@@ -14,7 +14,7 @@ import {
 } from "@/shared/contracts/users";
 import type { GrantInput } from "@/shared/contracts/users";
 import { conflict, invalidRequest, notFound } from "@/shared/errors";
-import { clientIp, getPrincipal, requireOwner } from "../../middleware/auth";
+import { clientIp, getPrincipal, requireOwner, requireSession } from "../../middleware/auth";
 import type { AppEnv } from "../../types";
 
 const app = new Hono<AppEnv>();
@@ -83,7 +83,7 @@ app.get("/:id", async (c) => {
 	return c.json({ ...serializeUser(user), grants: await loadGrants(db, user.id) });
 });
 
-app.post("/", async (c) => {
+app.post("/", requireSession, async (c) => {
 	const principal = getPrincipal(c);
 	const body = await readJson(c.req, createUserBody);
 	const db = c.get("db");
@@ -130,7 +130,7 @@ app.post("/", async (c) => {
 	);
 });
 
-app.patch("/:id", async (c) => {
+app.patch("/:id", requireSession, async (c) => {
 	const principal = getPrincipal(c);
 	const id = c.req.param("id");
 	const body = await readJson(c.req, updateUserBody);
@@ -202,7 +202,7 @@ app.patch("/:id", async (c) => {
 	return c.json(serializeUser(await loadUser(db, id)));
 });
 
-app.delete("/:id", async (c) => {
+app.delete("/:id", requireSession, async (c) => {
 	const principal = getPrincipal(c);
 	const id = c.req.param("id");
 	const db = c.get("db");
@@ -232,7 +232,7 @@ app.delete("/:id", async (c) => {
 	return c.json({ ok: true, id });
 });
 
-app.put("/:id/grants", async (c) => {
+app.put("/:id/grants", requireSession, async (c) => {
 	const principal = getPrincipal(c);
 	const id = c.req.param("id");
 	const parsed = await readJson(c.req, putGrantsBody);

@@ -334,6 +334,29 @@ describe("送信 API", () => {
 		expect(to).toContain("box+b@owntag.tsubame.test");
 	});
 
+	it("明示した to が全部自分で cc に他人だけだと 400（#126）", async () => {
+		const { inboundId } = await seedInbound();
+		const self = "box@reply.tsubame.test";
+		const res = await owner.post(`/api/v1/messages/${inboundId}/reply`, {
+			text: "返信",
+			to: self,
+			cc: "colleague@ext.example.jp",
+		});
+		expect(res.status).toBe(400);
+		expect(h.pending).toHaveLength(0);
+	});
+
+	it("通常の返信・全員に返信は 202 のまま（#126）", async () => {
+		const { inboundId } = await seedInbound();
+		const plain = await owner.post(`/api/v1/messages/${inboundId}/reply`, { text: "返信" });
+		expect(plain.status).toBe(202);
+		const all = await owner.post(`/api/v1/messages/${inboundId}/reply`, {
+			text: "返信",
+			replyAll: true,
+		});
+		expect(all.status).toBe(202);
+	});
+
 	it("表示名に \" を含む保存済みの宛先も全員に返信で読める（#39 再検査失敗）", async () => {
 		const sent = captureSentEmails(h);
 		const db = getDb(h.env);

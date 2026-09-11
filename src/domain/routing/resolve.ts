@@ -58,7 +58,7 @@ function canonicalPattern(pattern: string): string {
 	return ascii ? `${nfc.slice(0, at + 1)}${ascii}` : nfc;
 }
 
-function canonicalMatcher(m: Matcher): Matcher {
+export function canonicalMatcher(m: Matcher): Matcher {
 	return {
 		...m,
 		...(m.from ? { from: canonicalPattern(m.from) } : {}),

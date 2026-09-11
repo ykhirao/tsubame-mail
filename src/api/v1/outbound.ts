@@ -290,9 +290,9 @@ router.post("/:id/reply", async (c) => {
 		: replyAllRecipients(originalFrom, message.toAddr, message.ccAddr, isSelf, input.replyAll);
 	const ccRecipients = input.cc ? dedupeRecipients(parseAddressList(addressListToCsv(input.cc)), isSelf) : [];
 
-	// 明示した / 自動計算した最終宛先が、自分を除いた結果 0 件だと 202 の後に 4 回試行して
-	// failed になる（精査 #66 / #80）。送る前に 400 で弾く。
-	if (recipients.length + ccRecipients.length === 0) throw invalidRequest("宛先が指定されていません");
+	// 自分を除いた結果 To が 0 件だと、To が空で Cc だけのメールを作って 202 の後に 4 回試行して
+	// failed になる（精査 #66 / #80 / #126）。To は必須なので送る前に 400 で弾く。
+	if (recipients.length === 0) throw invalidRequest("宛先（To）が指定されていません");
 	// replyAll で to を省略した返信は受信 To / Cc 由来の宛先数に上限が無い（精査 #74）。
 	if (recipients.length + ccRecipients.length > MAX_RECIPIENTS) {
 		throw invalidRequest(`宛先は合計 ${MAX_RECIPIENTS} 件までです`);

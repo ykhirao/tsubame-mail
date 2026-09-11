@@ -11,7 +11,7 @@ import { escapeHtml } from "./quote";
 import { createThreadStatement, findExistingThreadId, updateThreadStatsStatement } from "./thread";
 import { matchRule, type Matcher } from "@/domain/routing/rules";
 import { baseAddressOf, normalizeAddress } from "./address";
-import { canonicalAddress } from "@/domain/routing/resolve";
+import { canonicalAddress, canonicalMatcher } from "@/domain/routing/resolve";
 import { dispatchMessageEvent } from "@/services/webhooks";
 import type { InboundQueueMessage } from "@/services/queue";
 
@@ -206,8 +206,17 @@ async function matchAddressRules(
 	if (canonical) addCandidate(baseAddressOf(canonical) ?? undefined);
 	const toCandidates = [...candidates];
 	for (const rule of rules) {
-		const matcher = rule.matcher as Matcher;
-		const matched = toCandidates.some((c) => matchRule(matcher, { ...opts.match, to: c }));
+		// resolve.ts のドメインスコープと同じく、matcher 側も punycode / NFC に揃え、
+		// 候補の畳み込みと同じ NFKC の小文字化を通してから比べる（#124）。全角ローカル部の
+		// matcher や Unicode ドメインの matcher が punycode / ASCII の envelope に当たる。
+		const m = canonicalMatcher(rule.matcher as Matcher);
+		const norm = {
+			from: m.from ? m.from.normalize("NFKC").toLowerCase() : undefined,
+			to: m.to ? m.to.normalize("NFKC").toLowerCase() : undefined,
+		};
+		const matched = toCandidates.some((c) =>
+			matchRule({ ...m, ...norm }, { ...opts.match, to: c }),
+		);
 		if (!matched) continue;
 		if (rule.action === "mark") {
 			if (rule.target === "read") read = true;
@@ -233,12 +242,19 @@ export async function processInbound(
 	// キューは at-least-once。行が既にあれば、本文・添付・統計・ルールは batch で一括済み。
 	// 残るのは Webhook 配信だけなので、再配達ではその re-run に徹する（精査 #77）。dispatch は冪等。
 	const dup = await db
-		.select({ id: messages.id })
+		.select({ id: messages.id, status: messages.status, createdAt: messages.createdAt })
 		.from(messages)
 		.where(eq(messages.rawR2Key, msg.rawKey))
 		.get();
 	if (dup) {
-		await dispatchMessageEvent(env, "message.received", dup.id);
+		// drop（trash）にしたメールへは外部通知しない。dup 経路も同じ（#123）。
+		// 再配達の対象は、メッセージを受け取った時点で存在した webhook（createdAt が
+		// メッセージの作成時刻以前のもの）に限る（#122）。
+		if (dup.status !== "trash") {
+			await dispatchMessageEvent(env, "message.received", dup.id, {
+				webhookCreatedBefore: dup.createdAt,
+			});
+		}
 		return;
 	}
 
@@ -373,5 +389,8 @@ export async function processInbound(
 		...attachmentRows.map((r) => db.insert(attachments).values(r)),
 	]);
 
-	await dispatchMessageEvent(env, "message.received", messageId);
+	// drop で trash にしたメールには message.received を出さない（#123）。
+	if (!dropped) {
+		await dispatchMessageEvent(env, "message.received", messageId);
+	}
 }

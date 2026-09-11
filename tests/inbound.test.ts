@@ -724,6 +724,168 @@ describe("processInbound", () => {
 
 		dispatchSpy.mockRestore();
 	});
+
+	it("再配達は、メッセージ受信後に作った webhook には配信しない（#122）", async () => {
+		await seed();
+		const key = await storeRaw(mimeWith({}));
+		const db = getDb(env);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{}", { status: 200 })),
+		);
+
+		// メッセージ受信前に存在した webhook。
+		await db.insert(webhooks).values({
+			id: newId("webhook"),
+			name: "old",
+			url: "https://old.example/hook",
+			secret: "s",
+			events: ["message.received"],
+			enabled: true,
+		});
+		await processInbound(payload(key), env, fakeCtx);
+
+		const row = await storedRow(key);
+		// メッセージ受信後に作った webhook。createdAt を明確に後の時刻にする。
+		await db.insert(webhooks).values({
+			id: newId("webhook"),
+			name: "new",
+			url: "https://new.example/hook",
+			secret: "s",
+			events: ["message.received"],
+			enabled: true,
+			createdAt: new Date(row.createdAt.getTime() + 60_000),
+		});
+
+		const before = await db.select().from(webhookDeliveries).all();
+		expect(before).toHaveLength(1);
+
+		// 同じ payload を再配達（dup 経路）。
+		await processInbound(payload(key), env, fakeCtx);
+
+		const after = await db.select().from(webhookDeliveries).all();
+		expect(after).toHaveLength(1);
+		expect(after[0]!.webhookId).toBe(before[0]!.webhookId);
+		vi.unstubAllGlobals();
+	});
+
+	it("drop ルールで trash にしたメールには message.received を配信しない（#123）", async () => {
+		await seed();
+		await getDb(env).insert(routingRules).values({
+			id: newId("rule"),
+			scope: "address",
+			addressId: ADR,
+			name: "spam drop",
+			action: "drop",
+			matcher: { from: "spam@evil.jp" },
+		});
+		await getDb(env).insert(webhooks).values({
+			id: newId("webhook"),
+			name: "hook",
+			url: "https://hook.example",
+			secret: "s",
+			events: ["message.received"],
+			enabled: true,
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{}", { status: 200 })),
+		);
+
+		const raw = [
+			"From: spam@evil.jp",
+			"To: a@example.com",
+			"Subject: 宣伝",
+			"MIME-Version: 1.0",
+			"Content-Type: text/plain; charset=utf-8",
+			"",
+			"お買い得",
+		].join("\r\n");
+		const key = await storeRaw(raw);
+		const queued = { ...payload(key), envelope: { from: "spam@evil.jp", to: "a@example.com" } };
+		await processInbound(queued, env, fakeCtx);
+
+		const row = await storedRow(key);
+		expect(row.status).toBe("trash");
+
+		// dup 経路（同じ payload の再配達）でも配信行は作られない。
+		await processInbound(queued, env, fakeCtx);
+		const dlv = () =>
+			getDb(env)
+				.select()
+				.from(webhookDeliveries)
+				.where(eq(webhookDeliveries.messageId, row.id))
+				.all();
+		expect(await dlv()).toHaveLength(0);
+		vi.unstubAllGlobals();
+	});
+
+	it("drop に当たらないメールは従来どおり message.received を配信する（#123）", async () => {
+		await seed();
+		await getDb(env).insert(webhooks).values({
+			id: newId("webhook"),
+			name: "hook",
+			url: "https://hook.example",
+			secret: "s",
+			events: ["message.received"],
+			enabled: true,
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("{}", { status: 200 })),
+		);
+
+		const key = await storeRaw(mimeWith({}));
+		await processInbound(payload(key), env, fakeCtx);
+		const row = await storedRow(key);
+		const dlv = await getDb(env)
+			.select()
+			.from(webhookDeliveries)
+			.where(eq(webhookDeliveries.messageId, row.id))
+			.all();
+		expect(dlv).toHaveLength(1);
+		vi.unstubAllGlobals();
+	});
+
+	it("address ルール: Unicode ドメインの matcher が punycode の envelope に当たる（#124）", async () => {
+		await seed();
+		await getDb(env).insert(routingRules).values({
+			id: newId("rule"),
+			scope: "address",
+			addressId: ADR,
+			name: "idn",
+			action: "mark",
+			matcher: { to: "b@例え.jp" },
+			target: "read",
+		});
+		const key = await storeRaw(mimeWith({}));
+		await processInbound(
+			{ ...payload(key), envelope: { from: "taro@example.com", to: "b@xn--r8jz45g.jp" } },
+			env,
+			fakeCtx,
+		);
+		expect((await storedRow(key)).isRead).toBe(true);
+	});
+
+	it("address ルール: 全角ローカル部の matcher が ASCII の envelope に当たる（#124）", async () => {
+		await seed();
+		await getDb(env).insert(routingRules).values({
+			id: newId("rule"),
+			scope: "address",
+			addressId: ADR,
+			name: "zenkaku",
+			action: "mark",
+			matcher: { to: "ｂ@example.com" },
+			target: "read",
+		});
+		const key = await storeRaw(mimeWith({}));
+		await processInbound(
+			{ ...payload(key), envelope: { from: "taro@example.com", to: "b@example.com" } },
+			env,
+			fakeCtx,
+		);
+		expect((await storedRow(key)).isRead).toBe(true);
+	});
 });
 
 describe("handleIncomingEmail", () => {

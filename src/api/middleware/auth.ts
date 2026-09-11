@@ -7,7 +7,7 @@ import type { Db } from "@/db/client";
 import { hashToken, looksLikeApiKey, parseBearer, SESSION_COOKIE } from "@/lib/tokens";
 import { requireOwner as assertOwner, resolvePrincipal } from "@/domain/access/policy";
 import type { Principal } from "@/shared/contracts/common";
-import { unauthorized } from "@/shared/errors";
+import { forbidden, unauthorized } from "@/shared/errors";
 import type { AppEnv } from "../types";
 
 /** last_used_at の更新間隔。毎リクエスト書くと D1 が重いので間引く。 */
@@ -156,6 +156,20 @@ export const requireOwner: MiddlewareHandler<AppEnv> = async (c, next) => {
 		c.set("principal", principal);
 	}
 	assertOwner(principal);
+	await next();
+};
+
+// パスワードやロールは API キーの期限・範囲では縛れない資格情報なので、
+// ユーザー管理の変更系は画面ログインの Cookie セッションだけに許す（#121）。
+export const requireSession: MiddlewareHandler<AppEnv> = async (c, next) => {
+	let principal = c.get("principal");
+	if (!principal) {
+		const resolved = await resolveRequestPrincipal(c);
+		if (!resolved) throw unauthorized();
+		principal = resolved;
+		c.set("principal", principal);
+	}
+	if (principal.via !== "session") throw forbidden("ユーザー管理は画面からログインして行ってください");
 	await next();
 };
 

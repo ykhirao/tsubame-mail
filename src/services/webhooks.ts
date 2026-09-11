@@ -79,6 +79,7 @@ export async function dispatchMessageEvent(
 	env: CloudflareEnv,
 	event: MessageEvent,
 	messageId: string,
+	opts?: { webhookCreatedBefore?: Date },
 ): Promise<void> {
 	const db = getDb(env);
 	const message = await db.select().from(messages).where(eq(messages.id, messageId)).get();
@@ -91,6 +92,9 @@ export async function dispatchMessageEvent(
 		.all();
 
 	const targets = enabled.filter((w) => {
+		if (opts?.webhookCreatedBefore !== undefined && w.createdAt.getTime() > opts.webhookCreatedBefore.getTime()) {
+			return false;
+		}
 		if (!w.events.includes(event)) return false;
 		// addressIds が null なら全アドレスが対象。
 		if (w.addressIds === null) return true;

@@ -416,3 +416,91 @@ describe("スレッド一覧・詳細は既定でゴミ箱を除外する（#92�
 		expect(allMsgs.map((m) => m.id)).toContain("msg_trash");
 	});
 });
+
+describe("LIKE のメタ文字と制御文字をエスケープする（#125）", () => {
+	const all = () => principal("all", "owner");
+
+	async function seedFew() {
+		await insertMessage({ id: "msg_l1", addressId: "adr_a", subject: "hello world" });
+		await insertMessage({
+			id: "msg_l2",
+			addressId: "adr_a",
+			subject: "見積書",
+			receivedAt: new Date(1_770_000_300_000),
+		});
+	}
+
+	it("_ だけの語は全件に一致しない", async () => {
+		await seedFew();
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery("_") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(r.rows).toHaveLength(0);
+	});
+
+	it("% だけの語は全件に一致しない", async () => {
+		await seedFew();
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery("%") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(r.rows).toHaveLength(0);
+	});
+
+	it("区切りの char(31) だけの語は全件に一致しない", async () => {
+		await seedFew();
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery(String.fromCharCode(31)) },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(r.rows).toHaveLength(0);
+	});
+
+	it("a_b は文字どおり _ を含むものだけに一致する", async () => {
+		await insertMessage({ id: "msg_um", addressId: "adr_a", subject: "user_a_b note" });
+		await insertMessage({
+			id: "msg_ur",
+			addressId: "adr_a",
+			subject: "user a b note",
+			receivedAt: new Date(1_770_000_300_000),
+		});
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery("a_b") },
+			order: "received_at",
+			limit: 25,
+		});
+		const ids = r.rows.map((x) => x.id);
+		expect(ids).toContain("msg_um");
+		expect(ids).not.toContain("msg_ur");
+	});
+
+	it("from:% は全件に一致しない", async () => {
+		await seedFew();
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery("from:%") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(r.rows).toHaveLength(0);
+	});
+
+	it("relevance 順でも _ だけの語が全件に一致しない", async () => {
+		await seedFew();
+		const r = await queryMessages(db, {
+			principal: all(),
+			filters: { search: parseSearchQuery("_") },
+			order: "relevance",
+			limit: 25,
+		});
+		expect(r.rows).toHaveLength(0);
+	});
+});

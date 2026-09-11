@@ -8,9 +8,9 @@ import {
 	desc,
 	eq,
 	exists,
-	like,
 	ne,
 	sql,
+	type AnyColumn,
 	type SQL,
 } from "drizzle-orm";
 import { addresses, messages, threads } from "@/db/schema";
@@ -90,6 +90,14 @@ function escapeFtsTerm(w: string): string {
 	return `"${cleaned}"`;
 }
 
+// LIKE の % _ \ をそのまま通すと 1 語で全件に当たる（#125）。制御文字（char(31) を含む）は
+// 連結した列の区切りと衝突するので、含む語を何にも一致させない。
+function likeCondition(col: AnyColumn | SQL, w: string): SQL {
+	if (/[\x00-\x1f\x7f]/.test(w)) return sql`0`;
+	const escaped = w.replace(/[\\%_]/g, (m) => `\\${m}`);
+	return sql`${col} like ${`%${escaped}%`} escape '\\'`;
+}
+
 function freeWordCondition(w: string): SQL {
 	if (charLen(w) >= 3) {
 		const term = escapeFtsTerm(w);
@@ -102,10 +110,9 @@ function freeWordCondition(w: string): SQL {
 	// 5 列ずつ LIKE を張ると語数×5 のバインドを積み、relevance で二重に出て 100 を超える（#88）。
 	// 対象列を連結した 1 つの文字列と LIKE 1 本（1 バインド）にまとめる。列の間に制御文字を挟み、
 	// 件名の末尾と本文の先頭のような列の境目をまたいで一致しないようにする（検索語は空白で割るので含まない）。
-	const p = `%${w}%`;
 	const sep = sql`char(31)`;
 	const haystack = sql`(coalesce(${messages.subject}, '') || ${sep} || coalesce(${messages.textBody}, '') || ${sep} || coalesce(${messages.fromAddr}, '') || ${sep} || coalesce(${messages.toAddr}, '') || ${sep} || coalesce(${messages.ccAddr}, ''))`;
-	return sql`${haystack} like ${p}`;
+	return likeCondition(haystack, w);
 }
 
 // 入れ子にすると語数に比例して SQL の式木が深くなり（#88）、平坦な和にする。
@@ -147,10 +154,10 @@ function buildMessageConditions(
 		conds.push(ne(messages.status, "trash"));
 	}
 	if (filters.threadId) conds.push(eq(messages.threadId, filters.threadId));
-	if (s.from) conds.push(like(messages.fromAddr, `%${s.from}%`));
-	if (s.to) conds.push(like(messages.toAddr, `%${s.to}%`));
-	if (s.subject) conds.push(like(messages.subject, `%${s.subject}%`));
-	if (s.body) conds.push(like(messages.textBody, `%${s.body}%`));
+	if (s.from) conds.push(likeCondition(messages.fromAddr, s.from));
+	if (s.to) conds.push(likeCondition(messages.toAddr, s.to));
+	if (s.subject) conds.push(likeCondition(messages.subject, s.subject));
+	if (s.body) conds.push(likeCondition(messages.textBody, s.body));
 	if (s.since !== undefined) conds.push(sql`${messages.receivedAt} >= ${s.since}`);
 	if (s.until !== undefined) conds.push(sql`${messages.receivedAt} <= ${s.until}`);
 	if (s.isUnread) conds.push(eq(messages.isRead, false));
