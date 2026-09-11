@@ -14,6 +14,8 @@
 - [全精査の結果](security-audit.html) — 上の観点でコードベースを精査した記録。確認したものだけ載る。
 - 検討中: [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
   まだ要件に入れていない。実装に着手するときに FR-15 / FR-16 として要件へ移す。
+- 検討中: [PC 画面の改善要望](pc-screens.html) — 使っていて出た要望の置き場。
+  FR-9「作り込まない」と衝突するため、着手には要件の改訂が要る。
 
 運用は別冊: [デプロイ](../ops/deployment.html) / [切り替え](../ops/cutover.html) /
 [日々の運用](../ops/operations.html)
