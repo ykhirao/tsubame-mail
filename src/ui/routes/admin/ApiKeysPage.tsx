@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { AdminAddress, AdminUser, ApiKeySummary, CreatedApiKey, Scope } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
+import { rotatedExpiry } from "@/ui/lib/rotateExpiry";
 import {
 	Badge,
 	Button,
@@ -269,6 +270,8 @@ export function ApiKeysPage() {
 	const [created, setCreated] = useState<CreatedApiKey | null>(null);
 	const [usersByName, setUsersByName] = useState<Record<string, AdminUser>>({});
 	const [revokeTarget, setRevokeTarget] = useState<ApiKeySummary | null>(null);
+	const [rotateTarget, setRotateTarget] = useState<ApiKeySummary | null>(null);
+	const [rotating, setRotating] = useState(false);
 
 	const load = useCallback(async () => {
 		try {
@@ -289,6 +292,33 @@ export function ApiKeysPage() {
 	useEffect(() => {
 		load();
 	}, [load]);
+
+	// 平文は保存していないので同じトークンは復活できない。同じ設定で作り直す。
+	// 発行してから失効させる順序にして、失敗したときに鍵が 1 本も無い時間を作らない。
+	const confirmRotate = async () => {
+		if (!rotateTarget) return;
+		setError("");
+		setRotating(true);
+		try {
+			const res = await api.post<CreatedApiKey>("/api/v1/admin/api-keys", {
+				userId: rotateTarget.userId,
+				name: rotateTarget.name,
+				scopes: rotateTarget.scopes,
+				addressIds: rotateTarget.addressIds,
+				...(rotateTarget.expiresAt ? { expiresAt: rotatedExpiry(rotateTarget) } : {}),
+			});
+			if (!rotateTarget.revokedAt) {
+				await api.del(`/api/v1/admin/api-keys/${rotateTarget.id}`);
+			}
+			setRotateTarget(null);
+			setCreated(res);
+			await load();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "再発行に失敗しました");
+		} finally {
+			setRotating(false);
+		}
+	};
 
 	const confirmRevoke = async () => {
 		if (!revokeTarget) return;
@@ -374,13 +404,16 @@ export function ApiKeysPage() {
 												)}
 											</td>
 											<td className={tdCls}>
-												{revoked ? (
-													<span className="text-xs text-[var(--text-muted)]">—</span>
-												) : (
-													<Button variant="danger" onClick={() => setRevokeTarget(k)}>
-														失効
+												<div className="flex gap-2">
+													<Button variant="secondary" onClick={() => setRotateTarget(k)}>
+														{revoked ? "再発行" : "差し替え"}
 													</Button>
-												)}
+													{!revoked && (
+														<Button variant="danger" onClick={() => setRevokeTarget(k)}>
+															失効
+														</Button>
+													)}
+												</div>
 											</td>
 										</TableRow>
 									);
@@ -405,6 +438,37 @@ export function ApiKeysPage() {
 				)}
 
 				{created && <TokenDialog created={created} onClose={() => setCreated(null)} />}
+
+				{rotateTarget && (
+					<Modal
+						title={rotateTarget.revokedAt ? "API キーを再発行" : "API キーを差し替え"}
+						onClose={() => setRotateTarget(null)}
+					>
+						<div className="space-y-4">
+							<Notice tone={rotateTarget.revokedAt ? "info" : "danger"}>
+								<strong>{rotateTarget.name}</strong> と同じ設定
+								（スコープ・対象アドレス・有効期間）で新しいキーを発行します。
+								{rotateTarget.revokedAt ? (
+									<>元のキーは失効済みのままです。</>
+								) : (
+									<>
+										{" "}
+										発行できたら<strong>元のキーは失効します</strong>。
+										古いキーを使っている連携は、新しいキーに入れ替えるまで動かなくなります。
+									</>
+								)}
+							</Notice>
+							<div className="flex justify-end gap-2">
+								<Button variant="secondary" onClick={() => setRotateTarget(null)}>
+									キャンセル
+								</Button>
+								<Button onClick={confirmRotate} disabled={rotating}>
+									{rotating ? "発行中…" : rotateTarget.revokedAt ? "再発行する" : "差し替える"}
+								</Button>
+							</div>
+						</div>
+					</Modal>
+				)}
 
 				{revokeTarget && (
 					<Modal title="API キーを失効" onClose={() => setRevokeTarget(null)}>
