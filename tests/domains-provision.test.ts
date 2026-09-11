@@ -205,6 +205,18 @@ describe("provisionDomain", () => {
 
 		expect(result.mode).toBe("apex");
 		expect(result.dnsCheck.requiresApexConfirmation).toBe(true);
+
+		// apex は name を渡すと Cloudflare が 2007 で弾く（name はサブドメイン専用の指定子で、
+		// apex 自身は「apex のサブドメイン」に当たらない）。apex は既定なので省略して有効化する。
+		const enable = fake.find((r) => /email\/routing\/enable$/.test(r.path));
+		expect(enable).toHaveLength(1);
+		expect(enable[0]!.body).toEqual({});
+
+		const routingDns = fake.find(
+			(r) => r.method === "POST" && /email\/routing\/dns$/.test(r.path),
+		);
+		expect(routingDns).toHaveLength(1);
+		expect(routingDns[0]!.body).toEqual({});
 	});
 
 	it("同じドメインは二重に接続できない", async () => {

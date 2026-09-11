@@ -264,9 +264,10 @@ export async function provisionDomain(params: {
 	let lastError: string | null = null;
 
 	try {
-		// name（= mail.example.com）を必ず渡す。渡さないと apex に MX が作られる。
-		await api.enableEmailRouting(zone, name);
-		await api.createEmailRoutingDns(zone, name);
+		// apex は Cloudflare の既定なので name を渡さない。渡すと 2007 で弾かれる。
+		const routingName = mode === "apex" ? undefined : name;
+		await api.enableEmailRouting(zone, routingName);
+		await api.createEmailRoutingDns(zone, routingName);
 		routingStatus = "active";
 
 		for (const rawLocal of input.localParts ?? []) {

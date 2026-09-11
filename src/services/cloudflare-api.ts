@@ -33,7 +33,7 @@ export const cfEndpoints = {
 
 	emailRoutingEnable: (zoneId: string) => `/zones/${zoneId}/email/routing/enable`,
 	emailRoutingDisable: (zoneId: string) => `/zones/${zoneId}/email/routing/disable`,
-	/** body の `name` を省くと apex に作られる。 */
+	/** body の `name` を省くと apex に作られる。apex はこれが正しい呼び方。 */
 	emailRoutingDns: (zoneId: string) => `/zones/${zoneId}/email/routing/dns`,
 	emailRoutingRules: (zoneId: string) => `/zones/${zoneId}/email/routing/rules`,
 	emailRoutingRule: (zoneId: string, ruleId: string) =>
@@ -409,14 +409,15 @@ export class CloudflareApi {
 	}
 
 	/**
-	 * `name` には実際にメールを受ける名前を渡す。省略すると apex に MX が作られるため、
-	 * サブドメイン運用なら `mail.example.com` を渡し、apex を渡さないこと。
+	 * `name` はサブドメイン運用の指定子で、apex そのものは受け付けない
+	 * （渡すと 2007 Invalid Input: must be a subdomains of <zone>）。
+	 * apex は Email Routing の既定なので、省略して有効化する。
 	 */
-	async enableEmailRouting(zone: ZoneRef, name: string): Promise<CfEmailRoutingSettings> {
+	async enableEmailRouting(zone: ZoneRef, name?: string): Promise<CfEmailRoutingSettings> {
 		return this.#call(cfEmailRoutingSettings, {
 			method: "POST",
 			path: cfEndpoints.emailRoutingEnable(zone.id),
-			body: { name },
+			body: name === undefined ? {} : { name },
 			zoneName: zone.name,
 		});
 	}
@@ -430,11 +431,12 @@ export class CloudflareApi {
 		});
 	}
 
-	async createEmailRoutingDns(zone: ZoneRef, name: string): Promise<CfSuggestedDnsRecord[]> {
+	/** `name` の扱いは {@link enableEmailRouting} と同じ。apex なら省略する。 */
+	async createEmailRoutingDns(zone: ZoneRef, name?: string): Promise<CfSuggestedDnsRecord[]> {
 		return this.#call(cfSuggestedDnsResult, {
 			method: "POST",
 			path: cfEndpoints.emailRoutingDns(zone.id),
-			body: { name },
+			body: name === undefined ? {} : { name },
 			zoneName: zone.name,
 		});
 	}
