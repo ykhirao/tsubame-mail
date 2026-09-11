@@ -21,8 +21,8 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
 
 | # | 深刻度 | 内容 | 場所 |
 | --- | --- | --- | --- |
-| 127 | **中** | 受信メールの `Authentication-Results` / `ARC-*` を読むコードが無く、From を偽装したメールをスレッドに接ぎ木できる | `domain/routing/incoming.ts`、`services/queue.ts` `InboundQueueMessage`、`domain/mail/thread.ts` `findExistingThreadId` |
-| 128 | 低 | `spam_verdict` を書く側が無い。カラム・API・検索・UI のバッジ・PWA 通知の設計（`spam_suspicious: notify \| drop`）は揃っているのに常に null | `domain/mail/inbound.ts`、`domain/routing/incoming.ts` |
+| 127 | **中** | 受信メールの `Authentication-Results` / `ARC-*` を読むコードが無く、From を偽装したメールをスレッドに接ぎ木できる | `domain/mail/parse.ts`、`domain/mail/thread.ts` `findExistingThreadId`、`domain/mail/inbound.ts` |
+| 128 | 低 | `spam_verdict` を書く側が無い。カラム・API・検索・UI のバッジ・PWA 通知の設計（`spam_suspicious: notify \| drop`）は揃っているのに常に null | `domain/mail/parse.ts`、`domain/mail/inbound.ts` |
 
 - **#127** スレッドの接ぎ木は「Message-ID が一致し、From（または outbound の宛先）が一致する」で判定している（#10）。Message-ID と宛先を知る第三者
   （Bcc 受信者・転送先はヘッダから両方を知る）が From を偽装すると、信頼している会話の続きとして表示される。Reply-To は読まないので返信は偽装元へは行かない。
@@ -30,21 +30,60 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
   （[Email lifecycle](https://developers.cloudflare.com/email-service/concepts/email-lifecycle/)）ので、成立するのは送信元ドメインに DMARC が無いか `p=none` のときに限られる。
 - **#128** `notes.md` では要件側の判断として保留、`security.md` の S-3 のチェックも未チェック。
 
-**本番のメールで確かめたこと**（2026-09-12、受信 1 通のヘッダだけを R2 の生 MIME から読んだ）:
-Cloudflare は送信者のヘッダより**上**に、`Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` →
-`Authentication-Results: mx.cloudflare.net; dkim=pass header.d=… ; dmarc=pass header.from=… policy.dmarc=reject; spf=…` → `X-CF-SpamH-Score: 1` の順で足す。
-authserv-id は `mx.cloudflare.net`、スパム判定は `X-CF-SpamH-Score`（数値。尺度は公式文書に無い）。
-Worker に届くメールで `Authentication-Results` が欠けることがあるという報告がある（[workerd #6740](https://github.com/cloudflare/workerd/issues/6740)）。
+**本番のメールで確かめたこと**（2026-09-12。受信メール 2 通のヘッダだけを読んだ。本文は見ていない）
 
-**進め方**:
-1. 生 MIME は R2 に置いてキューの処理側（`inbound.ts` → `parse.ts`）でパースしているので、email ハンドラやキューのメッセージの形は変えずに `parse.ts` で読める。
-   信用するのは**一番上の** `Authentication-Results`（authserv-id が `mx.cloudflare.net` のもの）と、一番上の `X-CF-SpamH-Score` だけ
-   （送信者も同名ヘッダを自由に書けるので、下にあるものは無視する）。ヘッダが無ければ「未認証」「判定なし」とみなす。
-   Cloudflare が常にこの 2 つを付けるかは、受信済みの他のメールでも確かめてから決める（付かないメールがあると、送信者が書いた同名ヘッダが一番上に来る）。
-2. #127: inbound をアンカーにする接ぎ木（「From が同じ」の判定）を「DMARC pass、または From のドメインに揃った DKIM pass」のときに限る。
-   結果を保存するなら列の追加（スキーマ変更）が要る。接ぎ木しないだけにするか、画面に「未認証」を出すかは要件の判断。
-3. #128: `X-CF-SpamH-Score` を `spam_verdict`（`clean` / `suspicious` / `spam`）に写す。しきい値は尺度が分からないので、受信済みのメールのスコアの分布を見て決める。
-   決めたら `inbound.ts` の insert に `spamVerdict` を書き、`security.md` S-3 のチェックを付ける。
+| メール | Cloudflare が一番上に足したヘッダ（上から順） | `Authentication-Results` の中身 | `X-CF-SpamH-Score` |
+| --- | --- | --- | --- |
+| A: Cloudflare Email Sending 経由（`m.forte.llc`） | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` | `dkim=pass header.d=m.forte.llc`、`dmarc=pass policy.dmarc=reject`、`spf=pass` | **`1`** |
+| B: Gmail から `ai@test.hirao.cc` へ | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results`（その下に Google の `Received` と ARC 一式が続く） | `dkim=pass header.d=gmail.com`、`dmarc=pass policy.dmarc=none`、`spf=pass` | **無い** |
+
+- authserv-id は `mx.cloudflare.net`。`Received-SPF` には `receiver=mx.cloudflare.net`、`ARC-Authentication-Results` は `i=<n>; mx.cloudflare.net; …`。
+- **`X-CF-SpamH-Score` は毎回は付かない**（B には無い）。尺度も公式文書に無い（A の値は `1`）。
+- Worker に届くメールで `Authentication-Results` が欠け、`ARC-Authentication-Results` に判定が入っていないことがあるという報告がある（[workerd #6740](https://github.com/cloudflare/workerd/issues/6740)）。
+- B の元の eml（Gmail から送った実機テスト、`msg_ppi15infhkiqcwjsqkx78`）は `GET /api/v1/messages/{id}/raw` で取れる。テストのひな形を作るときの材料にする。
+
+**どこまで信用できるか（設計）**
+
+送信者は生 MIME のヘッダを自由に書けるので、`Authentication-Results: mx.cloudflare.net; dmarc=pass` や `X-CF-SpamH-Score: 0` を自分で入れられる。
+送信者のヘッダは必ず Cloudflare が足したまとまり（以下「CF ブロック」）の**下**に来る、という位置だけを頼りにする。
+
+- CF ブロック = ヘッダを上から読み、1 本目が `by mx.cloudflare.net` を含む `Received`、続けて `ARC-Seal` / `ARC-Message-Signature` /
+  `ARC-Authentication-Results`（`mx.cloudflare.net`）/ `Received-SPF`（`receiver=mx.cloudflare.net`）/ `Authentication-Results`（`mx.cloudflare.net`）/
+  `X-CF-SpamH-Score` だけが並ぶ間。これ以外の名前のヘッダ（B なら 2 本目の `Received`）が来たら終わり。1 本目が Cloudflare の `Received` でなければ CF ブロックは無い。
+- **弱点**: Cloudflare がブロックの末尾のヘッダを付けなかったとき（B の `X-CF-SpamH-Score`、#6740 の `Authentication-Results`）、
+  送信者が同じ名前のヘッダを自分のヘッダの 1 本目に置くと、CF ブロックの続きに見えてしまう。そこで:
+  - **認証結果（#127）**は CF ブロックの `Authentication-Results` を使い、無ければ CF ブロックの `ARC-Authentication-Results` を使う。
+    `ARC-Authentication-Results` はブロックの 4 本目で、その下に Cloudflare の `Received-SPF` が必ず来るので、送信者は位置を偽れない。
+    **両方が CF ブロック内にあって判定が食い違うときは「未認証」**。どちらも無ければ「未認証」。
+  - **スパム判定（#128）**は偽っても得をしない。低いスコアを偽っても「判定なし」と同じ扱いにしかならず、高いスコアを偽ると自分のメールが不利になるだけ。
+    なので CF ブロック内の `X-CF-SpamH-Score` をそのまま使ってよい。無ければ「判定なし」（`spam_verdict` は null）。
+
+**実装の手順**
+
+1. `src/domain/mail/parse.ts`: postal-mime の `email.headers`（上から順の配列）から CF ブロックを切り出す関数を作り、`ParsedMessage` に次を足す。
+   `inboundAuth: { dmarc: "pass" | "fail" | "none" | null; dkimPassDomains: string[] } | null`（CF ブロックが無い・判定が無いときは null）と
+   `cfSpamScore: number | null`。`dmarc=` / `dkim=pass header.d=` を読むだけで、他の項目は捨てる。
+2. `src/domain/mail/thread.ts` `findExistingThreadId`: 接ぎ木の判定（inbound をアンカーにする「From が同じ」、outbound をアンカーにする「宛先に含まれる」の両方）の前に、
+   `dmarc === "pass"`、または `dkimPassDomains` に From のドメイン（またはその親ドメイン）がある、を要求する。満たさなければ接ぎ木せず新しいスレッドにする。
+3. `src/domain/mail/inbound.ts`: placeholder（解析不能・サイズ超過）は `inboundAuth: null` として扱う（接ぎ木しない。今も placeholder は Message-ID を持たない）。
+   #128 は `cfSpamScore` を `spam_verdict` に写して insert に入れる。しきい値は、決まるまでは「スコアがあれば数値だけ見て、`clean` / `suspicious` / `spam` に写す関数」を
+   1 か所に置き、値は仮置き（下の「決めること」）。
+4. テスト（`tests/parse.test.ts`・`tests/thread.test.ts`・`tests/inbound.test.ts`）。ひな形は A / B のヘッダの並びを写し、アドレス・署名は伏せる:
+   - A 型（CF ブロック + スコアあり）と B 型（スコア無し、下に Google の ARC 一式）を正しく読む。
+   - 送信者が偽の `Authentication-Results: mx.cloudflare.net; dmarc=pass` を**自分のヘッダの 1 本目**に置いたメール（CF ブロックの `Authentication-Results` が無い #6740 の形）で、
+     CF ブロックの `ARC-Authentication-Results` の判定が使われ、偽の方は使われない。ARC 側も判定が無ければ「未認証」。
+   - `dmarc=none`（送信元に DMARC が無い）で From を偽装し、既知の Message-ID を `In-Reply-To` に入れたメールが**接ぎ木されない**（#10 の残りを塞いだことの証明）。
+     `dmarc=pass` の正規の返信は今までどおり接ぎ木される。
+   - 偽の `X-CF-SpamH-Score: 0` を置いたメールは `spam_verdict` が null か `clean`（`suspicious` 以上にならない）。
+5. 完了条件: 上のテストが通り、`npm run verify` が通る。`security.md` の S-3（`spam_verdict` を書いているか）のチェックを付け、`notes.md` の「却下」を更新する。
+   スキーマ変更は無し（判定は処理中にだけ使い、保存しない）。
+
+**決めること（実装の前に）**
+
+- `X-CF-SpamH-Score` のしきい値。尺度が分からないので、実運用で数週間分のスコアを集めてから決める。それまでは `spam_verdict` を書かない（null のまま）か、
+  仮のしきい値で `suspicious` だけを出すか。
+- 未認証のメールを画面に「未認証」と出すか（出すなら列の追加＝スキーマ変更が要る）。今の案は「接ぎ木しないだけ」。
+- DMARC も DKIM も無い小さなドメインの正規の返信は、スレッドにつながらなくなる（新しいスレッドになる）。この副作用を受け入れるか。
 
 ## 2. デプロイ時に要る作業
 
@@ -134,7 +173,7 @@ Worker に届くメールで `Authentication-Results` が欠けることがあ�
 
 ## 5. 未確認（実機でしか確かめられないもの）
 
-- Cloudflare が `Authentication-Results` と `X-CF-SpamH-Score` を**すべての**受信メールに付けるか（#127 / #128 の前提。1 通では付いていた）。`X-CF-SpamH-Score` の尺度。
+- `X-CF-SpamH-Score` の尺度（#128。2 通のうち 1 通にだけ付き、値は `1`）。Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127。#6740）。CF ブロックの並びがいつも同じか（2 通では同じ）。
 - Email Routing が `INBOUND_QUEUE.send` の失敗を送信側の再送に変えるか（#24）。
 - 998 文字を超えるヘッダ行を Cloudflare Email Sending が拒否するか、中継 MTA がどう扱うか（#34 / #66。送信側は 998 以内に収めている）。
 - Cloudflare の `catch_all` が実機でもゾーンに 1 本であること（#85 / #117 の前提。fake CF と仕様の記述に基づく）。Cloudflare API の実レート制限と 429 の挙動（#93）。

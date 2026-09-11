@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import type { MessageDetail } from "@/shared/contracts/messages";
-import { MessagesApi, ThreadsApi } from "@/ui/lib/api";
+import { AttachmentApi, MessagesApi, ThreadsApi } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
 import { hasRemoteImages, MessageHtml } from "@/ui/components/MessageHtml";
@@ -114,8 +114,18 @@ export function ThreadDetail() {
 												&lt;{m.fromAddr}&gt;
 											</span>
 										</p>
-										<span className="shrink-0 text-xs text-[var(--text-muted)]">
+										<span className="flex shrink-0 items-baseline gap-2 text-xs text-[var(--text-muted)]">
 											{formatDateTime(m.receivedAt)}
+											{m.direction === "inbound" && (
+												<a
+													href={AttachmentApi.rawUrl(m.id)}
+													download
+													title="受信したままの元のメール（.eml）を保存する"
+													className="hover:text-[var(--text)] hover:underline"
+												>
+													eml を保存
+												</a>
+											)}
 										</span>
 									</div>
 
