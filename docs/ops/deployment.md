@@ -47,10 +47,10 @@ npx wrangler d1 create tsubame
 npx wrangler r2 bucket create tsubame-mail
 
 # Queues（受信・送信とそれぞれの DLQ）
-npx wrangler queue create tsubame-inbound
-npx wrangler queue create tsubame-outbound
-npx wrangler queue create tsubame-inbound-dlq
-npx wrangler queue create tsubame-outbound-dlq
+npx wrangler queues create tsubame-inbound
+npx wrangler queues create tsubame-outbound
+npx wrangler queues create tsubame-inbound-dlq
+npx wrangler queues create tsubame-outbound-dlq
 ```
 
 受信・送信のキューはどちらも 3 回失敗すると DLQ（`tsubame-inbound-dlq` /

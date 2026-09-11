@@ -38,9 +38,9 @@ npx wrangler tail tsubame
 ### 2.1 キューの状態を見る
 
 ```bash
-npx wrangler queue list
-npx wrangler queue info tsubame-inbound
-npx wrangler queue info tsubame-outbound
+npx wrangler queues list
+npx wrangler queues info tsubame-inbound
+npx wrangler queues info tsubame-outbound
 ```
 
 ### 2.2 詰まりの切り分け
