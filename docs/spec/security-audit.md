@@ -34,13 +34,13 @@ Email Security（Cloudflare の検査製品）は、要件の非目標（「ス�
 
 | メール | Cloudflare が一番上に足したヘッダ（上から順） | `Authentication-Results` の中身 | `X-CF-SpamH-Score` |
 | --- | --- | --- | --- |
-| A: Cloudflare Email Sending 経由（`m.forte.llc`） | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` | `dkim=pass header.d=m.forte.llc`、`dmarc=pass policy.dmarc=reject`、`spf=pass` | **`1`** |
-| B: Gmail から `ai@test.hirao.cc` へ | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results`（その下に Google の `Received` と ARC 一式が続く） | `dkim=pass header.d=gmail.com`、`dmarc=pass policy.dmarc=none`、`spf=pass` | **無い** |
+| A: Cloudflare Email Sending 経由（`m.example.com`） | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` | `dkim=pass header.d=m.example.com`、`dmarc=pass policy.dmarc=reject`、`spf=pass` | **`1`** |
+| B: Gmail から `ai@test.example.net` へ | `Received` → `ARC-Seal` → `ARC-Message-Signature` → `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results`（その下に Google の `Received` と ARC 一式が続く） | `dkim=pass header.d=gmail.com`、`dmarc=pass policy.dmarc=none`、`spf=pass` | **無い** |
 
 - authserv-id は `mx.cloudflare.net`。`Received-SPF` には `receiver=mx.cloudflare.net`、`ARC-Authentication-Results` は `i=<n>; mx.cloudflare.net; …`。
 - **`X-CF-SpamH-Score` は毎回は付かない**（B には無い）。尺度も公式文書に無い（A の値は `1`）。
 - Worker に届くメールで `Authentication-Results` が欠け、`ARC-Authentication-Results` に判定が入っていないことがあるという報告がある（[workerd #6740](https://github.com/cloudflare/workerd/issues/6740)）。
-- B の元の eml（Gmail から送った実機テスト、`msg_ppi15infhkiqcwjsqkx78`）は `GET /api/v1/messages/{id}/raw` で取れる。テストのひな形を作るときの材料にする。
+- B の元の eml は `GET /api/v1/messages/{id}/raw` で取れる（Gmail から送った実機テスト。id は手元の受信箱で引く）。テストのひな形を作るときの材料にする。
 
 **どこまで信用できるか（設計）**
 
