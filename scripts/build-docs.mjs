@@ -82,9 +82,9 @@ function navHtml(current) {
 		if (!groups.has(dir)) groups.set(dir, []);
 		groups.get(dir).push(f);
 	}
-	const label = { spec: "仕様", ops: "運用", ".": "その他" };
-	// 仕様を先に、運用を後に出す。読む順序がそうなっているため。
-	const order = ["spec", "ops", "."];
+	const label = { spec: "仕様", ops: "運用", ".": "API" };
+	// 使う人が最初に開くのは API。仕様・運用は作る側の資料なので後ろに置く。
+	const order = [".", "spec", "ops"];
 	const sorted = [...groups.entries()].sort(
 		(a, b) => order.indexOf(a[0]) - order.indexOf(b[0]),
 	);
