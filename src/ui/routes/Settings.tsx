@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router";
 import { useAuth } from "@/ui/lib/auth";
 import { MyApiKeys } from "@/ui/components/MyApiKeys";
 import { MeApi } from "@/ui/lib/api";
@@ -131,6 +132,14 @@ export function Settings() {
 					</button>
 				</div>
 			</form>
+
+			<Link
+				to="/settings/notifications"
+				className="card flex min-h-12 items-center justify-between px-5 py-4 text-sm font-medium text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+			>
+				<span>通知設定</span>
+				<span className="text-[var(--text-muted)]">›</span>
+			</Link>
 			<MyApiKeys addresses={me?.addresses ?? []} />
 		</div>
 	);

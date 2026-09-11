@@ -17,6 +17,10 @@ export const idPrefixes = {
 	webhook: "whk",
 	delivery: "dlv",
 	audit: "aud",
+	device: "dev",
+	notificationRule: "nrl",
+	notification: "ntf",
+	digest: "dig",
 } as const;
 
 export type IdKind = keyof typeof idPrefixes;

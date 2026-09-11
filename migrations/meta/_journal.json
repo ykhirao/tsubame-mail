@@ -36,6 +36,13 @@
       "when": 1788977000000,
       "tag": "0004_fts_delete_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789162306938,
+      "tag": "0005_add_notifications",
+      "breakpoints": true
     }
   ]
 }

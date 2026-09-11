@@ -96,7 +96,7 @@ async function principalFromSession(c: Ctx, token: string): Promise<Principal | 
 	const user = await loadActiveUser(conn, session.userId);
 	if (!user) return null;
 
-	return await resolvePrincipal(conn, { user: { id: user.id, role: user.role } });
+	return await resolvePrincipal(conn, { user: { id: user.id, role: user.role }, sessionId: session.id });
 }
 
 async function loadActiveUser(conn: Db, userId: string) {

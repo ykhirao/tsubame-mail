@@ -49,6 +49,9 @@ src/
       attachments.ts     [W2]
       webhooks.ts        [W9]
       me.ts              [W4]
+      notifications.ts   [W11] 通知設定・ルール・通知欄・会話の通知
+      devices.ts         [W11] 購読端末
+      push.ts            [W11] VAPID 公開鍵
       admin/
         users.ts         [W4]
         api-keys.ts      [W4]
@@ -62,6 +65,9 @@ src/
       thread.ts          [W2] スレッド解決
       compose.ts         [W3] 送信メッセージの組み立て
       quote.ts           [W3] 返信引用の生成
+    notify/
+      decide.ts          [W11] 通知判定（副作用なし）
+      schedule.ts        [W11] おやすみ時間の計算
     routing/
       resolve.ts         [W2] 受信アドレス解決（拒否→実在→エイリアス→catch-all）
       rules.ts           [W2] ルール評価
@@ -72,6 +78,9 @@ src/
   services/              バインディング越しの副作用
     r2.ts                [W2]
     queue.ts             [W1] 型付き enqueue
+    webpush.ts           [W11] VAPID・RFC 8291 暗号化・送信
+    notify.ts            [W11] 通知キューのコンシューマ・cron
+    notify/              [W11] deliver(配信)/load(読み込み)/render(描画)/token-cache
     cloudflare-api.ts    [W5]
     sender.ts            [W3] EMAIL バインディング
     webhooks.ts          [W9]
@@ -81,13 +90,20 @@ src/
   shared/
     contracts/           [W1 が骨格、各担当が自分の endpoint を追記]
       *.ts               zod スキーマ。サーバと UI で共有する唯一の真実
+      notifications.ts   [W11]
     errors.ts            [W1]
   ui/                    Vite + React
     main.tsx             [W7]
+    sw.ts                [W7] Service Worker（キャッシュ・push 表示）
     lib/                 [W7] API クライアント（contracts から型を取る）
     routes/mail/         [W7]
     routes/admin/        [W8]
+    routes/settings/notifications/  [W7]
+    routes/welcome/notifications.tsx [W7]
+    routes/NotificationsFeed.tsx     [W7] 通知欄
     components/          [W7 が基礎、W8 は自分の画面配下に置く]
+public/
+    manifest.webmanifest, icons/     [W7]
 migrations/              [各担当が連番で追加。番号衝突は統合時に解決]
 tests/                   [各担当が自分の担当分を書く]
 docs/                    [W10]
@@ -115,6 +131,13 @@ docs/                    [W10]
 | `webhooks` | 通知先 | `url`, `secret`, `events[]`, `address_ids[]`, `enabled` |
 | `webhook_deliveries` | 配信履歴 | `status`, `http_status`, `error`, `duration_ms`, `attempt`, `next_retry_at` |
 | `audit_logs` | 監査 | owner の管理操作のみ記録。`actor_id`, `action`, `target`, `meta` |
+| `push_devices` | 購読端末 | `user_id`, `session_id`, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`, `last_seen_at`, `last_success_at`, `failure_count` |
+| `notification_prefs` | 利用者の通知設定（1 行） | `enabled`, `paused_until`, `display`, `badge`, `group_by_thread`, `burst_window_sec`, `suppress_when_active`, `spam_suspicious`, `quiet`(JSON), `notify_send_failure`, `notify_catch_all`, `feed_seen_at` |
+| `notification_mailbox_prefs` | メールボックスごとの通知レベル | `(user_id, address_id)` 主キー, `level: all \| new_thread \| direct \| off` |
+| `notification_rules` | 通知ルール | `name`, `matcher`(JSON), `action: always \| normal \| silent \| never`, `priority`, `enabled` |
+| `thread_notification_prefs` | 会話ごと | `(user_id, thread_id)` 主キー, `mode: follow \| mute` |
+| `notification_digests` | 後でまとめる分 | `user_id`, `due_at`, `message_ids[]` |
+| `notification_log` | 判定の履歴（通知欄） | `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`, `device_count`。30 日で消す |
 
 ### `messages`
 
@@ -126,11 +149,15 @@ from_addr, from_name, to_addr, cc_addr, bcc_addr,   -- addr 系はカンマ結�
 subject, snippet, text_body, html_body,
 raw_r2_key, size_bytes, has_attachments,
 is_read, is_starred, spam_verdict,
+sent_by_user_id, envelope_to,
 received_at, created_at
 ```
 
 インデックス: `(address_id, received_at desc)`, `(thread_id)`,
 `(address_id, rfc_message_id)`, `(status)`。
+
+`sent_by_user_id` は送信失敗を本人にだけ知らせるための記録（null の失敗はそのメールボックスの `write` 全員に知らせる）。
+`envelope_to` はキャッチオールに届いたメールの本来の宛先（To ヘッダは BCC 等で食い違うため代わりにならない）。
 
 ### 全文検索
 
@@ -184,6 +211,27 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 | CRUD | `/v1/admin/domains` `/v1/admin/addresses` | admin | W5 |
 | CRUD | `/v1/admin/rules` | admin | W2 |
 | GET | `/v1/openapi.json` | — | W9（未実装。呼ぶと 404） |
+
+#### 通知・端末（W11）— すべて**セッション限定**（API キーで叩くと 403）・agent 対象外・自分の分のみ
+
+| メソッド | パス | 内容 |
+| --- | --- | --- |
+| GET / PATCH | `/v1/me/notifications` | 設定一式（全体・メールボックスごと・ルール）。部分更新とプリセット適用は PATCH |
+| PUT | `/v1/me/notifications/mailboxes/{addressId}` | メールボックスの通知レベル |
+| GET / POST | `/v1/me/notifications/rules` | ルール一覧 / 追加 |
+| PATCH / DELETE | `/v1/me/notifications/rules/{id}` | 更新 / 削除 |
+| POST | `/v1/me/notifications/rules/reorder` | 並べ替え |
+| POST | `/v1/me/notifications/dry-run` | 最近のメールに今の設定を当てて判定し返す |
+| GET | `/v1/me/notifications/feed` | 通知欄（カーソルページング。`include_dropped` で対象外も理由つき） |
+| POST | `/v1/me/notifications/feed/seen` | 通知欄を開いた（未確認数の 0 化） |
+| GET / PUT / DELETE | `/v1/threads/{id}/notification` | 会話のフォロー / ミュート解除（`threadNotificationRouter` を `/v1/threads` に載せている） |
+| GET / POST | `/v1/me/devices` | 自分の端末一覧 / 購読の登録（同じ `endpoint` は上書き） |
+| PATCH / DELETE | `/v1/me/devices/{id}` | 名前・有効・受け取るメールボックス / 削除 |
+| POST | `/v1/me/devices/{id}/test` `/v1/me/devices/{id}/seen` | テスト通知 / 使用中の合図 |
+| GET | `/v1/push/key` | VAPID 公開鍵（未設定・解釈不可なら `null`） |
+
+端末登録の `endpoint` はブラウザのプッシュサービス（FCM / Mozilla / Apple / Windows）に限定する
+（`src/shared/contracts/notifications.ts` の `isPushServiceEndpoint`）。任意の URL を受けると踏み台になるため。
 
 ### `GET /v1/messages` の検索パラメータ（AI 向けの主要導線）
 
@@ -327,3 +375,34 @@ type Principal = {
   API を常に第一級に保つため。
 - **ADR-5**: IMAP/POP3 は提供しない。理由: Workers に常駐プロセスが無い。
   代替は API・Webhook・Email Routing の転送。
+
+## 11. プッシュ通知（W11）
+
+通知は受信・送信失敗の処理とは別のキューメッセージにし、push サービスの遅延で
+再試行を起こさない（`queue.ts` の `NotifyMessage` を `OUTBOUND_QUEUE` に載せる。
+新しいキューは作らない）。
+
+```
+受信: inbound.ts ── OUTBOUND_QUEUE { kind: "notify", event: "received", messageId }
+送信失敗: outbound.ts ── { kind: "notify", event: "send_failed", messageId }
+テスト: devices.ts ── { kind: "notify", event: "test", deviceId }
+```
+
+`processNotify`（`services/notify.ts`）:
+- `received` / `send_failed` はまず対象利用者へ 1 メッセージずつ分ける
+  （**Free の 1 実行あたり外部リクエスト上限 50 に収める**。`eligibleUserIds` は
+  owner（全員）＋ そのメールボックスへの `grant` を持つ active 利用者）。
+  送信失敗は `sent_by_user_id` があればその人だけ、無ければ `write` 全員。
+- 利用者ごとに `decide` / `decideSendFailure`（`domain/notify/decide.ts`）で
+  `sent / held / digest / dropped / excluded` を決め、`notification_log` に理由つきで記録。
+  詳細な判定表は `pwa-notifications.md` の「4. 通知の判定」。
+- `sent` は `filterDevices` で端末単位に間引いてから `deliverToDevices` で送る。
+- `held` / `digest` は `notification_digests` に積む。
+
+**VAPID と暗号化（RFC 8291）は自前実装**（`services/webpush.ts`）。
+`web-push` パッケージは MPL-2.0 のため使わない。VAPID JWT は Apple の制約（1 時間に 1 回）を
+守るため origin ごとに D1 の `settings` へ有効期限つきで置いて使い回す（`notify/token-cache.ts`）。
+鍵は `VAPID_PRIVATE_KEY`（Secret、JWK の JSON）と `VAPID_SUBJECT`（vars）。
+
+`handleScheduled`（cron `*/5 * * * *`、`wrangler.jsonc`）: 期限の来た digest を 1 通にまとめて送り、
+`notification_log`（30 日）と未使用端末（90 日）を掃除する。

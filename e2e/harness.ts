@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { env as testEnv, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import worker from "@/worker";
 import type { AnyQueueMessage } from "@/services/queue";
@@ -108,6 +109,37 @@ export function createClient(h: Harness) {
 }
 
 export type Client = ReturnType<typeof createClient>;
+
+export type PushSend = { url: string; method: string; headers: Headers; status: number };
+
+/**
+ * Web Push の送信先 fetch を捕まえる。VAPID 鍵を差し込み、globalThis.fetch を
+ * status を返すスタブに差し替えて、送られた POST をログに残す。
+ */
+/**
+ * Web Push の送信を捕まえる。VAPID 鍵を差し込み、globalThis.fetch を status を返す
+ * スタブに差し替えて、送られた POST の一覧をログに残す。テストの afterEach で vi
+ * のモックを消すこと（別テストに fetch の差し替えが漏れない）。
+ */
+export async function enableVapid(h: Harness, status = 201): Promise<PushSend[]> {
+	if (!(h.env as { VAPID_PRIVATE_KEY?: string }).VAPID_PRIVATE_KEY) {
+		const { generateVapidKeys } = await import("@/services/webpush");
+		const keys = await generateVapidKeys();
+		(h.env as { VAPID_PRIVATE_KEY?: string; VAPID_SUBJECT?: string }).VAPID_PRIVATE_KEY = JSON.stringify(keys.privateKey);
+		(h.env as { VAPID_SUBJECT?: string }).VAPID_SUBJECT = "mailto:push@tsubame.example";
+	}
+	const sends: PushSend[] = [];
+	vi.spyOn(globalThis, "fetch").mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+		sends.push({
+			url: String(url),
+			method: init?.method ?? "GET",
+			headers: new Headers(init?.headers),
+			status,
+		});
+		return new Response(null, { status });
+	});
+	return sends;
+}
 
 export type DeliverResult = {
 	rejected: string | null;

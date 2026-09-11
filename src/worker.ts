@@ -24,6 +24,11 @@ export default {
 		await handleIncomingEmail(message, env, ctx);
 	},
 
+	async scheduled(controller, env, ctx) {
+		const { handleScheduled } = await import("@/services/notify");
+		await handleScheduled(controller, env, ctx);
+	},
+
 	async queue(batch, env, ctx) {
 		const { handleQueueBatch } = await import("@/services/consumer");
 		await handleQueueBatch(batch as MessageBatch<AnyQueueMessage>, env, ctx);

@@ -310,6 +310,8 @@ describe("FR-2 送信", () => {
 		expect(job!.attempts).toBe(4);
 		const m = await db.select().from(messages).where(eq(messages.id, messageId)).get();
 		expect(m!.status).toBe("failed");
-		expect(h.pending.filter((p) => p.queue === "outbound")).toHaveLength(0);
+		expect(
+			h.pending.filter((p) => p.queue === "outbound" && (p.body as { kind: string }).kind !== "notify"),
+		).toHaveLength(0);
 	});
 });

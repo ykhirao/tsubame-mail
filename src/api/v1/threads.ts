@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { and, desc, eq, ne } from "drizzle-orm";
+import { messages as messagesTable } from "@/db/schema";
+import type { Db } from "@/db/client";
 import type { AppEnv } from "@/api/types";
 import { invalidRequest, notFound } from "@/shared/errors";
 import {
@@ -15,9 +18,32 @@ import {
 	resolveMailboxId,
 	toUnix,
 } from "@/domain/search/sql";
-import { requireScope } from "@/domain/access/policy";
+import { jsonIdsIn, requireScope } from "@/domain/access/policy";
 
 const routes = new Hono<AppEnv>();
+
+async function latestInboundEnvelope(db: Db, threadIds: string[]): Promise<Map<string, string | null>> {
+	const map = new Map<string, string | null>();
+	if (threadIds.length === 0) return map;
+	const rows = await db
+		.select({
+			threadId: messagesTable.threadId,
+			envelopeTo: messagesTable.envelopeTo,
+		})
+		.from(messagesTable)
+		.where(and(
+			jsonIdsIn(messagesTable.threadId, threadIds),
+			eq(messagesTable.direction, "inbound"),
+			ne(messagesTable.status, "trash"),
+		))
+		.orderBy(desc(messagesTable.receivedAt), desc(messagesTable.id))
+		.all();
+	for (const r of rows) {
+		if (!r.threadId || map.has(r.threadId)) continue;
+		map.set(r.threadId, r.envelopeTo ?? null);
+	}
+	return map;
+}
 
 routes.get("/", async (c) => {
 	const db = c.get("db");
@@ -52,6 +78,7 @@ routes.get("/", async (c) => {
 		limit: q.limit,
 		cursor: q.cursor,
 	});
+	const envelopeByThread = await latestInboundEnvelope(db, rows.map((t) => t.id));
 	const body: ThreadListResponse = {
 		data: rows.map((t) => ({
 			id: t.id,
@@ -67,6 +94,7 @@ routes.get("/", async (c) => {
 			hasAttachments: t.hasAttachments,
 			isStarred: t.isStarred,
 			unreadCount: t.unreadCount,
+			envelopeTo: envelopeByThread.get(t.id) ?? null,
 		})),
 		next_cursor: nextCursor,
 	};
@@ -91,6 +119,15 @@ routes.get("/:id", async (c) => {
 	if (!thread) throw notFound("スレッドが見つかりません");
 
 	const msgs = await queryThreadMessages(db, principal, id, includeTrash);
+	const msgIds = msgs.map((m) => m.id);
+	const envRows = msgIds.length
+		? await db
+				.select({ id: messagesTable.id, envelopeTo: messagesTable.envelopeTo })
+				.from(messagesTable)
+				.where(jsonIdsIn(messagesTable.id, msgIds))
+				.all()
+		: [];
+	const envelopeById = new Map(envRows.map((r) => [r.id, r.envelopeTo ?? null]));
 	const messages = [];
 	for (const m of msgs) {
 		const atts = await attachmentsForMessage(db, m.id);
@@ -111,6 +148,7 @@ routes.get("/:id", async (c) => {
 			isRead: m.isRead,
 			isStarred: m.isStarred,
 			hasAttachments: m.hasAttachments,
+			envelopeTo: envelopeById.get(m.id) ?? null,
 			textBody: m.textBody ?? null,
 			htmlBody: m.htmlBody ?? null,
 			attachments: atts.map((a) => ({

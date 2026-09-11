@@ -1,3 +1,4 @@
+import { forgetRegisteredDevice } from "@/ui/lib/push";
 import {
 	createContext,
 	useCallback,
@@ -55,6 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		} catch {
 			/* サーバ側が失敗してもクライアントは guest に落とす。 */
 		}
+		forgetRegisteredDevice();
 		setMe(null);
 		setStatus("guest");
 	}, []);

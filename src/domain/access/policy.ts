@@ -30,6 +30,7 @@ export type PrincipalApiKey = {
 export type ResolvePrincipalOptions = {
 	user: PrincipalUser;
 	apiKey?: PrincipalApiKey | null;
+	sessionId?: string;
 };
 
 export function intersectAddressSets(a: AddressSet, b: AddressSet): AddressSet {
@@ -81,6 +82,7 @@ export async function resolvePrincipal(
 			scopes: [...ALL_SCOPES],
 			addressIds: base.readable,
 			writableAddressIds: base.writable,
+			...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
 		};
 	}
 

@@ -1,8 +1,6 @@
-# PWA とプッシュ通知（検討中）
+# PWA とプッシュ通知
 
-- ステータス: **検討中**。要件（`requirements.md`）へはまだ入れていない。
-  入れた瞬間に `spec:coverage` が e2e を要求するため、実装に着手するときに
-  下の「3. 要件案」を FR-15 / FR-16 として移す。
+- ステータス: **実装中**。「3. 要件案」は `requirements.md` の FR-15 / FR-16 に移した（正はそちら）。
 - 画面の設計は別冊 [スマホ画面設計](mobile-screens.md)。
 
 ## 1. 目的
@@ -267,24 +265,34 @@
 
 ## 8. 担当と置き場所
 
-新しいワークストリーム **W11（通知）** を立てる案。
+ワークストリーム **W11（通知）・W7（UI・SW）**。
 
 ```
-src/domain/notify/decide.ts      [W11] 判定。副作用なし。単体テストの主戦場
-src/domain/notify/schedule.ts    [W11] おやすみ時間の計算（タイムゾーン込み）
-src/services/webpush.ts          [W11] VAPID と暗号化と送信
-src/services/notify.ts           [W11] キューのコンシューマ、digest の送信
-src/api/v1/notifications.ts      [W11]
-src/api/v1/devices.ts            [W11]
+src/domain/notify/
+  decide.ts              [W11] 判定。副作用なし。単体テストの主戦場
+  schedule.ts            [W11] おやすみ時間の計算（タイムゾーン込み）
+src/services/notify.ts        [W11] キューのコンシューマ、digest の送信、cron
+src/services/notify/
+  deliver.ts             [W11] 端末ごとの送信と応答の処理
+  load.ts                [W11] 通知対象の読み込み
+  prefs.ts               [W11] 設定の読み込み・未読数
+  render.ts              [W11] 本文の描画（Declarative Web Push の JSON）
+  token-cache.ts         [W11] VAPID JWT の D1 キャッシュ
+src/services/webpush.ts       [W11] VAPID と暗号化と送信
+src/api/v1/notifications.ts   [W11]
+src/api/v1/devices.ts         [W11]
+src/api/v1/push.ts            [W11] VAPID 公開鍵
 src/shared/contracts/notifications.ts [W11]
-src/ui/sw.ts                     [W7]  Service Worker
+src/ui/sw.ts                  [W7]  Service Worker
 src/ui/routes/settings/notifications/ [W7]
+src/ui/routes/welcome/notifications.tsx [W7]
+src/ui/routes/NotificationsFeed.tsx     [W7]
 public/manifest.webmanifest, public/icons/  [W7]
 ```
 
 要依頼: `schema.ts`（テーブル追加）、`queue.ts`（`notify` 種別）、`worker.ts`（`scheduled`）、
 `wrangler.jsonc`（cron）、`vite.config.ts`（SW のエントリ）、`inbound.ts`（NOTIFY を積む 1 行）、
-`AppLayout.tsx`（スマホ配置）。
+`AppLayout.tsx`（スマホ配置）— はすべて実装済み。残るは統合（`app.ts` への push ルート載せ等）。
 
 ## 9. 段階
 

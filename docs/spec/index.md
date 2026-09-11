@@ -12,8 +12,8 @@
 - [セキュリティ観点](security.html) — 何を守るか、誰が攻撃者か、レビューの観点。
 - [気付き](notes.html) — 読んで疑ったが、まだ確かめていないもの。確かめたら精査へ昇格させる。
 - [精査の残件](security-audit.html) — 上の観点で精査して見つかった、対応予定の指摘と残っている制約。確認したものだけ載る。
-- 検討中: [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
-  まだ要件に入れていない。実装に着手するときに FR-15 / FR-16 として要件へ移す。
+- [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
+  FR-15 / FR-16 の方式と画面。
 - 検討中: [PC 画面の改善要望](pc-screens.html) — 使っていて出た要望の置き場。
   FR-9「作り込まない」と衝突するため、着手には要件の改訂が要る。
 

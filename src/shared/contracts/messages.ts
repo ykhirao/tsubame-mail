@@ -50,6 +50,8 @@ export const messageListItem = z.object({
 export type MessageListItem = z.infer<typeof messageListItem>;
 
 export const messageDetail = messageListItem.extend({
+	/** キャッチオールで受けたときの本来の宛先。受信箱には To ヘッダがそのまま入る。 */
+	envelopeTo: z.string().nullable(),
 	textBody: z.string().nullable(),
 	htmlBody: z.string().nullable(),
 	attachments: z.array(attachmentMeta),
@@ -115,6 +117,8 @@ export const threadListItem = z.object({
 	snippet: z.string().nullable(),
 	hasAttachments: z.boolean(),
 	isStarred: z.boolean(),
+	/** キャッチオールで受けた最新の受信メッセージの本来の宛先。 */
+	envelopeTo: z.string().nullable(),
 });
 export type ThreadListItem = z.infer<typeof threadListItem>;
 

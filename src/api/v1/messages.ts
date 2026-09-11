@@ -93,8 +93,14 @@ function toListItem(m: MessageRow): MessageListItem {
 
 async function toDetail(db: Db, m: MessageRow): Promise<MessageDetail> {
 	const atts = await attachmentsForMessage(db, m.id);
+	const env = await db
+		.select({ envelopeTo: messages.envelopeTo })
+		.from(messages)
+		.where(eq(messages.id, m.id))
+		.get();
 	return {
 		...toListItem(m),
+		envelopeTo: env?.envelopeTo ?? null,
 		textBody: m.textBody ?? null,
 		htmlBody: m.htmlBody ?? null,
 		attachments: atts.map((a) => ({

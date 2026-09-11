@@ -20,7 +20,8 @@
 
 	"vars": {
 		"APP_NAME": "tsubame",
-		"EMAIL_WORKER_NAME": "tsubame"
+		"EMAIL_WORKER_NAME": "tsubame",
+		"VAPID_SUBJECT": "mailto:postmaster@example.com"
 	},
 
 	"d1_databases": [
@@ -50,6 +51,9 @@
 			{ "queue": "tsubame-outbound", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "tsubame-outbound-dlq" }
 		]
 	},
+
+	// おやすみ明けのまとめ通知は 24 時間を超えうるので、キューの遅延送信では届かない。
+	"triggers": { "crons": ["*/5 * * * *"] },
 
 	"send_email": [{ "name": "EMAIL", "remote": true }],
 

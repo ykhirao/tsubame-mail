@@ -120,6 +120,7 @@ app.patch("/", async (c) => {
 		// パスワードを変えたら他のセッションを落とす（自分の Cookie も含めて全部）。
 		// 漏れたキーがそのまま生きないよう、発行済みの API キーも失効させる（#99）。
 		await db.delete(schema.sessions).where(eq(schema.sessions.userId, user.id));
+		await db.delete(schema.pushDevices).where(eq(schema.pushDevices.userId, user.id));
 		const [before] = await db
 			.select({ n: sql<number>`count(*)` })
 			.from(schema.apiKeys)

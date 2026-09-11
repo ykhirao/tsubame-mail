@@ -35,4 +35,6 @@ export type Principal = {
 	/** addressIds の部分集合。 */
 	writableAddressIds: string[] | "all";
 	apiKeyId?: string;
+	/** セッションで入ったときだけ。端末の購読をログアウトで消すのに使う。 */
+	sessionId?: string;
 };

@@ -4,3 +4,5 @@
 INTERNAL_SECRET=
 CF_API_TOKEN=
 CF_ACCOUNT_ID=
+# Web Push の VAPID 秘密鍵（JWK の JSON 1 行）。`node scripts/vapid-keys.mjs` で作る。変えると全端末の購読が無効になる。
+VAPID_PRIVATE_KEY=

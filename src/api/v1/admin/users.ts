@@ -179,6 +179,7 @@ app.patch("/:id", requireSession, async (c) => {
 	}
 	// パスワードを変えたら発行済みの API キーも失効させる（#99）。
 	if (body.password !== undefined) {
+		await db.delete(schema.pushDevices).where(eq(schema.pushDevices.userId, id));
 		await db
 			.update(schema.apiKeys)
 			.set({ revokedAt: new Date() })

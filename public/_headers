@@ -1,3 +1,10 @@
+# SW と manifest は常に最新を渡す。キャッシュされると更新が届かなくなる。
+/sw.js
+  Cache-Control: no-cache
+
+/manifest.webmanifest
+  Cache-Control: no-cache
+
 # Worker を通らずに配信される SPA の資産にだけ効く。/api/* のヘッダは src/api/app.ts で付ける。
 # メール本文の srcdoc iframe はこの CSP を継承する。img-src から https: を外すと
 # 「画像を表示」が効かなくなる。既定のブロックは MessageHtml が差し込む meta CSP が担う。

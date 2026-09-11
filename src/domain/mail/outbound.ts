@@ -41,6 +41,7 @@ async function failOutbound(
 		.set({ status: "failed", lastError })
 		.where(eq(outboundJobs.id, jobId));
 	await dispatchMessageEvent(env, "message.failed", messageId);
+	await env.OUTBOUND_QUEUE.send({ kind: "notify", event: "send_failed", messageId });
 }
 
 export async function processOutboundSend(

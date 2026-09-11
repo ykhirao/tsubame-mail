@@ -19,6 +19,9 @@ import webhookRoutes from "./v1/webhooks";
 import addressRoutes from "./v1/addresses";
 import adminDomainRoutes from "./v1/admin/domains";
 import adminAddressRoutes from "./v1/admin/addresses";
+import notificationRoutes, { threadNotificationRouter } from "./v1/notifications";
+import deviceRoutes from "./v1/devices";
+import pushRoutes from "./v1/push";
 
 // `clone()` は元のストリームを乱さないので、ここで読んでもハンドラ側の
 // `c.req.json()` 等はそのまま読める。ヘッダ（Content-Length など）は
@@ -136,10 +139,14 @@ export function createApp() {
 	app.use("/api/v1/attachments/*", requireAuth);
 	app.use("/api/v1/admin/*", requireAuth, requireOwner);
 	app.use("/api/v1/webhooks/*", requireAuth, requireOwner);
+	app.use("/api/v1/push/*", requireAuth);
 
+	app.route("/api/v1/me/notifications", notificationRoutes);
+	app.route("/api/v1/me/devices", deviceRoutes);
 	app.route("/api/v1/me", meRoutes);
 	app.route("/api/v1/messages", messageRoutes);
 	app.route("/api/v1/messages", outboundRoutes);
+	app.route("/api/v1/threads", threadNotificationRouter);
 	app.route("/api/v1/threads", threadRoutes);
 	app.route("/api/v1/attachments", attachmentsRouter);
 	app.route("/api/v1", rawRouter);

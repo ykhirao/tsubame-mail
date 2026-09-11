@@ -133,6 +133,7 @@ type QueuedMessage = {
 	/** 返信なら元メッセージのスレッド。無ければ新しいスレッドを作る。 */
 	threadId?: string | null;
 	attachments: DecodedAttachment[];
+	sentByUserId: string;
 };
 
 async function enqueueOutbound(
@@ -155,6 +156,7 @@ async function enqueueOutbound(
 		addressId: m.addressId,
 		direction: "outbound",
 		status: "queued",
+		sentByUserId: m.sentByUserId,
 		fromAddr: m.fromAddr,
 		fromName: m.fromName ?? null,
 		toAddr: m.toAddr,
@@ -217,6 +219,7 @@ router.post("/", async (c) => {
 	if (parseAddressList(toAddr).length === 0) throw invalidRequest("宛先が指定されていません");
 
 	const result = await enqueueOutbound(db, c.env, {
+		sentByUserId: principal.userId,
 		addressId,
 		fromAddr: normalizeAddress(input.from)!,
 		toAddr,
@@ -330,6 +333,7 @@ router.post("/:id/reply", async (c) => {
 	const addressId = mailbox.id;
 
 	const result = await enqueueOutbound(db, env, {
+		sentByUserId: principal.userId,
 		addressId,
 		fromAddr: mailbox.address,
 		fromName: mailbox.displayName ?? undefined,

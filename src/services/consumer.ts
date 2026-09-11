@@ -1,4 +1,4 @@
-import { isInbound, isOutboundSend, isWebhookRetry, type AnyQueueMessage } from "./queue";
+import { isInbound, isNotify, isOutboundSend, isWebhookRetry, type AnyQueueMessage } from "./queue";
 
 export async function handleQueueBatch(
 	batch: MessageBatch<AnyQueueMessage>,
@@ -17,6 +17,9 @@ export async function handleQueueBatch(
 			} else if (isWebhookRetry(body)) {
 				const { processWebhookRetry } = await import("@/services/webhooks");
 				await processWebhookRetry(body, env, ctx);
+			} else if (isNotify(body)) {
+				const { processNotify } = await import("@/services/notify");
+				await processNotify(body, env, ctx);
 			} else {
 				console.error("未知のキューメッセージ", body);
 			}

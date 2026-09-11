@@ -255,6 +255,7 @@ export async function processInbound(
 				webhookCreatedBefore: dup.createdAt,
 			});
 		}
+		await enqueueNotify(env, dup.id);
 		return;
 	}
 
@@ -377,6 +378,7 @@ export async function processInbound(
 		textBody: bodies.text,
 		htmlBody: bodies.html,
 		rawR2Key: msg.rawKey,
+		envelopeTo: clampNullable(sanitizeEnvelope(msg.envelope.to), STORED_BYTES.short),
 		sizeBytes,
 		hasAttachments: kept.length > 0,
 		isRead: read,
@@ -393,4 +395,11 @@ export async function processInbound(
 	if (!dropped) {
 		await dispatchMessageEvent(env, "message.received", messageId);
 	}
+	await enqueueNotify(env, messageId);
+}
+
+// 破棄・既読にしたメールも積む。送らなかった理由を通知欄に残すため。
+// 再配達でも積み直すので、コンシューマ側が message ごとに冪等にする。
+async function enqueueNotify(env: CloudflareEnv, messageId: string): Promise<void> {
+	await env.OUTBOUND_QUEUE.send({ kind: "notify", event: "received", messageId });
 }

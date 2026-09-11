@@ -1,10 +1,11 @@
 import { Link, Outlet, useNavigate, useSearchParams } from "react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
-import { AddressesApi } from "@/ui/lib/api";
+import { AddressesApi, NotificationsApi } from "@/ui/lib/api";
 import type { MyAddress } from "@/shared/contracts/addresses";
 import { getTheme, setTheme, type Theme } from "@/ui/lib/theme";
 import { AddMemberDialog } from "@/ui/components/AddMemberDialog";
+import { useIsMobile } from "@/ui/lib/useIsMobile";
 
 const icon = "h-5 w-5";
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -13,6 +14,12 @@ const InboxIcon = () => (
 	<svg className={icon} viewBox="0 0 24 24" {...stroke}>
 		<path d="M4 13h4l2 3h4l2-3h4" />
 		<path d="M4 13 6 5h12l2 8v6H4z" />
+	</svg>
+);
+const BellIcon = () => (
+	<svg className={icon} viewBox="0 0 24 24" {...stroke}>
+		<path d="M6 9a6 6 0 0 1 12 0c0 5 2.5 5.5 2.5 5.5H3.5S6 14 6 9z" />
+		<path d="M10 19a2 2 0 0 0 4 0" />
 	</svg>
 );
 const StarIcon = () => (
@@ -78,10 +85,12 @@ function MailboxSwitcher({
 	addresses,
 	selected,
 	onSelect,
+	flexible = false,
 }: {
 	addresses: MyAddress[];
 	selected: string;
 	onSelect: (id: string) => void;
+	flexible?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
@@ -99,7 +108,7 @@ function MailboxSwitcher({
 	const totalUnread = addresses.reduce((n, a) => n + a.unreadCount, 0);
 
 	return (
-		<div className="relative shrink-0" ref={ref}>
+		<div className={`relative ${flexible ? "min-w-0" : "shrink-0"}`} ref={ref}>
 			<button
 				type="button"
 				onClick={() => setOpen((v) => !v)}
@@ -211,7 +220,19 @@ export function AppLayout() {
 
 	const [accountOpen, setAccountOpen] = useState(false);
 	const [showAddMember, setShowAddMember] = useState(false);
+	const [drawerOpen, setDrawerOpen] = useState(false);
+	const [unseenCount, setUnseenCount] = useState(0);
 	const accountRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		let alive = true;
+		NotificationsApi.get()
+			.then((s) => alive && setUnseenCount(s.unseen_count))
+			.catch(() => {});
+		return () => {
+			alive = false;
+		};
+	}, []);
 
 	// 仮パスワードのままなら、他の画面を見せずに変更へ寄せる。
 	useEffect(() => {
@@ -228,6 +249,8 @@ export function AppLayout() {
 		document.addEventListener("mousedown", onDown);
 		return () => document.removeEventListener("mousedown", onDown);
 	}, [accountOpen]);
+
+	const isMobile = useIsMobile();
 
 	const view = params.get("view") ?? "inbox";
 	const address = params.get("address") ?? "";
@@ -290,9 +313,115 @@ export function AppLayout() {
 
 	const composeTo = address ? `/compose?from=${encodeURIComponent(address)}` : "/compose";
 
+	useEffect(() => {
+		setDrawerOpen(false);
+	}, [params]);
+
+	const accountControl = (big: boolean) => (
+		<div className="relative shrink-0" ref={accountRef}>
+			<button
+				type="button"
+				onClick={() => setAccountOpen((v) => !v)}
+				title={me?.email}
+				aria-label="アカウント"
+				className={`grid ${big ? "h-11 w-11" : "h-9 w-9"} place-items-center rounded-full bg-[var(--accent)] text-sm font-medium text-white transition-opacity hover:opacity-90`}
+			>
+				{initialOf(me?.name ?? me?.email ?? "")}
+			</button>
+
+			{accountOpen && (
+				<div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] py-1 shadow-lg">
+					<div className="flex items-center gap-3 px-4 py-3">
+							<span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--accent)] text-sm font-medium text-white">
+									{initialOf(me?.name ?? me?.email ?? "")}
+								</span>
+								<span className="min-w-0">
+									<span className="flex items-center gap-1.5">
+										<span className="truncate text-sm text-[var(--text)]">{me?.name}</span>
+										{me?.role === "owner" && (
+											<span className="shrink-0 rounded-full bg-[var(--surface-selected)] px-1.5 py-0.5 text-[10px] text-[var(--text-on-selected)]">
+												オーナー
+											</span>
+										)}
+									</span>
+									<span className="block truncate text-xs text-[var(--text-muted)]">{me?.email}</span>
+								</span>
+							</div>
+					<div className="my-1 border-t border-[var(--line-soft)]" />
+					{me?.role === "owner" && (
+						<button
+							type="button"
+							onClick={() => {
+								setAccountOpen(false);
+								setShowAddMember(true);
+							}}
+							className="w-full px-4 py-2 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
+						>
+							メンバーを追加
+						</button>
+					)}
+					<Link
+						to="/settings"
+						onClick={() => setAccountOpen(false)}
+						className="block px-4 py-2 text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
+					>
+						設定
+					</Link>
+					{me?.role === "owner" && (
+						<Link
+							to="/admin/users"
+							onClick={() => setAccountOpen(false)}
+							className="block px-4 py-2 text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
+						>
+							ユーザーの管理
+						</Link>
+					)}
+					<div className="my-1 border-t border-[var(--line-soft)]" />
+					<button
+						type="button"
+						onClick={handleLogout}
+						disabled={loggingOut}
+						className="w-full px-4 py-2 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-hover)] disabled:opacity-50"
+					>
+						ログアウト
+					</button>
+				</div>
+			)}
+		</div>
+	);
+
 	return (
 		<div className="flex h-screen flex-col bg-[var(--surface-sunken)]">
-			<header className="flex h-16 shrink-0 items-center gap-3 px-4">
+			{isMobile ? (
+				<header className="flex h-16 shrink-0 items-center gap-1.5 px-3">
+					<button
+						type="button"
+						onClick={() => setDrawerOpen(true)}
+						className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)]"
+						aria-label="メニュー"
+					>
+						<MenuIcon />
+					</button>
+					<div className="min-w-0 flex-1 self-center">
+						<MailboxSwitcher addresses={addresses} selected={address} onSelect={selectAddress} flexible />
+					</div>
+					<Link
+						to="/notifications"
+						aria-label="通知"
+						className="relative grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)]"
+					>
+						<BellIcon />
+						{unseenCount > 0 && (
+							<span
+								className="pointer-events-none absolute right-1.5 top-1.5 size-2.5 rounded-full bg-[var(--danger)]"
+								aria-hidden
+							/>
+						)}
+					</Link>
+					{accountControl(true)}
+				</header>
+			) : (
+				<header className="flex h-16 shrink-0 items-center gap-3 px-4">
 				<button
 					type="button"
 					onClick={toggleSidebar}
@@ -405,9 +534,11 @@ export function AppLayout() {
 					</button>
 				</div>
 			</header>
+			)}
 
 			<div className="flex min-h-0 flex-1">
-				<aside
+				{!isMobile && (
+					<aside
 					className={`shrink-0 overflow-y-auto px-2 pb-4 transition-[width] ${
 						open ? "w-56" : "w-[72px]"
 					}`}
@@ -474,15 +605,79 @@ export function AppLayout() {
 						)}
 					</nav>
 				</aside>
+				)}
 
 				{/* scrollbar-gutter: stable がないと、内容の長さでページごとに 15px ほど横ずれする。 */}
 				<main
-					className="flex min-w-0 flex-1 flex-col overflow-y-auto pb-4 pr-4"
-					style={{ scrollbarGutter: "stable" }}
+					className={`flex min-w-0 flex-1 flex-col overflow-y-auto ${isMobile ? "" : "pb-4 pr-4"}`}
+					style={isMobile ? undefined : { scrollbarGutter: "stable" }}
 				>
 					<Outlet />
 				</main>
 			</div>
+
+			{isMobile && drawerOpen && (
+				<div className="fixed inset-0 z-40">
+					<div
+						className="absolute inset-0 bg-black/40"
+						onClick={() => setDrawerOpen(false)}
+						aria-hidden
+					/>
+					<nav className="absolute left-0 top-0 flex h-full w-72 flex-col overflow-y-auto bg-[var(--surface)] px-2 py-4 shadow-2xl">
+						<Link
+							to={composeTo}
+							onClick={() => setDrawerOpen(false)}
+							className="mb-3 flex h-12 shrink-0 items-center justify-center gap-2 rounded-full bg-[var(--accent-weak)] text-[var(--accent-text)] shadow-sm transition-shadow hover:shadow"
+						>
+							<PencilIcon />
+							<span className="text-sm font-medium">作成</span>
+						</Link>
+						<nav className="flex flex-col gap-0.5">
+							{VIEWS.map((v) => {
+								const active = view === v.key;
+								return (
+									<Link
+										key={v.key}
+										to={viewHref(v.key)}
+										onClick={() => setDrawerOpen(false)}
+										className={`flex h-11 items-center gap-3 rounded-r-full px-4 text-sm transition-colors ${
+											active
+												? "bg-[var(--surface-selected)] font-medium text-[var(--text-on-selected)]"
+												: "text-[var(--text)] hover:bg-[var(--surface-hover)]"
+										}`}
+									>
+										<span className="shrink-0">{v.icon}</span>
+										<span className="min-w-0 flex-1 truncate">{v.label}</span>
+									</Link>
+								);
+							})}
+							<div className="my-2 border-t border-[var(--line-soft)]" />
+							<Link
+								to="/settings"
+								onClick={() => setDrawerOpen(false)}
+								className="flex h-11 items-center gap-3 rounded-r-full px-4 text-sm text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+							>
+								<span className="shrink-0">
+									<GearIcon />
+								</span>
+								<span className="min-w-0 flex-1 truncate">設定</span>
+							</Link>
+							{me?.role === "owner" && (
+								<Link
+									to="/admin/domains"
+									onClick={() => setDrawerOpen(false)}
+									className="flex h-11 items-center gap-3 rounded-r-full px-4 text-sm text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+								>
+									<span className="shrink-0">
+										<ShieldIcon />
+									</span>
+									<span className="min-w-0 flex-1 truncate">管理</span>
+								</Link>
+							)}
+						</nav>
+					</nav>
+				</div>
+			)}
 
 			{showAddMember && <AddMemberDialog onClose={() => setShowAddMember(false)} />}
 		</div>

@@ -1,11 +1,15 @@
-import { useEffect, useState, useCallback } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import type { ThreadListItem } from "@/shared/contracts/messages";
-import { MessagesApi, ThreadsApi } from "@/ui/lib/api";
+import { MessagesApi, ThreadsApi, AddressesApi } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
+import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
+import { useIsMobile } from "@/ui/lib/useIsMobile";
+import { InstallBanner } from "@/ui/components/InstallBanner";
 
 const PAGE = 25;
+const PULL_THRESHOLD = 60;
 
 function formatListDate(unixSec: number): string {
 	const d = new Date(unixSec * 1000);
@@ -23,15 +27,34 @@ function formatListDate(unixSec: number): string {
 	}).format(d);
 }
 
+const SearchIcon = () => (
+	<svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+		<circle cx="11" cy="11" r="7" />
+		<path d="m20 20-3.5-3.5" />
+	</svg>
+);
+const PencilIcon = () => (
+	<svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+		<path d="M4 20h4L20 8l-4-4L4 16z" />
+	</svg>
+);
+
 export function Inbox() {
+	const navigate = useNavigate();
 	const [searchParams] = useSearchParams();
 	const selected = searchParams.get("address") ?? "";
 	const view = searchParams.get("view") ?? "inbox";
+	const isMobile = useIsMobile();
 
 	const [threads, setThreads] = useState<ThreadListItem[]>([]);
 	const [nextCursor, setNextCursor] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [loadingMore, setLoadingMore] = useState(false);
+	const [catchAllIds, setCatchAllIds] = useState<Set<string>>(new Set());
+	const [pullDist, setPullDist] = useState(0);
+	const [scrolled, setScrolled] = useState(false);
+	const rootRef = useRef<HTMLDivElement>(null);
+	const pullRef = useRef(0);
 
 	// 未選択のときは絞らず、触れる全メールボックスを出す。切り替えは上部バーが持つ。
 
@@ -85,6 +108,63 @@ export function Inbox() {
 		void fetchThreads();
 	}, [fetchThreads]);
 
+	useEffect(() => {
+		let alive = true;
+		AddressesApi.list()
+			.then((res) =>
+				alive && setCatchAllIds(new Set(res.data.filter((a) => a.isCatchAll).map((a) => a.id))),
+			)
+			.catch(() => {});
+		return () => {
+			alive = false;
+		};
+	}, []);
+
+	// 引っ張って再読み込みと、作成ボタンの畳み判定。スクロールコンテナは AppLayout の main。
+	useEffect(() => {
+		if (!isMobile) return;
+		const el = rootRef.current;
+		if (!el) return;
+		const scroller = el.closest(".overflow-y-auto");
+		if (!scroller) return;
+		let startY = 0;
+		let tracking = false;
+		const onScroll = () => setScrolled(scroller.scrollTop > 24);
+		const onStart = (e: TouchEvent) => {
+			startY = e.touches[0]!.clientY;
+			tracking = scroller.scrollTop <= 0 && !pullRef.current;
+		};
+		const onMove = (e: TouchEvent) => {
+			if (!tracking) return;
+			const dy = e.touches[0]!.clientY - startY;
+			if (dy <= 0) {
+				pullRef.current = 0;
+				setPullDist(0);
+				return;
+			}
+			pullRef.current = Math.min(dy * 0.5, 80);
+			setPullDist(pullRef.current);
+		};
+		const onEnd = () => {
+			if (pullRef.current >= PULL_THRESHOLD) void fetchThreads();
+			pullRef.current = 0;
+			setPullDist(0);
+		};
+		onScroll();
+		scroller.addEventListener("scroll", onScroll, { passive: true });
+		el.addEventListener("touchstart", onStart, { passive: true });
+		el.addEventListener("touchmove", onMove, { passive: true });
+		el.addEventListener("touchend", onEnd);
+		el.addEventListener("touchcancel", onEnd);
+		return () => {
+			scroller.removeEventListener("scroll", onScroll);
+			el.removeEventListener("touchstart", onStart);
+			el.removeEventListener("touchmove", onMove);
+			el.removeEventListener("touchend", onEnd);
+			el.removeEventListener("touchcancel", onEnd);
+		};
+	}, [isMobile, fetchThreads]);
+
 	const VIEW_TITLES: Record<string, string> = {
 		inbox: "受信箱",
 		starred: "スター付き",
@@ -93,7 +173,26 @@ export function Inbox() {
 	};
 
 	return (
-		<div className="flex flex-1 flex-col">
+		<div ref={rootRef} className="flex flex-1 flex-col">
+			{isMobile && (
+				<>
+					<Link
+						to="/search"
+						className="mb-2 flex h-11 items-center gap-2 rounded-full bg-[var(--surface-hover)] px-4 text-sm text-[var(--text-muted)]"
+					>
+						<SearchIcon />
+						メールを検索
+					</Link>
+					<div className="mb-2 empty:hidden">
+						<InstallBanner />
+					</div>
+					{pullDist > 0 && (
+						<p className="flex justify-center pb-1 text-xs text-[var(--text-muted)]">
+							{pullDist >= PULL_THRESHOLD ? "手を離して更新" : "引っ張って更新"}
+						</p>
+					)}
+				</>
+			)}
 			<section className="card overflow-hidden">
 				{loading ? (
 					<Spinner />
@@ -114,10 +213,77 @@ export function Inbox() {
 						<ul className="divide-y divide-[var(--line-soft)]">
 							{threads.map((t) => {
 								const unread = t.unreadCount > 0;
+								const rowUrl = `/threads/${t.id}${view === "trash" ? "?view=trash" : ""}`;
+								if (isMobile) {
+									return (
+										<li key={t.id}>
+											<Link
+												to={rowUrl}
+												className={`flex min-h-[72px] items-center gap-1 px-2 py-2 transition-colors hover:bg-[var(--surface-hover)] ${
+													unread ? "bg-[var(--surface)] text-[var(--text)]" : "bg-[var(--surface-read)] text-[var(--text-muted)]"
+												}`}
+											>
+												<button
+													type="button"
+													aria-label={t.isStarred ? "スターを外す" : "スターを付ける"}
+													onClick={(e) => {
+														e.preventDefault();
+														e.stopPropagation();
+														void toggleStar(t);
+													}}
+													className="-m-2 grid h-11 w-11 shrink-0 place-items-center"
+												>
+													<svg
+														className="h-5 w-5"
+														viewBox="0 0 24 24"
+														fill={t.isStarred ? "var(--warning)" : "none"}
+														stroke={t.isStarred ? "var(--warning)" : "currentColor"}
+														strokeWidth="1.8"
+														strokeLinejoin="round"
+													>
+														<path d="m12 4 2.4 5 5.6.8-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-.8z" />
+													</svg>
+												</button>
+												<div className="min-w-0 flex-1">
+													<div className="flex items-baseline justify-between gap-3">
+														<span className={`min-w-0 truncate text-sm ${unread ? "font-bold" : ""}`}>
+															{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+														</span>
+														<span className="shrink-0 text-xs opacity-70">
+															{formatListDate(t.lastMessageAt)}
+														</span>
+													</div>
+													{!selected && t.address && (
+														<span className="mt-0.5 flex items-center gap-1 text-xs opacity-80">
+															<span
+																className="inline-block h-1.5 w-[9px] shrink-0 rounded-full"
+																style={{ background: t.addressColor ?? "currentColor" }}
+															/>
+															<span className="truncate">{t.address}</span>
+															{catchAllIds.has(t.addressId) && <CatchAllBadge />}
+															{catchAllIds.has(t.addressId) && t.envelopeTo && (
+																<span className="truncate">宛先 {t.envelopeTo}</span>
+															)}
+														</span>
+													)}
+													<div className="mt-0.5 truncate text-sm">
+														{t.messageCount > 1 && (
+															<span className="mr-1.5 text-xs opacity-70">{t.messageCount}</span>
+														)}
+														{t.subject?.trim() || "（件名なし）"}
+														{t.snippet?.trim() ? (
+															<span className="ml-2 opacity-70">— {t.snippet}</span>
+														) : null}
+													</div>
+												</div>
+											</Link>
+										</li>
+									);
+								}
 								return (
 									<li key={t.id}>
 										<Link
-											to={`/threads/${t.id}${view === "trash" ? "?view=trash" : ""}`}
+											to={rowUrl}
 											className={`flex min-h-11 items-center gap-3 px-4 py-1.5 transition-colors hover:bg-[var(--surface-hover)] hover:shadow-sm ${
 												unread
 													? "bg-[var(--surface)] font-semibold text-[var(--text)]"
@@ -169,6 +335,10 @@ export function Inbox() {
 															style={{ background: t.addressColor ?? "var(--text-muted)" }}
 														/>
 														<span className="truncate opacity-80">{t.address}</span>
+														{catchAllIds.has(t.addressId) && <CatchAllBadge />}
+														{catchAllIds.has(t.addressId) && t.envelopeTo && (
+															<span className="truncate">宛先 {t.envelopeTo}</span>
+														)}
 													</span>
 												)}
 											</span>
@@ -219,6 +389,20 @@ export function Inbox() {
 					</>
 				)}
 			</section>
+			{isMobile && (
+				<button
+					type="button"
+					onClick={() => navigate("/compose")}
+					aria-label="作成"
+					style={{ bottom: "calc(1.25rem + env(safe-area-inset-bottom))" }}
+					className={`fixed right-4 z-30 flex h-14 items-center justify-center gap-2 rounded-full bg-[var(--accent)] text-sm font-medium text-white shadow-lg transition-all hover:opacity-90 ${
+						scrolled ? "w-14" : "px-5"
+					}`}
+				>
+					<PencilIcon />
+					{!scrolled && <span>作成</span>}
+				</button>
+			)}
 		</div>
 	);
 }

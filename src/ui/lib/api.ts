@@ -11,6 +11,20 @@ import { z } from "zod";
 export type ThreadListParams = z.input<typeof threadListQuery>;
 export type MessageListParams = z.input<typeof messageListQuery>;
 import type { MyAddress } from "@/shared/contracts/addresses";
+import type {
+	Device,
+	DeviceInput,
+	DeviceUpdate,
+	DryRunEntry,
+	DryRunInput,
+	FeedResponse,
+	NotificationLevel,
+	NotificationPatch,
+	NotificationRule,
+	NotificationRuleInput,
+	NotificationRuleUpdate,
+	NotificationSettings,
+} from "@/shared/contracts/notifications";
 import type { SessionInfo } from "@/shared/contracts/auth";
 import type { UpdateMeBody } from "@/shared/contracts/users";
 import type {
@@ -208,4 +222,54 @@ export const MyKeysApi = {
 	create: (body: { name: string; scopes: string[]; addressIds?: string[] }) =>
 		request<MyApiKey & { token: string }>("/me/api-keys", { method: "POST", body }),
 	revoke: (id: string) => request<unknown>(`/me/api-keys/${id}`, { method: "DELETE" }),
+};
+
+export const NotificationsApi = {
+	get: () => request<NotificationSettings>("/me/notifications"),
+	patch: (body: NotificationPatch) =>
+		request<NotificationSettings>("/me/notifications", { method: "PATCH", body }),
+	setMailboxLevel: (addressId: string, level: NotificationLevel) =>
+		request<{ addressId: string; level: NotificationLevel }>(
+			`/me/notifications/mailboxes/${addressId}`,
+			{ method: "PUT", body: { level } },
+		),
+	listRules: () => request<{ data: NotificationRule[] }>("/me/notifications/rules"),
+	createRule: (body: NotificationRuleInput) =>
+		request<NotificationRule>("/me/notifications/rules", { method: "POST", body }),
+	updateRule: (id: string, body: NotificationRuleUpdate) =>
+		request<NotificationRule>(`/me/notifications/rules/${id}`, { method: "PATCH", body }),
+	deleteRule: (id: string) => request<unknown>(`/me/notifications/rules/${id}`, { method: "DELETE" }),
+	reorderRules: (ids: string[]) =>
+		request<{ data: NotificationRule[] }>("/me/notifications/rules/reorder", {
+			method: "POST",
+			body: { ids },
+		}),
+	dryRun: (body: DryRunInput = {}) =>
+		request<{ data: DryRunEntry[] }>("/me/notifications/dry-run", { method: "POST", body }),
+	feed: (query: { limit?: number; cursor?: string; include_dropped?: 1 } = {}) =>
+		request<FeedResponse>(`/me/notifications/feed${qs(query)}`),
+	markFeedSeen: () =>
+		request<{ feed_seen_at: number; unseen_count: number }>("/me/notifications/feed/seen", {
+			method: "POST",
+		}),
+	getThread: (threadId: string) =>
+		request<{ threadId: string; mode: "follow" | "mute" | null }>(`/threads/${threadId}/notification`),
+	setThread: (threadId: string, mode: "follow" | "mute") =>
+		request<{ threadId: string; mode: "follow" | "mute" }>(`/threads/${threadId}/notification`, {
+			method: "PUT",
+			body: { mode },
+		}),
+	clearThread: (threadId: string) =>
+		request<unknown>(`/threads/${threadId}/notification`, { method: "DELETE" }),
+};
+
+export const DevicesApi = {
+	list: () => request<{ data: Device[] }>("/me/devices"),
+	register: (body: DeviceInput) => request<Device>("/me/devices", { method: "POST", body }),
+	update: (id: string, body: DeviceUpdate) =>
+		request<Device>(`/me/devices/${id}`, { method: "PATCH", body }),
+	remove: (id: string) => request<unknown>(`/me/devices/${id}`, { method: "DELETE" }),
+	test: (id: string) => request<{ queued: boolean }>(`/me/devices/${id}/test`, { method: "POST" }),
+	seen: (id: string) => request<unknown>(`/me/devices/${id}/seen`, { method: "POST" }),
+	pushKey: () => request<{ key: string | null }>("/push/key"),
 };

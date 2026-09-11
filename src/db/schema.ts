@@ -184,6 +184,10 @@ export const messages = sqliteTable(
 		isRead: integer("is_read", { mode: "boolean" }).notNull().default(false),
 		isStarred: integer("is_starred", { mode: "boolean" }).notNull().default(false),
 		spamVerdict: text("spam_verdict", { enum: ["clean", "suspicious", "spam"] }),
+		/** 送信失敗を送った本人にだけ知らせるため。受信メールと、この列より前の送信は null。 */
+		sentByUserId: text("sent_by_user_id").references(() => users.id, { onDelete: "set null" }),
+		/** キャッチオールで受けたときの本来の宛先。To ヘッダは BCC やメーリングリストで食い違う。 */
+		envelopeTo: text("envelope_to"),
 
 		receivedAt: integer("received_at", { mode: "timestamp" }).notNull(),
 		createdAt: createdAt(),
@@ -310,3 +314,138 @@ export const settings = sqliteTable("settings", {
 	value: text("value", { mode: "json" }).$type<unknown>(),
 	updatedAt: integer("updated_at", { mode: "timestamp" }),
 });
+
+export const pushDevices = sqliteTable(
+	"push_devices",
+	{
+		id: text("id").primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		sessionId: text("session_id").references(() => sessions.id, { onDelete: "set null" }),
+		endpoint: text("endpoint").notNull(),
+		p256dh: text("p256dh").notNull(),
+		auth: text("auth").notNull(),
+		name: text("name").notNull(),
+		platform: text("platform", { enum: ["ios", "android", "desktop"] }).notNull(),
+		enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+		/** null なら利用者が通知を受けるメールボックスすべて。 */
+		addressIds: text("address_ids", { mode: "json" }).$type<string[] | null>(),
+		lastSeenAt: integer("last_seen_at", { mode: "timestamp" }),
+		lastSuccessAt: integer("last_success_at", { mode: "timestamp" }),
+		failureCount: integer("failure_count").notNull().default(0),
+		createdAt: createdAt(),
+	},
+	(t) => [uniqueIndex("push_devices_endpoint_idx").on(t.endpoint), index("push_devices_user_idx").on(t.userId)],
+);
+
+export type QuietHours = {
+	tz: string;
+	/** 曜日は 0=日曜。end が start 以下なら日をまたぐ。時刻は "HH:MM"。 */
+	ranges: { days: number[]; start: string; end: string }[];
+	mode: "drop" | "digest";
+};
+
+export const notificationPrefs = sqliteTable("notification_prefs", {
+	userId: text("user_id")
+		.primaryKey()
+		.references(() => users.id, { onDelete: "cascade" }),
+	enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+	pausedUntil: integer("paused_until", { mode: "timestamp" }),
+	display: text("display", { enum: ["full", "sender_subject", "minimal"] })
+		.notNull()
+		.default("full"),
+	badge: text("badge", { enum: ["all", "notified", "off"] })
+		.notNull()
+		.default("notified"),
+	groupByThread: integer("group_by_thread", { mode: "boolean" }).notNull().default(true),
+	burstWindowSec: integer("burst_window_sec").notNull().default(0),
+	suppressWhenActive: integer("suppress_when_active", { mode: "boolean" }).notNull().default(false),
+	spamSuspicious: text("spam_suspicious", { enum: ["notify", "drop"] })
+		.notNull()
+		.default("drop"),
+	quiet: text("quiet", { mode: "json" }).$type<QuietHours | null>(),
+	notifySendFailure: integer("notify_send_failure", { mode: "boolean" }).notNull().default(true),
+	notifyCatchAll: integer("notify_catch_all", { mode: "boolean" }).notNull().default(true),
+	feedSeenAt: integer("feed_seen_at", { mode: "timestamp" }),
+	updatedAt: integer("updated_at", { mode: "timestamp" }),
+});
+
+export const notificationMailboxPrefs = sqliteTable(
+	"notification_mailbox_prefs",
+	{
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		addressId: text("address_id")
+			.notNull()
+			.references(() => addresses.id, { onDelete: "cascade" }),
+		level: text("level", { enum: ["all", "new_thread", "direct", "off"] }).notNull(),
+	},
+	(t) => [primaryKey({ columns: [t.userId, t.addressId] })],
+);
+
+export const notificationRules = sqliteTable(
+	"notification_rules",
+	{
+		id: text("id").primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		name: text("name").notNull(),
+		matcher: text("matcher", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+		action: text("action", { enum: ["always", "normal", "silent", "never"] }).notNull(),
+		priority: integer("priority").notNull().default(0),
+		enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+		createdAt: createdAt(),
+	},
+	(t) => [index("notification_rules_user_idx").on(t.userId, t.priority)],
+);
+
+export const threadNotificationPrefs = sqliteTable(
+	"thread_notification_prefs",
+	{
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		threadId: text("thread_id")
+			.notNull()
+			.references(() => threads.id, { onDelete: "cascade" }),
+		mode: text("mode", { enum: ["follow", "mute"] }).notNull(),
+	},
+	(t) => [primaryKey({ columns: [t.userId, t.threadId] })],
+);
+
+export const notificationDigests = sqliteTable(
+	"notification_digests",
+	{
+		id: text("id").primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		dueAt: integer("due_at", { mode: "timestamp" }).notNull(),
+		messageIds: text("message_ids", { mode: "json" }).$type<string[]>().notNull(),
+		createdAt: createdAt(),
+	},
+	(t) => [index("notification_digests_due_idx").on(t.dueAt), index("notification_digests_user_idx").on(t.userId)],
+);
+
+export const notificationLog = sqliteTable(
+	"notification_log",
+	{
+		id: text("id").primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id, { onDelete: "cascade" }),
+		messageId: text("message_id").references(() => messages.id, { onDelete: "cascade" }),
+		kind: text("kind", { enum: ["received", "send_failed"] })
+			.notNull()
+			.default("received"),
+		decision: text("decision", { enum: ["sent", "held", "digest", "dropped"] }).notNull(),
+		reason: text("reason").notNull(),
+		holdGroup: text("hold_group"),
+		deviceCount: integer("device_count").notNull().default(0),
+		createdAt: createdAt(),
+	},
+	(t) => [index("notification_log_user_idx").on(t.userId, t.createdAt)],
+);

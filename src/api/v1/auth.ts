@@ -132,7 +132,17 @@ app.post("/logout", async (c) => {
 	const token = sessionToken(c);
 	if (token) {
 		const db = c.get("db");
-		await db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, await hashToken(token)));
+		const tokenHash = await hashToken(token);
+		// ログアウトした端末に通知が届き続けないよう、その端末の購読も消す。
+		const session = await db
+			.select({ id: schema.sessions.id })
+			.from(schema.sessions)
+			.where(eq(schema.sessions.tokenHash, tokenHash))
+			.get();
+		if (session) {
+			await db.delete(schema.pushDevices).where(eq(schema.pushDevices.sessionId, session.id));
+		}
+		await db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, tokenHash));
 	}
 	deleteCookie(c, SESSION_COOKIE, sessionCookieOptions());
 	clearLegacyCookie(c);

@@ -116,6 +116,20 @@ openssl rand -base64 32
 未設定、または 20 文字未満だと `POST /api/v1/auth/bootstrap` が 403 を返し、
 **誰もオーナーを作れない**（安全側に倒してある）。詳細は第 8 節。
 
+### VAPID_PRIVATE_KEY（プッシュ通知の鍵）
+
+プッシュ通知（FR-16）を使うときだけ要る。未設定なら通知は送らず、判定の履歴だけが残る。
+
+```bash
+node scripts/vapid-keys.mjs          # 1 行目の JSON を控える
+npx wrangler secret put VAPID_PRIVATE_KEY
+```
+
+連絡先の `VAPID_SUBJECT` は `wrangler.jsonc` の `vars` にある。自分の `mailto:` に書き換える
+（push サービスが問題のあるときに連絡してくる宛先）。
+**鍵を変えると、全端末の購読が無効になる**。アプリは次に開いたとき公開鍵の違いに気付いて購読し直すが、
+それまでは通知が届かない。漏れたとき以外は変えない。
+
 > GitHub Actions でデプロイする場合は、上記 3 つに加えて
 > `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` を
 > リポジトリの Secrets に登録する（第 7 節の GitHub Actions を参照）。
