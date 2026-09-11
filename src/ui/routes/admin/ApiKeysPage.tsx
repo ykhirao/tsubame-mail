@@ -13,6 +13,7 @@ import {
 	formatDateTime,
 	Label,
 	Modal,
+	Notice,
 	Page,
 	Select,
 	TableRow,
@@ -267,6 +268,7 @@ export function ApiKeysPage() {
 	const [showCreate, setShowCreate] = useState(false);
 	const [created, setCreated] = useState<CreatedApiKey | null>(null);
 	const [usersByName, setUsersByName] = useState<Record<string, AdminUser>>({});
+	const [revokeTarget, setRevokeTarget] = useState<ApiKeySummary | null>(null);
 
 	const load = useCallback(async () => {
 		try {
@@ -288,10 +290,12 @@ export function ApiKeysPage() {
 		load();
 	}, [load]);
 
-	const revoke = async (k: ApiKeySummary) => {
+	const confirmRevoke = async () => {
+		if (!revokeTarget) return;
 		setError("");
 		try {
-			await api.del(`/api/v1/admin/api-keys/${k.id}`);
+			await api.del(`/api/v1/admin/api-keys/${revokeTarget.id}`);
+			setRevokeTarget(null);
 			await load();
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "失効に失敗しました");
@@ -373,7 +377,7 @@ export function ApiKeysPage() {
 												{revoked ? (
 													<span className="text-xs text-[var(--text-muted)]">—</span>
 												) : (
-													<Button variant="danger" onClick={() => revoke(k)}>
+													<Button variant="danger" onClick={() => setRevokeTarget(k)}>
 														失効
 													</Button>
 												)}
@@ -401,6 +405,26 @@ export function ApiKeysPage() {
 				)}
 
 				{created && <TokenDialog created={created} onClose={() => setCreated(null)} />}
+
+				{revokeTarget && (
+					<Modal title="API キーを失効" onClose={() => setRevokeTarget(null)}>
+						<div className="space-y-4">
+							<Notice tone="danger">
+								<strong>{revokeTarget.name}</strong>（{revokeTarget.prefix}…）を失効します。
+								このキーを使っている連携はすぐに動かなくなります。
+								<strong>失効は取り消せません。</strong>使い続けるなら新しいキーを発行してください。
+							</Notice>
+							<div className="flex justify-end gap-2">
+								<Button variant="secondary" onClick={() => setRevokeTarget(null)}>
+									キャンセル
+								</Button>
+								<Button variant="danger" onClick={confirmRevoke}>
+									失効する
+								</Button>
+							</div>
+						</div>
+					</Modal>
+				)}
 			</Page>
 		</AdminGate>
 	);

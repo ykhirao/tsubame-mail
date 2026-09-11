@@ -11,6 +11,8 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 	const [issued, setIssued] = useState<string | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
+	const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+	const [revokeError, setRevokeError] = useState("");
 
 	const load = useCallback(async () => {
 		// 失効済みキーを画面側で除くので、25 件の 1 ページだけ読むと失効キー 1 本で
@@ -55,8 +57,14 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 	};
 
 	const revoke = async (id: string) => {
-		await MyKeysApi.revoke(id);
-		await load();
+		setRevokeError("");
+		try {
+			await MyKeysApi.revoke(id);
+			setConfirmRevoke(null);
+			await load();
+		} catch {
+			setRevokeError("失効に失敗しました。時間をおいて試してください。");
+		}
 	};
 
 	return (
@@ -78,6 +86,8 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 				</div>
 			)}
 
+			{revokeError && <p className="mb-2 text-sm text-[var(--danger)]">{revokeError}</p>}
+
 			{keys.length > 0 && (
 				<ul className="mb-4 divide-y divide-[var(--line-soft)]">
 					{keys.map((k) => (
@@ -89,13 +99,33 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 									{k.addressIds ? `${k.addressIds.length} アドレスに限定` : "自分の全アドレス"}
 								</span>
 							</span>
-							<button
-								type="button"
-								onClick={() => void revoke(k.id)}
-								className="shrink-0 text-sm text-[var(--danger)] hover:underline"
-							>
-								失効
-							</button>
+							{confirmRevoke === k.id ? (
+								<span className="flex shrink-0 items-center gap-2 text-sm">
+									<span className="text-[var(--text-muted)]">取り消せません</span>
+									<button
+										type="button"
+										onClick={() => void revoke(k.id)}
+										className="text-[var(--danger)] hover:underline"
+									>
+										失効する
+									</button>
+									<button
+										type="button"
+										onClick={() => setConfirmRevoke(null)}
+										className="text-[var(--text-muted)] hover:underline"
+									>
+										やめる
+									</button>
+								</span>
+							) : (
+								<button
+									type="button"
+									onClick={() => setConfirmRevoke(k.id)}
+									className="shrink-0 text-sm text-[var(--danger)] hover:underline"
+								>
+									失効
+								</button>
+							)}
 						</li>
 					))}
 				</ul>
