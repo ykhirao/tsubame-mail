@@ -242,7 +242,7 @@ function CreateAddressModal({
 						このアドレスを catch-all の受け皿にする
 						{isCatchAll && (
 							<span className="mt-1 block text-xs text-[var(--danger)]">
-								ドメインあたり 1 件まで。ゾーン内で宛先が見つからないメールがここに届きます。
+								ドメインあたり 1 件まで。このドメイン宛で、どのアドレスにも一致しないメールがここに届きます。
 							</span>
 						)}
 					</span>
@@ -373,7 +373,7 @@ function EditAddressModal({
 						このアドレスを catch-all の受け皿にする
 						{isCatchAll && !address.isCatchAll && (
 							<span className="mt-1 block text-xs text-[var(--danger)]">
-								ドメインあたり 1 件まで。ゾーン内で宛先が見つからないメールがここに届きます。
+								ドメインあたり 1 件まで。このドメイン宛で、どのアドレスにも一致しないメールがここに届きます。
 							</span>
 						)}
 					</span>
@@ -464,7 +464,7 @@ export function AddressesPage() {
 				<div className="mb-4">
 					<Notice tone="info">
 						メールボックスは受信して保管します。エイリアスは転送先のメールボックスを選べます。
-						catch-all はゾーン内で宛先が見つからないメールを受け取る受け皿です（ドメインあたり 1 件）。
+						catch-all は、このドメイン宛でどのアドレスにも一致しないメールを受け取る受け皿です（ドメインあたり 1 件）。
 					</Notice>
 				</div>
 				<ErrorBanner message={error} onDismiss={() => setError("")} />

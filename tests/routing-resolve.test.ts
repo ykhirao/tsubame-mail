@@ -125,6 +125,47 @@ describe("resolveIncoming", () => {
 		expect(unknown).toEqual({ action: "deliver", addressId: "adr_catch" });
 	});
 
+	// CF の catch-all はゾーンに 1 本しか無く、サブドメインを区別しない。
+	// 振り分けはここでやるので、同じゾーンの 2 ドメインが別々の受け皿を持てる。
+	it("同じゾーンの別ドメインは、それぞれの catch-all に振り分ける", async () => {
+		const db = getDb(env);
+		await db.insert(domains).values([
+			{ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" },
+			{ id: "dom_sub", name: `sub.${DOMAIN}`, zoneId: "z", zoneName: DOMAIN, mode: "subdomain" },
+		]);
+		await db.insert(addresses).values([
+			{
+				id: "adr_catch_apex",
+				domainId: DOM_ID,
+				localPart: "_",
+				address: `_@${DOMAIN}`,
+				kind: "mailbox",
+				isCatchAll: true,
+			},
+			{
+				id: "adr_catch_sub",
+				domainId: "dom_sub",
+				localPart: "_",
+				address: `_@sub.${DOMAIN}`,
+				kind: "mailbox",
+				isCatchAll: true,
+			},
+		]);
+
+		expect(await resolveIncoming(db, { from: "x@y.com", to: `nobody@${DOMAIN}` })).toEqual({
+			action: "deliver",
+			addressId: "adr_catch_apex",
+		});
+		expect(await resolveIncoming(db, { from: "x@y.com", to: `nobody@sub.${DOMAIN}` })).toEqual({
+			action: "deliver",
+			addressId: "adr_catch_sub",
+		});
+		// ゾーン配下でも、接続していないドメイン宛は受け取らない。
+		expect(await resolveIncoming(db, { from: "x@y.com", to: `nobody@other.${DOMAIN}` })).toMatchObject({
+			action: "reject",
+		});
+	});
+
 	it("reject ルールは実在アドレス宛でも効く", async () => {
 		const db = getDb(env);
 		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });

@@ -83,19 +83,23 @@ describe("POST /admin/domains/:id/catch-all（#85 ゾーン単位の食い違い
 		expect(fake.catchAll.enabled).toBe(false);
 	});
 
-	it("同じゾーンで他ドメインが有効な間は無効化できない（409・CF は触らない）", async () => {
-		await seedDomain(`dom_a${seq}`, `mail${seq}.example.com`, true);
-		const b = await seedDomain(`dom_b${seq}`, `send${seq}.example.com`, false);
+	// CF のルールはゾーンに 1 本しかないので、他ドメインが握っている間に落とすと
+	// そちらの配送が黙って止まる。自分の記録だけ下ろして CF には触らない。
+	it("同じゾーンで他ドメインが有効な間は、無効化しても CF のルールは残す", async () => {
+		await seedEnabled(`dom_a${seq}`, `mail${seq}.example.com`);
+		const b = await seedEnabled(`dom_b${seq}`, `send${seq}.example.com`);
 
 		const res = await callJson(adminDomains(), `/${b}/catch-all`, {
 			method: "POST",
 			body: JSON.stringify({ enabled: false, confirm: true }),
 		});
 
-		expect(res.status).toBe(409);
-		expect(fake.catchAll.enabled).toBe(false);
+		expect(res.status).toBe(200);
+		expect(fake.catchAll.enabled).toBe(true);
 		const a = await getTestDb().query.domains.findFirst({ where: eq(domains.id, `dom_a${seq}`) });
 		expect(a?.catchAllEnabled).toBe(true);
+		const bRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, b) });
+		expect(bRow?.catchAllEnabled).toBe(false);
 	});
 
 	it("他ドメインが無ければ confirm 付きで無効化できる", async () => {
@@ -112,7 +116,9 @@ describe("POST /admin/domains/:id/catch-all（#85 ゾーン単位の食い違い
 });
 
 describe("POST catch-all の有効化（#117 ゾーンで 1 本）", () => {
-	it("同じゾーンで他ドメインが有効な間は有効化できない（409・CF は触らない）", async () => {
+	// 受け皿はドメインごとに持てる。宛先のドメインで振り分けるのは resolveIncoming の
+	// 仕事なので、CF 側はゾーンに 1 本立っていれば足りる。
+	it("同じゾーンの別ドメインでも catch-all を持てる", async () => {
 		const a = await seedEnabled(`dom_ea${seq}`, `mail${seq}.example.com`);
 		const b = await seedReceivable(`dom_eb${seq}`, `send${seq}.example.com`);
 
@@ -121,16 +127,33 @@ describe("POST catch-all の有効化（#117 ゾーンで 1 本）", () => {
 			body: JSON.stringify({ enabled: true, confirm: true }),
 		});
 
-		expect(res.status).toBe(409);
-		expect(res.json.error.message).toContain(`mail${seq}.example.com`);
+		expect(res.status).toBe(200);
 		expect(fake.catchAll.enabled).toBe(true);
 		const bRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, b) });
-		expect(bRow?.catchAllEnabled).toBe(false);
+		expect(bRow?.catchAllEnabled).toBe(true);
 		const aRow = await getTestDb().query.domains.findFirst({ where: eq(domains.id, a) });
 		expect(aRow?.catchAllEnabled).toBe(true);
 	});
 
-	it("先に有効な方を無効化すれば他ドメインを有効化できる", async () => {
+	it("最後の 1 つを無効化したときだけ CF のルールを落とす", async () => {
+		const a = await seedEnabled(`dom_la${seq}`, `mail${seq}.example.com`);
+		const b = await seedEnabled(`dom_lb${seq}`, `send${seq}.example.com`);
+
+		await callJson(adminDomains(), `/${a}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+		expect(fake.catchAll.enabled).toBe(true); // b がまだ握っている
+
+		const res = await callJson(adminDomains(), `/${b}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+		expect(res.status).toBe(200);
+		expect(fake.catchAll.enabled).toBe(false);
+	});
+
+	it("片方を無効化してからもう片方を有効化しても、CF のルールは立ったまま", async () => {
 		const a = await seedEnabled(`dom_ca${seq}`, `mail${seq}.example.com`);
 		const b = await seedReceivable(`dom_cb${seq}`, `send${seq}.example.com`);
 
@@ -171,16 +194,16 @@ describe("POST catch-all の有効化（#117 ゾーンで 1 本）", () => {
 });
 
 describe("DELETE cleanup と catch-all（#85）", () => {
-	it("別ドメインが有効な間は cleanup で catch-all を落とさない（409・行も残る）", async () => {
+	// 削除は通るが、残る側の配送を止めないよう CF のルールには触らない。
+	it("別ドメインが有効な間は cleanup で catch-all を落とさない", async () => {
 		const a = await seedDomain(`dom_ea${seq}`, `mail${seq}.example.com`, true);
 		await seedDomain(`dom_eb${seq}`, `send${seq}.example.com`, true);
+		fake.catchAll.enabled = true;
 
 		const res = await callJson(adminDomains(), `/${a}`, { method: "DELETE" });
 
-		expect(res.status).toBe(409);
-		expect(fake.catchAll.enabled).toBe(false);
-		const row = await getTestDb().query.domains.findFirst({ where: eq(domains.id, a) });
-		expect(row).toBeTruthy();
+		expect(res.status).toBe(200);
+		expect(fake.catchAll.enabled).toBe(true);
 	});
 
 	it("単独で有効なら DELETE cleanup で catch-all を無効化する", async () => {

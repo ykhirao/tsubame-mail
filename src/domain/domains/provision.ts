@@ -422,12 +422,17 @@ export type CatchAllResult = {
 	catchAllAddress: string | null;
 };
 
-/** ゾーンの catch-all を持てるのは 1 ドメインだけ。同じ zoneId で他ドメインが有効ならその名前を返す。 */
-async function zoneCatchAllConflict(
+/**
+ * Cloudflare の catch-all はゾーンに 1 本しか無いが、受け皿はドメインごとに持てる。
+ * 宛先のドメインを見て振り分けるのは `resolveIncoming` の仕事なので、CF 側は
+ * 「そのゾーンで誰か 1 つでも有効なら 1 本立てる」で足りる。同じ zoneId で
+ * 自分以外に有効なドメインが居るかを返す。
+ */
+async function zoneCatchAllOthers(
 	db: Db,
 	params: { zoneId: string; domainId: string },
-): Promise<string | null> {
-	const other = await db
+): Promise<string[]> {
+	const rows = await db
 		.select({ name: domains.name })
 		.from(domains)
 		.where(
@@ -436,21 +441,16 @@ async function zoneCatchAllConflict(
 				eq(domains.catchAllEnabled, true),
 				ne(domains.id, params.domainId),
 			),
-		)
-		.limit(1);
-	return other[0]?.name ?? null;
+		);
+	return rows.map((r) => r.name);
 }
 
-export async function assertZoneCatchAllSafe(
+/** 自分以外にこのゾーンの catch-all を握っているドメインが居るか。 */
+export async function zoneHasOtherCatchAll(
 	db: Db,
 	params: { zoneId: string; domainId: string },
-): Promise<void> {
-	const other = await zoneCatchAllConflict(db, params);
-	if (other) {
-		throw conflict(
-			`このゾーンでは別のドメインが catch-all を有効にしています（${other}）。先に ${other} の catch-all を無効にしてください。`,
-		);
-	}
+): Promise<boolean> {
+	return (await zoneCatchAllOthers(db, params)).length > 0;
 }
 
 export async function setCatchAll(params: {
@@ -475,36 +475,27 @@ export async function setCatchAll(params: {
 		where: and(eq(addresses.domainId, domain.id), eq(addresses.isCatchAll, true)),
 	});
 
-	if (enabled) {
-		if (!catchAllAddress) {
-			throw invalidRequest(
-				"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
-			);
-		}
-		await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
-	} else if (!domain.catchAllEnabled) {
-		// 自分の行が「有効」を握っていなければ、そのゾーンで他ドメインが握っている間は落とさない（#85）。
-		await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
-	} else if (await zoneCatchAllConflict(db, { zoneId: domain.zoneId, domainId: domain.id })) {
-		// 修正前のデータで同じゾーンの 2 ドメインが両方「有効」になっていると、ゾーンに 1 本の CF の
-		// catch-all を落とした瞬間に残った側が「有効」表示のまま届かなくなる（#85 と同じ食い違い）。
-		// 残る側がいる間は CF に触らず、自分の記録だけ下ろして持ち主を 1 つに減らす（#117）。
-		await db.update(domains).set({ catchAllEnabled: false }).where(eq(domains.id, domain.id));
-		return {
-			domainId: domain.id,
-			enabled: false,
-			warning: CATCH_ALL_WARNING,
-			catchAllAddress: catchAllAddress?.address ?? null,
-		};
+	if (enabled && !catchAllAddress) {
+		throw invalidRequest(
+			"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
+		);
 	}
 
-	await api.updateCatchAllRule(zone, {
-		enabled,
-		name: `tsubame catch-all (${domain.name})`,
-		matchers: [{ type: "all" }],
-		// 無効化のときも actions は必要。落とすのは enabled だけ。
-		actions: [workerAction(workerName)],
-	});
+	// CF のルールはゾーンに 1 本の共有資源なので、持ち主が居なくなるときだけ落とす。
+	// 他ドメインが握っている間に落とすと、その配送が黙って止まる（#85・#117）。
+	const others = await zoneCatchAllOthers(db, { zoneId: domain.zoneId, domainId: domain.id });
+	const zoneRuleNeeded = enabled || others.length > 0;
+	const zoneRuleNow = domain.catchAllEnabled || others.length > 0;
+
+	if (zoneRuleNeeded !== zoneRuleNow) {
+		await api.updateCatchAllRule(zone, {
+			enabled: zoneRuleNeeded,
+			name: `tsubame catch-all (${domain.zoneName})`,
+			matchers: [{ type: "all" }],
+			// 無効化のときも actions は必要。落とすのは enabled だけ。
+			actions: [workerAction(workerName)],
+		});
+	}
 
 	await db.update(domains).set({ catchAllEnabled: enabled }).where(eq(domains.id, domain.id));
 

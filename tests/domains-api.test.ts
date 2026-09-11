@@ -197,7 +197,7 @@ describe("POST /admin/domains/:id/catch-all", () => {
 		expect(res.json.error.message).toContain("confirm: true");
 	});
 
-	it("同じゾーンで他ドメインが有効で自分の行が未所有者なら 409 にする（#85）", async () => {
+	it("他ドメインが有効な間の無効化では、ゾーンの catch-all を落とさない（#85）", async () => {
 		const idA = await seedDomain("dom_disable_a", "mail.disable-a.example.com");
 		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idA));
 		const idB = await seedDomain("dom_disable_b", "mail.disable-b.example.com");
@@ -208,8 +208,7 @@ describe("POST /admin/domains/:id/catch-all", () => {
 			body: JSON.stringify({ enabled: false, confirm: true }),
 		});
 
-		expect(res.status).toBe(409);
-		expect(res.json.error.message).toContain("別のドメインが catch-all を有効");
+		expect(res.status).toBe(200);
 		// ゾーンの catch-all は落ちない（A の受け皿への到達を黙って止めない）。
 		expect(fake.catchAll.enabled).toBe(true);
 	});
@@ -264,7 +263,7 @@ describe("POST /admin/domains/:id/catch-all", () => {
 		expect(fake.catchAll.enabled).toBe(false);
 	});
 
-	it("切断の無効化も他ドメインが有効なら 409 で止める（#85）", async () => {
+	it("切断しても、他ドメインが有効な間はゾーンの catch-all を落とさない（#85）", async () => {
 		const idA = await seedDomain("dom_delete_a", "mail.delete-a.example.com");
 		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idA));
 		const idB = await seedDomain("dom_delete_b", "mail.delete-b.example.com");
@@ -273,7 +272,7 @@ describe("POST /admin/domains/:id/catch-all", () => {
 
 		const res = await callJson(adminDomains(), `/${idB}`, { method: "DELETE" });
 
-		expect(res.status).toBe(409);
+		expect(res.status).toBe(200);
 		expect(fake.catchAll.enabled).toBe(true);
 	});
 });

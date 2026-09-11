@@ -6,7 +6,7 @@ import { addresses, domains } from "@/db/schema";
 import { cleanupDomain, cleanupFailureNote } from "@/domain/domains/cleanup";
 import {
 	CATCH_ALL_WARNING,
-	assertZoneCatchAllSafe,
+	zoneHasOtherCatchAll,
 	emailWorkerName,
 	previewDomain,
 	provisionDomain,
@@ -247,9 +247,12 @@ app.delete("/:id", requireUnrestricted, async (c) => {
 				`${below.name} がこのドメインの配下で接続されています。先にそちらを切断してください。`,
 			);
 		}
-		if (domain.catchAllEnabled) {
-			await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
-		}
+		// CF の catch-all はゾーンに 1 本の共有資源。まだ他ドメインが握っているなら
+		// ここで落とすとその配送が黙って止まるので、cleanup には落とさせない（#85）。
+		const zoneKeepsCatchAll = await zoneHasOtherCatchAll(db, {
+			zoneId: domain.zoneId,
+			domainId: domain.id,
+		});
 		const api = createCloudflareApi(c.env);
 		cleanup = await cleanupDomain(api, {
 			zoneId: domain.zoneId,
@@ -257,7 +260,7 @@ app.delete("/:id", requireUnrestricted, async (c) => {
 			name: domain.name,
 			mode: domain.mode,
 			workerName: emailWorkerName(c.env),
-			catchAllEnabled: domain.catchAllEnabled,
+			catchAllEnabled: domain.catchAllEnabled && !zoneKeepsCatchAll,
 		});
 	}
 
