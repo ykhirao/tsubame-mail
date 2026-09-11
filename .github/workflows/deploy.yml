@@ -36,11 +36,9 @@ jobs:
       - name: ビルド（検証）
         run: npm run build
 
-      # 左辺は wrangler が読む固定名なので変えられない。右辺の Secret 名だけ
-      # TSUBAME_ を付けて、同じアカウントの他プロジェクトと混ざらないようにしている。
       - name: 本番デプロイ
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.TSUBAME_CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.TSUBAME_CLOUDFLARE_ACCOUNT_ID }}
-          D1_DATABASE_ID: ${{ secrets.TSUBAME_D1_DATABASE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
         run: ./scripts/deploy.sh --skip-build
