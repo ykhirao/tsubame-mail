@@ -23,7 +23,7 @@ AI 用アカウントを作り、そのキーを 1 アドレスに限定すれ�
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # AUTH_SECRET を入れる
+cp .dev.vars.example .dev.vars   # INTERNAL_SECRET に 20 文字以上のランダムな値を入れる
 npm run db:migrate:local
 npm run dev:worker   # API・email・queue（wrangler dev）
 npm run dev          # UI（Vite、/api は 8787 にプロキシ）

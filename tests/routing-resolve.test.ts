@@ -47,6 +47,64 @@ describe("resolveIncoming", () => {
 		expect(r).toEqual({ action: "deliver", addressId: "adr_box" });
 	});
 
+	it("アーカイブ済みを指すエイリアス宛は配送せず catch-all へ落とす（#101）", async () => {
+		const db = getDb(env);
+		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
+		await db.insert(addresses).values([
+			{
+				id: "adr_box",
+				domainId: DOM_ID,
+				localPart: "box",
+				address: "box@example.com",
+				kind: "mailbox",
+				archivedAt: new Date(),
+			},
+			{
+				id: "adr_alias",
+				domainId: DOM_ID,
+				localPart: "al",
+				address: "al@example.com",
+				kind: "alias",
+				aliasTargetId: "adr_box",
+			},
+			{
+				id: "adr_catch",
+				domainId: DOM_ID,
+				localPart: "_",
+				address: "_@example.com",
+				kind: "mailbox",
+				isCatchAll: true,
+			},
+		]);
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "al@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_catch" });
+	});
+
+	it("アーカイブ済みを指すエイリアス宛で catch-all が無ければ黙って捨てる（#101）", async () => {
+		const db = getDb(env);
+		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
+		await db.insert(addresses).values([
+			{
+				id: "adr_box",
+				domainId: DOM_ID,
+				localPart: "box",
+				address: "box@example.com",
+				kind: "mailbox",
+				archivedAt: new Date(),
+			},
+			{
+				id: "adr_alias",
+				domainId: DOM_ID,
+				localPart: "al",
+				address: "al@example.com",
+				kind: "alias",
+				aliasTargetId: "adr_box",
+			},
+		]);
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "al@example.com" });
+		expect(r).toEqual({ action: "drop" });
+	});
+
 	it("catch-all が実在アドレスを覆い隠さない", async () => {
 		const db = getDb(env);
 		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
@@ -117,6 +175,107 @@ describe("resolveIncoming", () => {
 		]);
 		const r = await resolveIncoming(db, { from: "x@y.com", to: "unknown@example.com" });
 		expect(r).toEqual({ action: "forward", to: "high@x.com" });
+	});
+});
+
+describe("resolveIncoming: 表記ゆれで拒否をすり抜けられない", () => {
+	beforeEach(resetDb);
+
+	async function seed(matcher: Record<string, string>, action: "reject" | "drop" = "reject") {
+		const db = getDb(env);
+		await db.insert(domains).values({ id: DOM_ID, name: DOMAIN, zoneId: "z", zoneName: DOMAIN, mode: "apex" });
+		await db.insert(addresses).values([
+			{ id: "adr_victim", domainId: DOM_ID, localPart: "victim", address: "victim@example.com", kind: "mailbox" },
+			{
+				id: "adr_catch",
+				domainId: DOM_ID,
+				localPart: "_",
+				address: "_@example.com",
+				kind: "mailbox",
+				isCatchAll: true,
+			},
+		]);
+		await db.insert(routingRules).values({
+			id: newId("rule"),
+			scope: "domain",
+			domainId: DOM_ID,
+			name: "block",
+			action,
+			matcher,
+			target: action === "reject" ? "拒否" : null,
+			priority: 10,
+			enabled: true,
+		});
+		return db;
+	}
+
+	it("+タグを足しても reject ルールに当たる", async () => {
+		const db = await seed({ to: "victim@example.com" });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "victim+x@example.com" });
+		expect(r).toEqual({ action: "reject", reason: "拒否" });
+	});
+
+	it("リテラル宛ての reject は従来どおり効く", async () => {
+		const db = await seed({ to: "victim@example.com" });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "Victim@Example.com" });
+		expect(r).toEqual({ action: "reject", reason: "拒否" });
+	});
+
+	it("reject に当たらないタグ付きは基本アドレスへ配送される", async () => {
+		const db = await seed({ to: "other@example.com" });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "victim+x@example.com" });
+		expect(r).toEqual({ action: "deliver", addressId: "adr_victim" });
+	});
+
+	it("drop ルールも +タグ で catch-all に逃げられない", async () => {
+		const db = await seed({ to: "ghost@example.com" }, "drop");
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "ghost+x@example.com" });
+		expect(r).toEqual({ action: "drop" });
+	});
+
+	it("全角のローカル部でも reject に当たる", async () => {
+		const db = await seed({ to: "victim@example.com" });
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "ｖｉｃｔｉｍ@example.com" });
+		expect(r).toEqual({ action: "reject", reason: "拒否" });
+	});
+
+	it("Unicode ドメインは punycode の登録ドメインに解決される", async () => {
+		const db = getDb(env);
+		await db.insert(domains).values({
+			id: "dom_idn",
+			name: "xn--r8jz45g.jp",
+			zoneId: "z",
+			zoneName: "xn--r8jz45g.jp",
+			mode: "apex",
+		});
+		await db.insert(addresses).values({
+			id: "adr_idn",
+			domainId: "dom_idn",
+			localPart: "a",
+			address: "a@xn--r8jz45g.jp",
+			kind: "mailbox",
+		});
+		await db.insert(routingRules).values({
+			id: newId("rule"),
+			scope: "domain",
+			domainId: "dom_idn",
+			name: "block",
+			action: "reject",
+			matcher: { from: "spam@例え.jp" },
+			target: "拒否",
+			priority: 10,
+			enabled: true,
+		});
+		const ok = await resolveIncoming(db, { from: "x@y.com", to: "a@例え.jp" });
+		expect(ok).toEqual({ action: "deliver", addressId: "adr_idn" });
+		const blocked = await resolveIncoming(db, { from: "spam@xn--r8jz45g.jp", to: "a@例え.jp" });
+		expect(blocked).toEqual({ action: "reject", reason: "拒否" });
+	});
+
+	it("ホスト名にならない宛先ドメインは不正として拒否する", async () => {
+		const db = getDb(env);
+		const r = await resolveIncoming(db, { from: "x@y.com", to: "a@例え.jp/evil" });
+		expect(r).toEqual({ action: "reject", reason: "宛先アドレスが不正です" });
 	});
 });
 

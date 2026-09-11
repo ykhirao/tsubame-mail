@@ -1,7 +1,12 @@
 import { eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { domains } from "@/db/schema";
-import { provisionDomain, pickZoneForName, readSendingDnsState } from "@/domain/domains/provision";
+import {
+	provisionDomain,
+	pickZoneForName,
+	readSendingDnsState,
+	resolveZone,
+} from "@/domain/domains/provision";
 import { CloudflareApi } from "@/services/cloudflare-api";
 import { applyMigrations, createFakeCloudflare, getTestDb, testEnv } from "./domains-helpers";
 import type { FakeCloudflare, RecordedRequest } from "./domains-helpers";
@@ -61,6 +66,46 @@ describe("readSendingDnsState", () => {
 			"mail.example.com",
 		);
 		expect(state.spf).toBe(false);
+	});
+});
+
+describe("resolveZone（#94 アカウント絞り込み）", () => {
+	it("他アカウントのゾーンを候補に入れない", async () => {
+		const fake = createFakeCloudflare({
+			zones: [
+				{ id: "mine", name: "example.com", account: { id: "test-account" } },
+				{ id: "theirs", name: "evil.example", account: { id: "other-account" } },
+			],
+		});
+		const api = apiOf(fake);
+
+		await expect(resolveZone(api, { name: "mail.example.com" })).resolves.toEqual({
+			id: "mine",
+			name: "example.com",
+		});
+		await expect(resolveZone(api, { name: "mail.evil.example" })).rejects.toMatchObject({
+			code: "not_found",
+		});
+	});
+});
+
+describe("provisionDomain の接続リクエスト数（#93）", () => {
+	it("localParts 50 件でもルール一覧は 1 回しか取得しない", async () => {
+		const fake = createFakeCloudflare({ zones: [{ id: "zone1", name: "rate.test" }] });
+		const parts = Array.from({ length: 50 }, (_, i) => `u${i}`);
+
+		const result = await provisionDomain({
+			db: getTestDb(),
+			api: apiOf(fake),
+			env: testEnv,
+			input: { name: "mail.rate.test", localParts: parts },
+		});
+		expect(result.createdAddressIds).toHaveLength(50);
+
+		const listCalls = fake.requests.filter(
+			(r) => r.method === "GET" && /\/email\/routing\/rules$/.test(r.path),
+		);
+		expect(listCalls).toHaveLength(1);
 	});
 });
 

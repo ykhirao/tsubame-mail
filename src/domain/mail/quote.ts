@@ -56,10 +56,11 @@ export function buildReplyQuote(source: QuoteSource): { text: string; html: stri
 	else textSource = "（本文なし）";
 	const text = quoteText(header, textSource);
 
+	// 受信 HTML は信用できないので、テキストと同じく stripHtml → escapeHtml → <pre> に落とす。
+	// そのまま埋めると script / img / </blockquote> での構造脱出が自ドメインの署名付きで届く。
 	let htmlSource: string;
-	if (source.htmlBody) htmlSource = source.htmlBody;
-	else if (source.textBody)
-		htmlSource = `<pre>${escapeHtml(source.textBody)}</pre>`;
+	if (source.htmlBody) htmlSource = `<pre>${escapeHtml(stripHtml(source.htmlBody))}</pre>`;
+	else if (source.textBody) htmlSource = `<pre>${escapeHtml(source.textBody)}</pre>`;
 	else htmlSource = "（本文なし）";
 	const html = quoteHtml(header, htmlSource);
 
@@ -72,6 +73,10 @@ export function replySubject(originalSubject?: string | null): string {
 	const cleaned = s.replace(/^\s*Re:\s*/i, "");
 	return cleaned === s ? `Re: ${s}` : `Re: ${cleaned}`;
 }
+
+// 返信を重ねるたびに 1 件ずつ伸びる。上限を置かないと 1 行が 998 文字を超える
+// （200 件で 12,000 文字超を確認済み）。直近の親を残すため、古い方から捨てる。
+const MAX_REFERENCES = 50;
 
 export function referencesFor(
 	referencesHeader?: string | null,
@@ -88,5 +93,6 @@ export function referencesFor(
 		seen.add(id);
 		out.push(id);
 	}
-	return out.join(" ");
+	const trimmed = out.length > MAX_REFERENCES ? out.slice(out.length - MAX_REFERENCES) : out;
+	return trimmed.join(" ");
 }

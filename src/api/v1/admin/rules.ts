@@ -1,18 +1,17 @@
 import { Hono } from "hono";
 import { asc, desc, eq } from "drizzle-orm";
-import { routingRules } from "@/db/schema";
-import { forbidden, invalidRequest, notFound } from "@/shared/errors";
-import { createRuleSchema, updateRuleSchema } from "@/shared/contracts/rules";
+import { addresses, routingRules } from "@/db/schema";
+import { invalidRequest, notFound } from "@/shared/errors";
+import { createRuleSchema, targetMatchesAction, updateRuleSchema } from "@/shared/contracts/rules";
 import { newId } from "@/lib/id";
 import type { AppEnv } from "@/api/types";
+import type { Db } from "@/db/client";
+import { requireOwner } from "../../middleware/auth";
 import { z } from "zod";
 
 export const rulesRouter = new Hono<AppEnv>();
 
-rulesRouter.use("*", async (c, next) => {
-	if (c.get("principal").role !== "owner") throw forbidden("この操作は owner のみ行えます");
-	await next();
-});
+rulesRouter.use("*", requireOwner);
 
 function parseOrThrow<T extends z.ZodTypeAny>(schema: T, data: unknown): z.infer<T> {
 	const result = schema.safeParse(data);
@@ -22,11 +21,40 @@ function parseOrThrow<T extends z.ZodTypeAny>(schema: T, data: unknown): z.infer
 	return result.data;
 }
 
+/** deliver の target は「同じドメインの実在アドレス id」であることを DB で確かめる。 */
+async function assertDeliverTarget(
+	db: Db,
+	effective: { action: string; domainId: string | null; target: string | null },
+): Promise<void> {
+	if (effective.action !== "deliver") return;
+	if (!effective.target) throw invalidRequest("deliver には target（宛先アドレス id）が必須です");
+	if (!effective.domainId) throw invalidRequest("deliver には domainId が必須です");
+	const target = await db.query.addresses.findFirst({ where: eq(addresses.id, effective.target) });
+	if (!target) throw invalidRequest("target のアドレスが見つかりません");
+	if (target.domainId !== effective.domainId) {
+		throw invalidRequest("target は同じドメインの実在アドレスを指定してください");
+	}
+}
+
 const order = [desc(routingRules.priority), asc(routingRules.createdAt)] as const;
 
+/** priority 優先の順序はカーソルページングと相性が悪いので、上限だけ切る。 */
+const rulesListQuery = z.object({
+	limit: z.coerce.number().int().min(1).max(200).default(100),
+});
+
 rulesRouter.get("/", async (c) => {
-	const rules = await c.get("db").select().from(routingRules).orderBy(...order).all();
-	return c.json({ data: rules });
+	const query = rulesListQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
+	const rules = await c
+		.get("db")
+		.select()
+		.from(routingRules)
+		.orderBy(...order)
+		.limit(query.data.limit)
+		.all();
+	// next_cursor はカーソル未対応の目印として常に null。UI の getAllPages はこれで 1 回の取得で止まる。
+	return c.json({ data: rules, next_cursor: null });
 });
 
 rulesRouter.get("/:id", async (c) => {
@@ -38,9 +66,14 @@ rulesRouter.get("/:id", async (c) => {
 
 rulesRouter.post("/", async (c) => {
 	const body = parseOrThrow(createRuleSchema, await c.req.json());
+	const db = c.get("db");
+	await assertDeliverTarget(db, {
+		action: body.action,
+		domainId: body.domainId ?? null,
+		target: body.target ?? null,
+	});
 	const id = newId("rule");
-	await c
-		.get("db")
+	await db
 		.insert(routingRules)
 		.values({
 			id,
@@ -54,14 +87,15 @@ rulesRouter.post("/", async (c) => {
 			priority: body.priority,
 			enabled: body.enabled,
 		});
-	const created = await c.get("db").select().from(routingRules).where(eq(routingRules.id, id)).get();
+	const created = await db.select().from(routingRules).where(eq(routingRules.id, id)).get();
 	return c.json(created, 201);
 });
 
 rulesRouter.patch("/:id", async (c) => {
 	const id = c.req.param("id");
 	const body = parseOrThrow(updateRuleSchema, await c.req.json());
-	const existing = await c.get("db").select().from(routingRules).where(eq(routingRules.id, id)).get();
+	const db = c.get("db");
+	const existing = await db.select().from(routingRules).where(eq(routingRules.id, id)).get();
 	if (!existing) throw notFound("ルールが見つかりません");
 
 	const merged = {
@@ -76,12 +110,22 @@ rulesRouter.patch("/:id", async (c) => {
 		enabled: body.enabled ?? existing.enabled,
 	};
 
-	await c
-		.get("db")
+	if (!targetMatchesAction({ action: merged.action, target: merged.target })) {
+		throw invalidRequest("forward の target はメールアドレスの形式である必要があります", [
+			{ path: ["target"] },
+		]);
+	}
+	await assertDeliverTarget(db, {
+		action: merged.action,
+		domainId: merged.domainId ?? null,
+		target: merged.target,
+	});
+
+	await db
 		.update(routingRules)
 		.set(merged)
 		.where(eq(routingRules.id, id));
-	const updated = await c.get("db").select().from(routingRules).where(eq(routingRules.id, id)).get();
+	const updated = await db.select().from(routingRules).where(eq(routingRules.id, id)).get();
 	return c.json(updated);
 });
 

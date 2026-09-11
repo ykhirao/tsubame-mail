@@ -3,6 +3,7 @@ import { getDb } from "@/db/client";
 import { messages, webhooks, webhookDeliveries } from "@/db/schema";
 import { newId } from "@/lib/id";
 import { parseAddressList } from "@/domain/mail/address";
+import { webhookUrlProblem } from "@/shared/contracts/webhooks";
 import type { WebhookRetryMessage } from "./queue";
 
 export type MessageEvent = "message.received" | "message.sent" | "message.failed";
@@ -21,7 +22,6 @@ type WebhookMessagePayload = {
 	from: { address: string; name: string | null };
 	to: string[];
 	cc: string[];
-	bcc: string[];
 	subject: string | null;
 	snippet: string | null;
 	hasAttachments: boolean;
@@ -43,7 +43,6 @@ function serializeMessage(m: typeof messages.$inferSelect): WebhookMessagePayloa
 		from: { address: m.fromAddr, name: m.fromName },
 		to: parseAddressList(m.toAddr).map((a) => a.address),
 		cc: parseAddressList(m.ccAddr).map((a) => a.address),
-		bcc: parseAddressList(m.bccAddr).map((a) => a.address),
 		subject: m.subject,
 		snippet: m.snippet,
 		hasAttachments: m.hasAttachments,
@@ -108,7 +107,9 @@ export async function dispatchMessageEvent(
 					event,
 					messageId,
 					status: "pending",
-					attempt: 1,
+					// attempt=0 で立てる。runDelivery は attempt >= delivery.attempt を「POST 済み」の
+					// claim に使うので、初回 attempt 1 が誤って claim されないようにする（#86）。
+					attempt: 0,
 				});
 				await runDelivery(env, deliveryId, 1);
 			} catch (err) {
@@ -152,25 +153,63 @@ export async function runDelivery(
 	});
 	const signature = await buildSignatureHeader(webhook.secret, deliveredAt, body);
 
+	// 検査を入れる前に登録された URL もあるので、登録時だけでなく送る直前にも見る。
+	const urlProblem = webhookUrlProblem(webhook.url);
+
+	// delivery.attempt が既に今回の attempt 以上 = この試行は POST 済み。
+	// OUTBOUND_QUEUE.send の失敗でキューが同じ {deliveryId, attempt} を再配達しても
+	// 受け手に再 POST せず、次試行の投入だけをやり直す（#86）。
+	if (delivery.attempt >= attempt) {
+		if (delivery.status === "success") return;
+		if (delivery.status === "pending") {
+			const nextAttempt = delivery.attempt + 1;
+			if (urlProblem !== null || nextAttempt > MAX_ATTEMPTS) {
+				await db
+					.update(webhookDeliveries)
+					.set({ status: "failed", nextRetryAt: null })
+					.where(eq(webhookDeliveries.id, deliveryId));
+				return;
+			}
+			const delaySec = RETRY_DELAYS[Math.min(delivery.attempt - 1, RETRY_DELAYS.length - 1)] ?? 1800;
+			await env.OUTBOUND_QUEUE.send(
+				{
+					kind: "webhook.retry",
+					deliveryId,
+					webhookId: webhook.id,
+					attempt: nextAttempt,
+				},
+				{ delaySeconds: delaySec },
+			);
+			return;
+		}
+		// status が failed の delivery は手動再送の再チャレンジ。claim を無視して POST に進む。
+	}
+
 	const started = Date.now();
 	let httpStatus: number | null = null;
-	let error: string | null = null;
-	try {
-		const res = await fetch(webhook.url, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				"X-Tsubame-Signature": signature,
-			},
-			body,
-			signal: AbortSignal.timeout(TIMEOUT_MS),
-		});
-		httpStatus = res.status;
-		if (res.status < 200 || res.status >= 300) {
-			error = `HTTP ${res.status}`;
+	let error: string | null = urlProblem;
+	if (urlProblem === null) {
+		try {
+			// 公開 URL から内部アドレスへ 302 で飛ばされるのを防ぐため、リダイレクトは追わない。
+			const res = await fetch(webhook.url, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Tsubame-Signature": signature,
+				},
+				body,
+				redirect: "manual",
+				signal: AbortSignal.timeout(TIMEOUT_MS),
+			});
+			httpStatus = res.status;
+			if (res.status >= 300 && res.status < 400) {
+				error = `HTTP ${res.status}（リダイレクトは追いません）`;
+			} else if (res.status < 200 || res.status >= 300) {
+				error = `HTTP ${res.status}`;
+			}
+		} catch (err) {
+			error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
 		}
-	} catch (err) {
-		error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
 	}
 	const durationMs = Date.now() - started;
 
@@ -189,7 +228,7 @@ export async function runDelivery(
 		return;
 	}
 
-	const giveUp = attempt >= MAX_ATTEMPTS;
+	const giveUp = attempt >= MAX_ATTEMPTS || urlProblem !== null;
 	const delaySec = RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)] ?? 1800;
 	await db
 		.update(webhookDeliveries)

@@ -76,11 +76,19 @@ export const messageListQuery = paginationQuery.extend({
 });
 export type MessageListQuery = z.infer<typeof messageListQuery>;
 
+/**
+ * PATCH で受け付ける status はこの 2 つだけ（ゴミ箱への移動と受信トレイへの差し戻し）。
+ * `sent` / `draft` / `queued` / `failed` は送信パイプラインだけが持つ内部状態で、
+ * 利用者が書き込み権限だけで inbound をそれらに変えられると一覧の意味が壊れる。
+ */
+export const messagePatchStatus = z.enum(["received", "trash"]);
+export type MessagePatchStatus = z.infer<typeof messagePatchStatus>;
+
 export const messagePatch = z
 	.object({
 		isRead: z.boolean().optional(),
 		isStarred: z.boolean().optional(),
-		status: messageStatus.optional(),
+		status: messagePatchStatus.optional(),
 	})
 	.refine((o) => o.isRead !== undefined || o.isStarred !== undefined || o.status !== undefined, {
 		message: "isRead / isStarred / status のうち少なくとも 1 つを指定してください",

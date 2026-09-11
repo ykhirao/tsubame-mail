@@ -1,24 +1,21 @@
 import { Hono } from "hono";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "@/db/client";
-import { webhooks, webhookDeliveries } from "@/db/schema";
-import { forbidden, invalidRequest, notFound } from "@/shared/errors";
+import { addresses, webhooks, webhookDeliveries } from "@/db/schema";
+import { conflict, invalidRequest, notFound } from "@/shared/errors";
 import { paginationQuery } from "@/shared/contracts/common";
-import { webhookInput, webhookUpdateInput } from "@/shared/contracts/webhooks";
+import { webhookInput, webhookListQuery, webhookUpdateInput } from "@/shared/contracts/webhooks";
 import { newId } from "@/lib/id";
 import { runDelivery } from "@/services/webhooks";
-import type { Principal } from "@/shared/contracts/common";
+import { afterCursor, toPage } from "@/lib/paging";
 import type { Webhook, WebhookDelivery } from "@/shared/contracts/webhooks";
 import type { AppEnv } from "@/api/types";
+import { requireOwner } from "../middleware/auth";
 
 export const webhookRoutes = new Hono<AppEnv>();
 export default webhookRoutes;
 
-function requireAdmin(principal: Principal) {
-	if (principal.role === "owner") return;
-	if (principal.scopes.includes("admin")) return;
-	throw forbidden("Webhook の管理には管理者権限が必要です");
-}
+webhookRoutes.use("*", requireOwner);
 
 /** secret をレスポンスに含めない。 */
 function toResponse(w: typeof webhooks.$inferSelect): Webhook {
@@ -56,15 +53,57 @@ function generateSecret(): string {
 	return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * 存在しない id、または owner が member に開放されたときに権限外の id を
+ * webhook に登録できないよう、DB に実在し principal から見える id だけを許す（#44）。
+ * owner は addressIds が "all" なので可視性の側は今は常に通る。
+ */
+async function assertAddressIdsValid(
+	db: ReturnType<typeof getDb>,
+	addressIds: string[] | null | undefined,
+	principal: { addressIds: string[] | "all" },
+): Promise<void> {
+	if (!addressIds || addressIds.length === 0) return;
+
+	if (principal.addressIds !== "all") {
+		const visible = new Set(principal.addressIds);
+		const denied = addressIds.filter((id) => !visible.has(id));
+		if (denied.length > 0) {
+			throw invalidRequest("権限の無いアドレスが addressIds に含まれています", { denied });
+		}
+	}
+
+	const found = await db
+		.select({ id: addresses.id })
+		.from(addresses)
+		.where(inArray(addresses.id, addressIds))
+		.all();
+	const foundIds = new Set(found.map((r) => r.id));
+	const missing = addressIds.filter((id) => !foundIds.has(id));
+	if (missing.length > 0) {
+		throw invalidRequest("存在しないアドレスが addressIds に含まれています", { missing });
+	}
+}
+
 webhookRoutes.get("/", async (c) => {
-	requireAdmin(c.get("principal"));
+	const query = webhookListQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", query.error.issues);
+	const { limit, cursor } = query.data;
+
 	const db = getDb(c.env);
-	const rows = await db.select().from(webhooks).all();
-	return c.json(rows.map(toResponse));
+	const rows = await db
+		.select()
+		.from(webhooks)
+		.where(afterCursor(webhooks, cursor, "asc"))
+		.orderBy(asc(webhooks.createdAt), asc(webhooks.id))
+		.limit(limit + 1)
+		.all();
+
+	const page = toPage(rows, limit);
+	return c.json({ data: page.rows.map(toResponse), next_cursor: page.next_cursor });
 });
 
 webhookRoutes.post("/", async (c) => {
-	requireAdmin(c.get("principal"));
 	const body = await c.req.json().catch(() => {
 		throw invalidRequest("JSON ボディをパースできません");
 	});
@@ -74,6 +113,7 @@ webhookRoutes.post("/", async (c) => {
 	}
 	const v = parsed.data;
 	const db = getDb(c.env);
+	await assertAddressIdsValid(db, v.addressIds, c.get("principal"));
 	const id = newId("webhook");
 	const secret = generateSecret();
 	const [row] = await db
@@ -93,7 +133,6 @@ webhookRoutes.post("/", async (c) => {
 });
 
 webhookRoutes.get("/:id", async (c) => {
-	requireAdmin(c.get("principal"));
 	const db = getDb(c.env);
 	const row = await db
 		.select()
@@ -105,7 +144,6 @@ webhookRoutes.get("/:id", async (c) => {
 });
 
 webhookRoutes.patch("/:id", async (c) => {
-	requireAdmin(c.get("principal"));
 	const db = getDb(c.env);
 	const id = c.req.param("id");
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
@@ -119,6 +157,9 @@ webhookRoutes.patch("/:id", async (c) => {
 		throw invalidRequest("リクエストが不正です", parsed.error.issues);
 	}
 	const v = parsed.data;
+	if (v.addressIds !== undefined) {
+		await assertAddressIdsValid(db, v.addressIds, c.get("principal"));
+	}
 
 	const changes: Record<string, unknown> = {};
 	if (v.name !== undefined) changes.name = v.name;
@@ -134,7 +175,6 @@ webhookRoutes.patch("/:id", async (c) => {
 });
 
 webhookRoutes.delete("/:id", async (c) => {
-	requireAdmin(c.get("principal"));
 	const db = getDb(c.env);
 	const id = c.req.param("id");
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
@@ -145,7 +185,6 @@ webhookRoutes.delete("/:id", async (c) => {
 });
 
 webhookRoutes.get("/:id/deliveries", async (c) => {
-	requireAdmin(c.get("principal"));
 	const db = getDb(c.env);
 	const id = c.req.param("id");
 	const existing = await db.select().from(webhooks).where(eq(webhooks.id, id)).get();
@@ -153,33 +192,25 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
 
 	const query = paginationQuery.safeParse(c.req.query());
 	if (!query.success) throw invalidRequest("クエリが不正です", query.error.issues);
-	const { limit } = query.data;
-	const cursorRaw = c.req.query("cursor");
-	const cursorDate = cursorRaw ? new Date(Number(cursorRaw)) : null;
+	const { limit, cursor } = query.data;
 
-	const base = cursorDate
-		? and(eq(webhookDeliveries.webhookId, id), lt(webhookDeliveries.createdAt, cursorDate))
-		: eq(webhookDeliveries.webhookId, id);
+	const scope = eq(webhookDeliveries.webhookId, id);
+	const cursorClause = afterCursor(webhookDeliveries, cursor, "desc");
+	const where = cursorClause ? and(scope, cursorClause) : scope;
 
 	const rows = await db
 		.select()
 		.from(webhookDeliveries)
-		.where(base)
-		.orderBy(desc(webhookDeliveries.createdAt))
+		.where(where)
+		.orderBy(desc(webhookDeliveries.createdAt), desc(webhookDeliveries.id))
 		.limit(limit + 1)
 		.all();
 
-	const hasMore = rows.length > limit;
-	const page = hasMore ? rows.slice(0, limit) : rows;
-	const last = page[page.length - 1];
-	const next_cursor =
-		hasMore && last?.createdAt ? String(last.createdAt.getTime()) : null;
-
-	return c.json({ data: page.map(toDeliveryResponse), next_cursor });
+	const page = toPage(rows, limit);
+	return c.json({ data: page.rows.map(toDeliveryResponse), next_cursor: page.next_cursor });
 });
 
 webhookRoutes.post("/deliveries/:id/retry", async (c) => {
-	requireAdmin(c.get("principal"));
 	const db = getDb(c.env);
 	const deliveryId = c.req.param("id");
 	const delivery = await db
@@ -188,6 +219,9 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
 		.where(eq(webhookDeliveries.id, deliveryId))
 		.get();
 	if (!delivery) throw notFound("配信履歴が見つかりません");
+	if (delivery.status !== "failed") {
+		throw conflict("failed の配信のみ再送できます");
+	}
 
 	await runDelivery(c.env, deliveryId, delivery.attempt);
 

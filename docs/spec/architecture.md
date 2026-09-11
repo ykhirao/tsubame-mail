@@ -153,7 +153,7 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 ## 4. API 契約
 
 すべて `/api/v1/*`。**UI も同じ v1 API を使う**（管理用の別 API を作らない）。
-認証は `Authorization: Bearer rid_...`（API キー）か Cookie セッションのどちらでも通る。
+認証は `Authorization: Bearer tsb_...`（API キー）か Cookie セッションのどちらでも通る。
 
 エラーは必ずこの形:
 
@@ -168,22 +168,22 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 
 | メソッド | パス | スコープ | 担当 |
 | --- | --- | --- | --- |
-| GET | `/v1/me` | read | W4 |
+| GET/PATCH | `/v1/me`、`/v1/me/api-keys` | スコープ検査無し（Cookie セッションか本人の API キーであること自体が条件。自分の情報のみ） | W4 |
 | POST | `/v1/auth/login` `/v1/auth/logout` | — | W4 |
 | GET | `/v1/addresses` | read | W5 |
 | GET | `/v1/messages` | read | W6 |
 | GET | `/v1/messages/{id}` | read | W6 |
 | GET | `/v1/messages/{id}/raw` | read | W2 |
-| PATCH | `/v1/messages/{id}` | read | W6 |
+| PATCH | `/v1/messages/{id}` | read（`status` の変更は send と write 割り当て。受け付ける status は `received` / `trash` のみ） | W6 |
 | POST | `/v1/messages` | send | W3 |
-| POST | `/v1/messages/{id}/reply` | send | W3 |
+| POST | `/v1/messages/{id}/reply` | read かつ send（読めない相手には返信もできないよう、両方を要求する） | W3 |
 | GET | `/v1/threads` `/v1/threads/{id}` | read | W6 |
 | GET | `/v1/attachments/{id}` | read | W2 |
 | GET/POST/PATCH/DELETE | `/v1/webhooks` | admin | W9 |
 | CRUD | `/v1/admin/users` `/v1/admin/api-keys` | admin | W4 |
 | CRUD | `/v1/admin/domains` `/v1/admin/addresses` | admin | W5 |
 | CRUD | `/v1/admin/rules` | admin | W2 |
-| GET | `/v1/openapi.json` | — | W9 |
+| GET | `/v1/openapi.json` | — | W9（未実装。呼ぶと 404） |
 
 ### `GET /v1/messages` の検索パラメータ（AI 向けの主要導線）
 
@@ -193,6 +193,61 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 
 `q` は簡易演算子を解釈する: `from:foo@bar subject:"見積" since:2026-01-01 添付`。
 パースは `src/domain/search/query.ts` に閉じる。
+
+### API を実際に叩くときの注意
+
+実機で踏んだ間違いを残す。**推測で書かず、まずここを読む。**
+
+**一覧のレスポンスは `data`。`items` ではない。**
+空に見えたら、まず自分のパーサが `data` を読んでいるか疑う。
+
+```jsonc
+{ "data": [ /* ... */ ], "next_cursor": null }
+```
+
+**送信は `POST /v1/messages`。`/v1/outbound` は存在しない。**
+`src/api/app.ts` で outbound のルータを `/api/v1/messages` に載せているため、
+送信も返信も一覧と同じパスに集まる。誤ると `404 not_found` が返る。
+
+**`to` / `cc` / `bcc` は文字列でも配列でも受ける**（`src/shared/contracts/send.ts`）。
+保存時はカンマ結合の 1 本の文字列になる。読む側は必ず `parseAddressList` を通す。
+
+```bash
+curl -X POST https://<host>/api/v1/messages \
+  -H "Authorization: Bearer tsb_..." -H 'Content-Type: application/json' \
+  -d '{"from":"ai@example.com","to":["a@example.com"],"cc":["b@example.com"],
+       "subject":"件名","text":"本文"}'
+# => 202 {"id":"msg_...","status":"queued"}
+```
+
+**送信は非同期。**`202 queued` は受理であって送信完了ではない。
+実際の結果は `GET /v1/messages/{id}` の `status` が `sent` / `failed` に変わるのを見る。
+
+**自分宛に送ると送信と受信で別レコードになる。**同じメールでも
+outbound 1 件と、宛先ごとの inbound が別 id で立つ。To と Cc に同じアドレスを
+入れた場合は重複排除されて 1 件になる。
+
+**権限外の id は `403` ではなく `404`。**存在を推測されないための意図的な挙動
+（`src/api/v1/messages.ts`）。404 を「消えた」と解釈しない。
+
+### 受信の確認
+
+`bounces@cf-bounce.<domain>` は **Cloudflare が Return-Path に使う正常な envelope sender**。
+バウンス（配送失敗）ではない。`wrangler tail` の
+`Email from:bounces@cf-bounce...` を送信失敗と読み違えない。
+
+配送経路の切り分けは、上流から順に見る。
+
+| 見るもの | 確認できること |
+| --- | --- |
+| `dig +short MX <domain>` | `route[1-3].mx.cloudflare.net` を向いているか |
+| `wrangler tail` の `Email from:...` | Cloudflare が受けて email ハンドラが起動したか |
+| `wrangler tail` の `Queue tsubame-inbound` | パースのキューまで流れたか |
+| `GET /v1/messages?direction=inbound` | D1 に保存され API から見えるか |
+
+`mail.example.com` のような**サブドメインは独立したゾーンではない**。
+`wrangler email routing settings <subdomain>` は zone not found を返すのが正常で、
+ルールは親ゾーンに乗る。catch-all を触るときは第 5 節の apex 保護を必ず読む。
 
 ## 5. 認可の考え方
 

@@ -17,9 +17,14 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export type CloudflareApiOptions = {
 	fetch?: FetchLike;
 	baseUrl?: string;
+	timeoutMs?: number;
+	pageDeadlineMs?: number;
 };
 
 export const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_PAGE_DEADLINE_MS = 30_000;
 
 export const cfEndpoints = {
 	zones: () => "/zones",
@@ -37,10 +42,13 @@ export const cfEndpoints = {
 	emailRoutingCatchAll: (zoneId: string) => `/zones/${zoneId}/email/routing/rules/catch_all`,
 
 	// Email Sending 側は実機未確認。仕様が違っていたらここだけ直す。
-	emailSending: (zoneId: string) => `/zones/${zoneId}/email/sending`,
-	emailSendingEnable: (zoneId: string) => `/zones/${zoneId}/email/sending/enable`,
-	emailSendingDisable: (zoneId: string) => `/zones/${zoneId}/email/sending/disable`,
-	emailSendingDns: (zoneId: string) => `/zones/${zoneId}/email/sending/dns`,
+	// Email Sending に enable/disable のエンドポイントは無い。ゾーン配下の
+	// subdomain リソースを作る／消すことが、そのまま有効化／無効化にあたる。
+	emailSendingSubdomains: (zoneId: string) => `/zones/${zoneId}/email/sending/subdomains`,
+	emailSendingSubdomain: (zoneId: string, subdomainId: string) =>
+		`/zones/${zoneId}/email/sending/subdomains/${subdomainId}`,
+	emailSendingSubdomainDns: (zoneId: string, subdomainId: string) =>
+		`/zones/${zoneId}/email/sending/subdomains/${subdomainId}/dns`,
 } as const;
 
 const cfErrorItem = z.object({
@@ -146,6 +154,7 @@ const cfSuggestedDnsResult = z.preprocess((value) => {
 }, z.array(cfSuggestedDnsRecord));
 
 export const cfEmailSendingSettings = z.object({
+	id: z.string().optional(),
 	enabled: z.boolean().optional(),
 	name: z.string().optional(),
 	status: z.string().optional(),
@@ -194,6 +203,7 @@ type RequestSpec = {
 	body?: unknown;
 	zoneName?: string;
 	allowNotFound?: boolean;
+	signal?: AbortSignal;
 };
 
 export type ZoneRef = { id: string; name?: string };
@@ -203,12 +213,16 @@ export class CloudflareApi {
 	readonly #accountId: string | undefined;
 	readonly #baseUrl: string;
 	readonly #fetch: FetchLike | undefined;
+	readonly #timeoutMs: number;
+	readonly #pageDeadlineMs: number;
 
 	constructor(env: CloudflareApiEnv, options: CloudflareApiOptions = {}) {
 		this.#token = env.CF_API_TOKEN;
 		this.#accountId = env.CF_ACCOUNT_ID;
 		this.#baseUrl = options.baseUrl ?? CF_API_BASE;
 		this.#fetch = options.fetch;
+		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		this.#pageDeadlineMs = options.pageDeadlineMs ?? DEFAULT_PAGE_DEADLINE_MS;
 	}
 
 	get accountId(): string {
@@ -230,8 +244,10 @@ export class CloudflareApi {
 		}
 
 		const method = spec.method ?? "GET";
+		const signal = spec.signal ?? AbortSignal.timeout(this.#timeoutMs);
 		const init: RequestInit = {
 			method,
+			signal,
 			headers: {
 				Authorization: `Bearer ${this.#token}`,
 				"Content-Type": "application/json",
@@ -318,12 +334,21 @@ export class CloudflareApi {
 	}
 
 	async listZones(
-		options: { name?: string; page?: number; perPage?: number } = {},
+		options: { name?: string; page?: number; perPage?: number; signal?: AbortSignal } = {},
 	): Promise<{ zones: CfZone[]; page: number; totalPages: number }> {
+		// #request がトークンを確かめるより先に account.id を query に載せるので、
+		// トークンなしのときはそちらが勝たないよう先に失敗させる。
+		if (!this.#token) throw missingTokenError();
 		const page = options.page ?? 1;
 		const response = await this.#request({
 			path: cfEndpoints.zones(),
-			query: { name: options.name, page, per_page: options.perPage ?? 50 },
+			query: {
+				name: options.name,
+				page,
+				per_page: options.perPage ?? 50,
+				"account.id": this.accountId,
+			},
+			signal: options.signal,
 		});
 		const zones = z.array(cfZone).parse(response?.result ?? []);
 		return {
@@ -336,8 +361,9 @@ export class CloudflareApi {
 	async listAllZones(options: { name?: string; maxPages?: number } = {}): Promise<CfZone[]> {
 		const maxPages = options.maxPages ?? 20;
 		const all: CfZone[] = [];
+		const deadline = AbortSignal.timeout(this.#pageDeadlineMs);
 		for (let page = 1; page <= maxPages; page += 1) {
-			const { zones, totalPages } = await this.listZones({ name: options.name, page });
+			const { zones, totalPages } = await this.listZones({ name: options.name, page, signal: deadline });
 			all.push(...zones);
 			if (zones.length === 0 || page >= totalPages) break;
 		}
@@ -349,11 +375,13 @@ export class CloudflareApi {
 		filter: { type?: string; name?: string } = {},
 	): Promise<CfDnsRecord[]> {
 		const records: CfDnsRecord[] = [];
+		const deadline = AbortSignal.timeout(this.#pageDeadlineMs);
 		for (let page = 1; page <= 20; page += 1) {
 			const response = await this.#request({
 				path: cfEndpoints.dnsRecords(zone.id),
 				query: { type: filter.type, name: filter.name, page, per_page: 100 },
 				zoneName: zone.name,
+				signal: deadline,
 			});
 			const parsed = z.array(cfDnsRecord).parse(response?.result ?? []);
 			records.push(...parsed);
@@ -421,11 +449,13 @@ export class CloudflareApi {
 
 	async listEmailRoutingRules(zone: ZoneRef): Promise<CfEmailRoutingRule[]> {
 		const rules: CfEmailRoutingRule[] = [];
+		const deadline = AbortSignal.timeout(this.#pageDeadlineMs);
 		for (let page = 1; page <= 20; page += 1) {
 			const response = await this.#request({
 				path: cfEndpoints.emailRoutingRules(zone.id),
 				query: { page, per_page: 50 },
 				zoneName: zone.name,
+				signal: deadline,
 			});
 			const parsed = z.array(cfEmailRoutingRule).parse(response?.result ?? []);
 			rules.push(...parsed);
@@ -497,38 +527,55 @@ export class CloudflareApi {
 		});
 	}
 
+	async listEmailSendingSubdomains(zone: ZoneRef): Promise<CfEmailSendingSettings[]> {
+		return this.#call(z.array(cfEmailSendingSettings), {
+			path: cfEndpoints.emailSendingSubdomains(zone.id),
+			zoneName: zone.name,
+		});
+	}
+
+	// 既に作られている subdomain に POST すると 409 になる。接続をやり直せるよう、
+	// 既存があればそれを返して再作成しない。
 	async enableEmailSending(zone: ZoneRef, name: string): Promise<CfEmailSendingSettings> {
+		const existing = await this.#findEmailSendingSubdomain(zone, name);
+		if (existing) return existing;
 		return this.#call(cfEmailSendingSettings, {
 			method: "POST",
-			path: cfEndpoints.emailSendingEnable(zone.id),
+			path: cfEndpoints.emailSendingSubdomains(zone.id),
 			body: { name },
 			zoneName: zone.name,
 		});
 	}
 
 	async disableEmailSending(zone: ZoneRef, name: string): Promise<void> {
+		const found = await this.#findEmailSendingSubdomain(zone, name);
+		if (!found?.id) return;
 		await this.#request({
-			method: "POST",
-			path: cfEndpoints.emailSendingDisable(zone.id),
-			body: { name },
+			method: "DELETE",
+			path: cfEndpoints.emailSendingSubdomain(zone.id, found.id),
 			zoneName: zone.name,
 		});
 	}
 
 	async getEmailSendingSettings(zone: ZoneRef, name: string): Promise<CfEmailSendingSettings> {
-		return this.#call(cfEmailSendingSettings, {
-			path: cfEndpoints.emailSending(zone.id),
-			query: { name },
+		return (await this.#findEmailSendingSubdomain(zone, name)) ?? { name, enabled: false };
+	}
+
+	async getEmailSendingDns(zone: ZoneRef, name: string): Promise<CfSuggestedDnsRecord[]> {
+		const found = await this.#findEmailSendingSubdomain(zone, name);
+		if (!found?.id) return [];
+		return this.#call(cfSuggestedDnsResult, {
+			path: cfEndpoints.emailSendingSubdomainDns(zone.id, found.id),
 			zoneName: zone.name,
 		});
 	}
 
-	async getEmailSendingDns(zone: ZoneRef, name: string): Promise<CfSuggestedDnsRecord[]> {
-		return this.#call(cfSuggestedDnsResult, {
-			path: cfEndpoints.emailSendingDns(zone.id),
-			query: { name },
-			zoneName: zone.name,
-		});
+	async #findEmailSendingSubdomain(
+		zone: ZoneRef,
+		name: string,
+	): Promise<CfEmailSendingSettings | null> {
+		const list = await this.listEmailSendingSubdomains(zone);
+		return list.find((s) => s.name?.toLowerCase() === name.toLowerCase()) ?? null;
 	}
 }
 

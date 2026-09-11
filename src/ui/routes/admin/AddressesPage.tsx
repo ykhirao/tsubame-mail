@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AdminAddress, DomainSummary } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import { ColorPicker } from "./ColorPicker";
 import { defaultColorFor } from "@/shared/colors";
@@ -27,11 +27,13 @@ import {
 function AddressTable({
 	addresses,
 	onCreate,
+	onEdit,
 	onDelete,
 	onColorChange,
 }: {
 	addresses: AdminAddress[];
 	onCreate: () => void;
+	onEdit: (a: AdminAddress) => void;
 	onDelete: (a: AdminAddress) => void;
 	onColorChange: (a: AdminAddress, hex: string) => void;
 }) {
@@ -80,6 +82,11 @@ function AddressTable({
 											<Badge color="yellow">catch-all</Badge>
 										</span>
 									)}
+									{a.archivedAt && (
+										<span className="ml-2">
+											<Badge color="gray">アーカイブ済み</Badge>
+										</span>
+									)}
 								</td>
 								<td className={tdCls}>
 									<Badge color={a.kind === "alias" ? "purple" : "green"}>
@@ -90,9 +97,14 @@ function AddressTable({
 								<td className={tdCls}>{a.aliasTargetAddress || "—"}</td>
 								<td className={tdCls}>{formatDateTime(a.createdAt)}</td>
 								<td className={tdCls}>
-									<Button variant="danger" onClick={() => onDelete(a)}>
-										削除
-									</Button>
+									<div className="flex items-center gap-1">
+										<Button variant="secondary" onClick={() => onEdit(a)}>
+											編集
+										</Button>
+										<Button variant="danger" onClick={() => onDelete(a)}>
+											削除
+										</Button>
+									</div>
 								</td>
 								{colorTarget === a.id && (
 									<td colSpan={7} className="bg-[var(--surface-sunken)] px-4 py-3">
@@ -249,11 +261,157 @@ function CreateAddressModal({
 	);
 }
 
+function EditAddressModal({
+	address,
+	existing,
+	onClose,
+	onSaved,
+}: {
+	address: AdminAddress;
+	existing: AdminAddress[];
+	onClose: () => void;
+	onSaved: () => void;
+}) {
+	const [displayName, setDisplayName] = useState(address.displayName ?? "");
+	const [signature, setSignature] = useState(address.signature ?? "");
+	const [kind, setKind] = useState<"mailbox" | "alias">(address.kind);
+	const [aliasTargetId, setAliasTargetId] = useState(address.aliasTargetId ?? "");
+	const [isCatchAll, setIsCatchAll] = useState(address.isCatchAll);
+	const [archived, setArchived] = useState(Boolean(address.archivedAt));
+	const [error, setError] = useState("");
+	const [busy, setBusy] = useState(false);
+
+	// 自分自身とエイリアスは転送先にできない。
+	const mailboxTargets = existing.filter(
+		(a) => a.kind === "mailbox" && !a.archivedAt && a.id !== address.id,
+	);
+
+	const save = async () => {
+		setError("");
+		setBusy(true);
+		try {
+			await api.patch(`/api/v1/admin/addresses/${address.id}`, {
+				displayName: displayName.trim() || null,
+				signature: signature.trim() || null,
+				kind,
+				aliasTargetId: kind === "alias" ? aliasTargetId : null,
+				isCatchAll,
+				archived,
+			});
+			onSaved();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "アドレスの更新に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const valid = kind === "mailbox" || Boolean(aliasTargetId);
+
+	return (
+		<Modal title="アドレスを編集" onClose={onClose}>
+			<ErrorBanner message={error} onDismiss={() => setError("")} />
+			<div className="space-y-4">
+				<dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-md bg-[var(--surface-sunken)] px-4 py-3 text-sm">
+					<dt className="text-[var(--text-muted)]">アドレス</dt>
+					<dd className="font-medium text-[var(--text)]">{address.address}</dd>
+					<dt className="text-[var(--text-muted)]">ドメイン</dt>
+					<dd className="text-[var(--text)]">{address.domainName}</dd>
+					<dt className="text-[var(--text-muted)]">作成日</dt>
+					<dd className="text-[var(--text)]">{formatDateTime(address.createdAt)}</dd>
+				</dl>
+
+				<div>
+					<Label>表示名</Label>
+					<TextInput
+						value={displayName}
+						onChange={(e) => setDisplayName(e.target.value)}
+						placeholder="お問い合わせ窓口"
+					/>
+				</div>
+
+				<div>
+					<Label>署名</Label>
+					<textarea
+						value={signature}
+						onChange={(e) => setSignature(e.target.value)}
+						rows={4}
+						placeholder="送信するメールの末尾に付く文面"
+						className="w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+					/>
+				</div>
+
+				<div>
+					<Label>種類</Label>
+					<Select value={kind} onChange={(e) => setKind(e.target.value as "mailbox" | "alias")}>
+						<option value="mailbox">メールボックス（受信して保管）</option>
+						<option value="alias">エイリアス（転送）</option>
+					</Select>
+				</div>
+
+				{kind === "alias" && (
+					<div>
+						<Label>転送先（メールボックス）</Label>
+						<Select value={aliasTargetId} onChange={(e) => setAliasTargetId(e.target.value)}>
+							<option value="">選択してください</option>
+							{mailboxTargets.map((m) => (
+								<option key={m.id} value={m.id}>
+									{m.address}
+								</option>
+							))}
+						</Select>
+					</div>
+				)}
+
+				<label className="flex items-start gap-2 text-sm text-[var(--text)]">
+					<Checkbox
+						checked={isCatchAll}
+						onChange={(e) => setIsCatchAll(e.target.checked)}
+						className="mt-0.5"
+					/>
+					<span>
+						このアドレスを catch-all の受け皿にする
+						{isCatchAll && !address.isCatchAll && (
+							<span className="mt-1 block text-xs text-[var(--danger)]">
+								ドメインあたり 1 件まで。ゾーン内で宛先が見つからないメールがここに届きます。
+							</span>
+						)}
+					</span>
+				</label>
+
+				<label className="flex items-start gap-2 text-sm text-[var(--text)]">
+					<Checkbox
+						checked={archived}
+						onChange={(e) => setArchived(e.target.checked)}
+						className="mt-0.5"
+					/>
+					<span>
+						アーカイブする
+						<span className="mt-1 block text-xs text-[var(--text-muted)]">
+							新しい割り当てや送信の選択肢から外れます。過去のメールは残ります。
+						</span>
+					</span>
+				</label>
+
+				<div className="flex justify-end gap-2 pt-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button onClick={save} disabled={busy || !valid}>
+						保存する
+					</Button>
+				</div>
+			</div>
+		</Modal>
+	);
+}
+
 export function AddressesPage() {
 	const [addresses, setAddresses] = useState<AdminAddress[]>([]);
 	const [domains, setDomains] = useState<DomainSummary[]>([]);
 	const [error, setError] = useState("");
 	const [showCreate, setShowCreate] = useState(false);
+	const [editTarget, setEditTarget] = useState<AdminAddress | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<AdminAddress | null>(null);
 
 	const changeColor = useCallback(
@@ -270,12 +428,12 @@ export function AddressesPage() {
 
 	const load = useCallback(async () => {
 		try {
-			const [addrRes, domRes] = await Promise.all([
-				api.get<{ data: AdminAddress[] }>("/api/v1/admin/addresses"),
-				api.get<{ data: DomainSummary[] }>("/api/v1/admin/domains"),
+			const [addressList, domainList] = await Promise.all([
+				getAllPages<AdminAddress>("/api/v1/admin/addresses"),
+				getAllPages<DomainSummary>("/api/v1/admin/domains"),
 			]);
-			setAddresses(addrRes.data);
-			setDomains(domRes.data);
+			setAddresses(addressList);
+			setDomains(domainList);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");
 		}
@@ -316,6 +474,7 @@ export function AddressesPage() {
 					<AddressTable
 						addresses={addresses}
 						onCreate={() => setShowCreate(true)}
+						onEdit={setEditTarget}
 						onDelete={setDeleteTarget}
 						onColorChange={changeColor}
 					/>
@@ -328,6 +487,18 @@ export function AddressesPage() {
 						onClose={() => setShowCreate(false)}
 						onCreated={() => {
 							setShowCreate(false);
+							load();
+						}}
+					/>
+				)}
+
+				{editTarget && (
+					<EditAddressModal
+						address={editTarget}
+						existing={addresses}
+						onClose={() => setEditTarget(null)}
+						onSaved={() => {
+							setEditTarget(null);
 							load();
 						}}
 					/>

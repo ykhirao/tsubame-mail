@@ -84,6 +84,40 @@ async function deliveries() {
 	return db.select().from(webhookDeliveries).all();
 }
 
+describe("通知ペイロードから bcc を落とす（#43）", () => {
+	useCleanState();
+
+	it("送信メールの bcc は外部 URL に出ない", async () => {
+		const { addressId } = await seedBase();
+		const db = getDb(env);
+		const messageId = "msg_sent_1";
+		await db.insert(messages).values({
+			id: messageId,
+			addressId,
+			direction: "outbound",
+			status: "sent",
+			fromAddr: "a@example.com",
+			toAddr: "dest@example.com",
+			bccAddr: "secret-hidden@example.com",
+			subject: "件名",
+			textBody: "本文",
+			receivedAt: new Date(),
+		});
+		await seedWebhook("bcc", "https://bcc.example/hook", { events: ["message.sent"] });
+
+		const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await dispatchMessageEvent(env, "message.sent", messageId);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const body = fetchMock.mock.calls[0]![1]!.body as string;
+		const payload = JSON.parse(body) as { message: Record<string, unknown> };
+		expect(body).not.toContain("secret-hidden@example.com");
+		expect(payload.message).not.toHaveProperty("bcc");
+	});
+});
+
 describe("dispatchMessageEvent の宛先・イベント絞り込み", () => {
 	useCleanState();
 
@@ -202,7 +236,7 @@ describe("再試行のバックオフと打ち切り", () => {
 			event: "message.received" as const,
 			messageId,
 			status: "pending",
-			attempt: 1,
+			attempt: 0,
 		});
 
 		const sendSpy = vi
@@ -258,5 +292,108 @@ describe("再試行のバックオフと打ち切り", () => {
 
 		await dispatchMessageEvent(env, "message.received", messageId);
 		expect(await deliveries()).toHaveLength(0);
+	});
+});
+
+describe("配信先の SSRF 対策（#12）", () => {
+	useCleanState();
+
+	async function seedDelivery(url: string) {
+		await seedBase();
+		const messageId = await seedMessage("adr_a");
+		await seedWebhook("ssrf", url, { events: ["message.received"] });
+		const db = getDb(env);
+		await db.insert(webhookDeliveries).values({
+			id: "dlv_ssrf",
+			webhookId: "whk_ssrf",
+			event: "message.received" as const,
+			messageId,
+			status: "pending",
+			attempt: 0,
+		});
+		return async () =>
+			(await db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, "dlv_ssrf")).get())!;
+	}
+
+	it("検査より前に登録された内部向け URL には送らず、再試行もしない", async () => {
+		const row = await seedDelivery("http://169.254.169.254/latest/meta-data");
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const sendSpy = vi
+			.spyOn(env.OUTBOUND_QUEUE, "send")
+			.mockResolvedValue({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } });
+
+		await runDelivery(env, "dlv_ssrf", 1);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sendSpy).not.toHaveBeenCalled();
+		const after = await row();
+		expect(after.status).toBe("failed");
+		expect(after.error).toContain("https://");
+		expect(after.nextRetryAt).toBeNull();
+	});
+
+	it("リダイレクトは追わず、3xx は失敗として記録する", async () => {
+		const row = await seedDelivery("https://redirect.example/hook");
+		const fetchMock = vi.fn(
+			async (_url: string, _init?: RequestInit) =>
+				new Response(null, { status: 302, headers: { Location: "http://127.0.0.1/" } }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		vi.spyOn(env.OUTBOUND_QUEUE, "send").mockResolvedValue({
+			metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+		});
+
+		await runDelivery(env, "dlv_ssrf", 1);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]![1]!.redirect).toBe("manual");
+		const after = await row();
+		expect(after.status).toBe("pending");
+		expect(after.httpStatus).toBe(302);
+		expect(after.error).toContain("リダイレクト");
+	});
+});
+
+describe("キュー再配達で受け手への POST を増幅しない（#86）", () => {
+	useCleanState();
+
+	it("OUTBOUND_QUEUE.send の失敗で再配達されても、同じ試行で再 POST しない", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("amp", "https://amp.example/hook", {
+			events: ["message.received"],
+		});
+		const db = getDb(env);
+		const deliveryId = "dlv_amp";
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId: "whk_amp",
+			event: "message.received" as const,
+			messageId,
+			status: "pending",
+			attempt: 0,
+		});
+
+		const fetchMock = vi.fn(async () => new Response("x", { status: 503 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const sendSpy = vi
+			.spyOn(env.OUTBOUND_QUEUE, "send")
+			.mockRejectedValue(new Error("queue 一時障害"));
+
+		// max_retries: 3 と同じ 4 回（初回 + 3 再配達）同じ {deliveryId, attempt} を投げる。
+		for (let i = 0; i < 4; i++) {
+			await expect(runDelivery(env, deliveryId, 1)).rejects.toThrow("queue 一時障害");
+		}
+
+		const row = await db
+			.select()
+			.from(webhookDeliveries)
+			.where(eq(webhookDeliveries.id, deliveryId))
+			.get();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(sendSpy).toHaveBeenCalledTimes(4);
+		expect(row!.status).toBe("pending");
+		expect(row!.attempt).toBe(1);
 	});
 });

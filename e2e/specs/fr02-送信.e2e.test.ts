@@ -198,8 +198,8 @@ describe("FR-2 送信", () => {
 		expect(decodeHeaderValue(headerValue(raw, "Subject"))).toBe("Re: 見積書の件");
 		expect(raw).not.toContain("Re: Re:");
 
-		expect(raw).toContain("In-Reply-To: thread-0001@tsubame.test");
-		expect(raw).toContain("References: thread-0001@tsubame.test");
+		expect(raw).toContain("In-Reply-To: <thread-0001@tsubame.test>");
+		expect(raw).toContain("References: <thread-0001@tsubame.test>");
 
 		const after = await owner.get("/api/v1/messages?limit=10");
 		const threadIds = new Set(after.body.data.map((m: any) => m.threadId));

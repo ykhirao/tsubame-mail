@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AvailableZone, DnsCheckResult, DomainSummary } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -441,8 +441,8 @@ export function DomainsPage() {
 
 	const load = useCallback(async () => {
 		try {
-			const res = await api.get<{ data: DomainSummary[] }>("/api/v1/admin/domains");
-			setDomains(res.data);
+			const list = await getAllPages<DomainSummary>("/api/v1/admin/domains");
+			setDomains(list);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "ドメイン一覧の取得に失敗しました");
 		}

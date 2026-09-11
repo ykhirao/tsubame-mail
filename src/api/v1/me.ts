@@ -1,9 +1,11 @@
 import { Hono } from "hono";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { schema } from "@/db/client";
+import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { generateApiKey } from "@/lib/tokens";
+import { afterCursor, toPage } from "@/lib/paging";
 import { readJson, unixSeconds } from "@/lib/validate";
 import {
 	addressSetHas,
@@ -14,7 +16,8 @@ import {
 } from "@/domain/access/policy";
 import type { AddressSet } from "@/domain/access/policy";
 import { createApiKeyBody } from "@/shared/contracts/api-keys";
-import type { Scope } from "@/shared/contracts/common";
+import { paginationQuery } from "@/shared/contracts/common";
+import type { Principal, Scope } from "@/shared/contracts/common";
 import { updateMeBody } from "@/shared/contracts/users";
 import { forbidden, invalidRequest, notFound, unauthorized } from "@/shared/errors";
 import { clientIp, getPrincipal, requireAuth } from "../middleware/auth";
@@ -23,6 +26,14 @@ import type { AppEnv } from "../types";
 const app = new Hono<AppEnv>();
 
 app.use("*", requireAuth);
+
+// 漏れた read/send キー 1 本で無期限の子キーを作られたり、他のキーを全部失効させられたりしないよう、
+// キー管理そのものは Cookie セッションか admin スコープ付きキーだけに絞る。
+function requireKeyManagement(principal: Principal): void {
+	if (principal.via === "session") return;
+	if (principal.scopes.includes("admin")) return;
+	throw forbidden("キーの管理には admin スコープが必要です");
+}
 
 app.get("/", async (c) => {
 	const principal = getPrincipal(c);
@@ -93,7 +104,12 @@ app.patch("/", async (c) => {
 
 	if (patch.passwordHash) {
 		// パスワードを変えたら他のセッションを落とす（自分の Cookie も含めて全部）。
+		// 漏れたキーがそのまま生きないよう、発行済みの API キーも失効させる（#99）。
 		await db.delete(schema.sessions).where(eq(schema.sessions.userId, user.id));
+		await db
+			.update(schema.apiKeys)
+			.set({ revokedAt: new Date() })
+			.where(and(eq(schema.apiKeys.userId, user.id), isNull(schema.apiKeys.revokedAt)));
 	}
 
 	return c.json({
@@ -108,16 +124,22 @@ app.patch("/", async (c) => {
 app.get("/api-keys", async (c) => {
 	const principal = getPrincipal(c);
 	const db = c.get("db");
+	const query = paginationQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", query.error.issues);
+	const { limit, cursor } = query.data;
 	const rows = await db
 		.select()
 		.from(schema.apiKeys)
-		.where(eq(schema.apiKeys.userId, principal.userId))
-		.orderBy(desc(schema.apiKeys.createdAt));
-	return c.json({ data: rows.map(serializeKey), next_cursor: null });
+		.where(and(eq(schema.apiKeys.userId, principal.userId), afterCursor(schema.apiKeys, cursor, "desc")))
+		.orderBy(desc(schema.apiKeys.createdAt), desc(schema.apiKeys.id))
+		.limit(limit + 1);
+	const page = toPage(rows, limit);
+	return c.json({ data: page.rows.map(serializeKey), next_cursor: page.next_cursor });
 });
 
 app.post("/api-keys", async (c) => {
 	const principal = getPrincipal(c);
+	requireKeyManagement(principal);
 	const body = await readJson(c.req, createApiKeyBody);
 	const db = c.get("db");
 
@@ -129,10 +151,11 @@ app.post("/api-keys", async (c) => {
 		body.addressIds ?? null,
 		principal.via === "api_key",
 	);
+	if (addressIds) await assertAddressesExist(db, addressIds);
+	const expiresAt = await clampExpiresAt(db, principal, body.expiresAt);
 
 	const generated = await generateApiKey();
 	const id = newId("apiKey");
-	const expiresAt = body.expiresAt ? new Date(body.expiresAt * 1000) : null;
 
 	await db.insert(schema.apiKeys).values({
 		id,
@@ -150,7 +173,7 @@ app.post("/api-keys", async (c) => {
 		action: "api_key.create",
 		targetType: "api_key",
 		targetId: id,
-		meta: { name: body.name, scopes, addressIds },
+		meta: { name: body.name, scopes, addressIds, apiKeyId: principal.apiKeyId ?? null },
 		ip: clientIp(c),
 	});
 
@@ -161,6 +184,7 @@ app.post("/api-keys", async (c) => {
 
 app.delete("/api-keys/:id", async (c) => {
 	const principal = getPrincipal(c);
+	requireKeyManagement(principal);
 	const db = c.get("db");
 	const id = c.req.param("id");
 
@@ -180,6 +204,7 @@ app.delete("/api-keys/:id", async (c) => {
 		action: "api_key.revoke",
 		targetType: "api_key",
 		targetId: id,
+		meta: { apiKeyId: principal.apiKeyId ?? null },
 		ip: clientIp(c),
 	});
 
@@ -221,6 +246,39 @@ export function clampAddressIds(
 	if (over.length > 0) throw forbidden(`権限の無いアドレスです: ${over.join(", ")}`);
 	const set = intersectAddressSets(available, requested);
 	return set === "all" ? [...new Set(requested)] : set;
+}
+
+export async function assertAddressesExist(db: Db, ids: string[]): Promise<void> {
+	if (ids.length === 0) return;
+	const found = await db
+		.select({ id: schema.addresses.id })
+		.from(schema.addresses)
+		.where(inArray(schema.addresses.id, ids));
+	const known = new Set(found.map((r) => r.id));
+	const missing = ids.filter((id) => !known.has(id));
+	if (missing.length > 0) throw invalidRequest(`存在しないアドレスです: ${missing.join(", ")}`);
+}
+
+/** API キーから発行するときは、親キー自身の期限を超えられない（無期限の子キーで持続性を得る抜け道を防ぐ）。 */
+export async function clampExpiresAt(
+	db: Db,
+	principal: Principal,
+	requestedUnixSeconds: number | undefined,
+): Promise<Date | null> {
+	const requested = requestedUnixSeconds ? new Date(requestedUnixSeconds * 1000) : null;
+	// 範囲の手前は zod の max で落ちるが、NaN のまま保存すると「無期限」として読まれるのでここでも落とす（#83）。
+	if (requested && !Number.isFinite(requested.getTime())) throw invalidRequest("expiresAt が不正です");
+	if (principal.via !== "api_key" || !principal.apiKeyId) return requested;
+
+	const [parent] = await db
+		.select({ expiresAt: schema.apiKeys.expiresAt })
+		.from(schema.apiKeys)
+		.where(eq(schema.apiKeys.id, principal.apiKeyId))
+		.limit(1);
+	const parentExpiresAt = parent?.expiresAt ?? null;
+	if (!parentExpiresAt) return requested;
+	if (!requested || requested.getTime() > parentExpiresAt.getTime()) return parentExpiresAt;
+	return requested;
 }
 
 export default app;

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
-import type { Context, MiddlewareHandler } from "hono";
-import { and, eq, ne } from "drizzle-orm";
+import type { Context } from "hono";
+import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
 import { addresses, domains } from "@/db/schema";
 import {
@@ -9,30 +9,24 @@ import {
 	removeAddressRoutingRule,
 } from "@/domain/domains/provision";
 import { newId } from "@/lib/id";
+import { afterCursor, toPage } from "@/lib/paging";
 import { defaultColorFor } from "@/shared/colors";
 import { createCloudflareApi } from "@/services/cloudflare-api";
+import { requireOwner } from "@/api/middleware/auth";
 import type { AppEnv } from "@/api/types";
+import { paginationQuery } from "@/shared/contracts/common";
 import {
 	createAddressInput,
 	listAddressesQuery,
 	updateAddressInput,
 } from "@/shared/contracts/addresses";
-import { ApiError, conflict, forbidden, invalidRequest, notFound, unauthorized } from "@/shared/errors";
+import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
 
 const app = new Hono<AppEnv>();
 
-const ownerOnly: MiddlewareHandler<AppEnv> = async (c, next) => {
-	const principal = c.get("principal");
-	if (!principal) throw unauthorized();
-	if (principal.role !== "owner") throw forbidden("この操作にはオーナー権限が必要です");
-	// API キーはユーザーの権限を超えられない。admin スコープが無いキーは弾く。
-	if (principal.via === "api_key" && !principal.scopes.includes("admin")) {
-		throw forbidden("この API キーには admin スコープがありません");
-	}
-	await next();
-};
+app.use("*", requireOwner);
 
-app.use("*", ownerOnly);
+const listAddressesQueryWithPaging = listAddressesQuery.and(paginationQuery);
 
 app.onError((err, c) => {
 	if (err instanceof ApiError) return c.json(err.toJSON(), err.status as 400);
@@ -77,29 +71,53 @@ function present(row: AddressRow, domainName: string, aliasTargetAddress: string
 }
 
 app.get("/", async (c) => {
-	const query = listAddressesQuery.safeParse(c.req.query());
+	const query = listAddressesQueryWithPaging.safeParse(c.req.query());
 	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
+	const { domainId, includeArchived, limit, cursor } = query.data;
 
 	const db = c.get("db");
+	const conditions = [
+		domainId ? eq(addresses.domainId, domainId) : undefined,
+		includeArchived ? undefined : isNull(addresses.archivedAt),
+		afterCursor(addresses, cursor, "asc"),
+	].filter((v): v is NonNullable<typeof v> => v !== undefined);
+
 	const rows = await db
 		.select({ address: addresses, domainName: domains.name })
 		.from(addresses)
-		.innerJoin(domains, eq(addresses.domainId, domains.id));
+		.innerJoin(domains, eq(addresses.domainId, domains.id))
+		.where(conditions.length ? and(...conditions) : undefined)
+		.orderBy(asc(addresses.createdAt), asc(addresses.id))
+		.limit(limit + 1);
 
-	const byId = new Map(rows.map((r) => [r.address.id, r.address.address]));
+	const paged = toPage(
+		rows.map((r) => r.address),
+		limit,
+	);
+	const byRowId = new Map(rows.map((r) => [r.address.id, r]));
 
-	const data = rows
-		.filter((r) => (query.data.domainId ? r.address.domainId === query.data.domainId : true))
-		.filter((r) => (query.data.includeArchived ? true : r.address.archivedAt === null))
-		.map((r) =>
-			present(
-				r.address,
-				r.domainName,
-				r.address.aliasTargetId ? (byId.get(r.address.aliasTargetId) ?? null) : null,
-			),
-		);
+	const aliasTargetIds = [
+		...new Set(
+			paged.rows.map((r) => r.aliasTargetId).filter((id): id is string => id !== null),
+		),
+	];
+	const aliasTargets = aliasTargetIds.length
+		? await db
+				.select({ id: addresses.id, address: addresses.address })
+				.from(addresses)
+				.where(inArray(addresses.id, aliasTargetIds))
+		: [];
 
-	return c.json({ data, next_cursor: null });
+	const data = paged.rows.map((row) => {
+		const domainName = byRowId.get(row.id)?.domainName ?? "";
+		const aliasTargetAddress =
+			row.aliasTargetId != null
+				? (aliasTargets.find((t) => t.id === row.aliasTargetId)?.address ?? null)
+				: null;
+		return present(row, domainName, aliasTargetAddress);
+	});
+
+	return c.json({ data, next_cursor: paged.next_cursor });
 });
 
 app.post("/", async (c) => {
@@ -204,6 +222,18 @@ app.patch("/:id", async (c) => {
 		});
 		if (!target) throw invalidRequest("aliasTargetId のアドレスが見つかりません");
 		if (target.kind === "alias") throw invalidRequest("エイリアスのエイリアスは作れません");
+
+		// 自分をエイリアス先にしている行があると、そちらが宛先の無いエイリアスになる（連鎖）。
+		if (row.kind !== "alias") {
+			const dependent = await db.query.addresses.findFirst({
+				where: eq(addresses.aliasTargetId, row.id),
+			});
+			if (dependent) {
+				throw conflict(
+					`${dependent.address} がこのアドレスをエイリアス先にしています。先にそちらを外してください。`,
+				);
+			}
+		}
 	}
 
 	if (input.isCatchAll === true && !row.isCatchAll) {

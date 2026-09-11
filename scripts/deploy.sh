@@ -33,6 +33,11 @@ if [[ "$DATABASE_ID" == "$PLACEHOLDER" ]]; then
 	echo "エラー: RIDLEY_DATABASE_ID がプレースホルダのままです。" >&2
 	exit 1
 fi
+# sed の置換先にそのまま埋め込むため、UUID 以外の文字（/ & など）を許さない。
+if [[ ! "$DATABASE_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+	echo "エラー: RIDLEY_DATABASE_ID が UUID の形式ではありません。" >&2
+	exit 1
+fi
 
 # ---- 設定生成 --------------------------------------------------------------
 # sed の置換対象（UUID 文字列）は固定のプレースホルダなので置換後の値（実 ID は

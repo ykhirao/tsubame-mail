@@ -54,6 +54,9 @@ export type ApiResponse<T = any> = { status: number; body: T; headers: Headers }
 export function createClient(h: Harness) {
 	let cookie: string | null = null;
 	let bearer: string | null = null;
+	// LOGIN_RATE_LIMIT は #52 で ip 単独の鍵も見る。クライアントを分けているテストが
+	// 同じ "unknown" IP に化けて互いのレート制限を消費しないよう、クライアントごとに固定する。
+	const clientIp = crypto.randomUUID();
 
 	async function request<T = any>(
 		method: string,
@@ -64,6 +67,7 @@ export function createClient(h: Harness) {
 		if (body !== undefined) headers.set("content-type", "application/json");
 		if (cookie) headers.set("cookie", cookie);
 		if (bearer) headers.set("authorization", `Bearer ${bearer}`);
+		headers.set("cf-connecting-ip", clientIp);
 
 		const req = new Request(`https://tsubame.test${path}`, {
 			method,
@@ -71,7 +75,7 @@ export function createClient(h: Harness) {
 			body: body === undefined ? undefined : JSON.stringify(body),
 		});
 		const ctx = createExecutionContext();
-		const res = await worker.fetch(req, h.env, ctx);
+		const res = await worker.fetch(req as Parameters<typeof worker.fetch>[0], h.env, ctx);
 		await waitOnExecutionContext(ctx);
 
 		const setCookie = res.headers.get("set-cookie");
@@ -232,8 +236,9 @@ export type SentEmail = { from: string; to: string; raw: string };
 export function captureSentEmails(h: Harness): SentEmail[] {
 	const sent: SentEmail[] = [];
 	(h.env as { EMAIL: unknown }).EMAIL = {
-		async send(message: { from: string; to: string; raw: unknown }) {
-			const raw = message.raw;
+		async send(message: { from: string; to: string; raw?: unknown; "EmailMessage::raw"?: unknown }) {
+			// miniflare の EmailMessage は raw を `EmailMessage::raw` キーに持つ。
+			const raw = message["EmailMessage::raw"] ?? message.raw;
 			const text =
 				typeof raw === "string"
 					? raw
@@ -241,6 +246,7 @@ export function captureSentEmails(h: Harness): SentEmail[] {
 						? await new Response(raw).text()
 						: String(raw);
 			sent.push({ from: message.from, to: message.to, raw: text });
+			return { messageId: `captured-${sent.length}` };
 		},
 	};
 	return sent;
@@ -251,7 +257,7 @@ export const OWNER = {
 	name: "オーナー",
 	password: "e2e-owner-password",
 	/** vitest.config.ts の INTERNAL_SECRET と揃える。 */
-	secret: "test-internal-secret-0123456789",
+	secret: "vitest-fixture-internal-secret-9f8e7d6c",
 };
 
 export async function loginAsOwner(h: Harness): Promise<Client> {

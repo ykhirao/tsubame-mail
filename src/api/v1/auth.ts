@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
-import { hashPassword, needsRehash, verifyPassword } from "@/lib/password";
+import { DUMMY_PASSWORD_HASH, hashPassword, needsRehash, verifyPassword } from "@/lib/password";
 import {
 	generateSessionToken,
 	hashToken,
@@ -36,6 +36,20 @@ function sessionCookieOptions(maxAge?: number): CookieOptions {
 /** メールアドレスの存在を漏らさないための一律のメッセージ。 */
 const loginFailed = () => unauthorized("メールアドレスまたはパスワードが違います");
 
+/**
+ * `ip:email` の組だけだと、1 IP から N メール（列挙）にも N IP から 1 メール（分散総当たり）にも
+ * 上限が無い。同じ回数窓を ip 単独・email 単独でも消費させ、どちらの形の攻撃も頭打ちにする。
+ */
+async function checkRateLimit(limiter: RateLimit | undefined, keys: string[]): Promise<void> {
+	if (!limiter) return;
+	for (const key of keys) {
+		const { success } = await limiter.limit({ key });
+		if (!success) {
+			throw new ApiError("rate_limited", "試行が多すぎます。しばらく待ってからやり直してください");
+		}
+	}
+}
+
 async function createSession(
 	db: Db,
 	userId: string,
@@ -60,22 +74,23 @@ app.post("/login", async (c) => {
 	const email = body.email.trim().toLowerCase();
 	const ip = clientIp(c);
 
-	// レート制限は「IP + メールアドレス」で掛ける。総当たりも列挙も同じ鍵で潰れる。
-	const limiter = c.env.LOGIN_RATE_LIMIT;
-	if (limiter) {
-		const { success } = await limiter.limit({ key: `login:${ip ?? "unknown"}:${email}` });
-		if (!success) {
-			throw new ApiError("rate_limited", "試行が多すぎます。しばらく待ってからやり直してください");
-		}
-	}
+	// 「IP + メールアドレス」の組に加え、IP 単独・メール単独でも同じ回数窓を消費させる。
+	// 組だけだと 1 IP から多数のメールを試す列挙にも、多数の IP から 1 メールを試す分散総当たりにも
+	// 上限が無いため。
+	await checkRateLimit(c.env.LOGIN_RATE_LIMIT, [
+		`login:${ip ?? "unknown"}:${email}`,
+		`login:ip:${ip ?? "unknown"}`,
+		`login:email:${email}`,
+	]);
 
 	const db = c.get("db");
 	const [user] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
 
 	// 「居ない」「無効」「agent（パスワード無し）」「パスワード不一致」は全部同じ応答にする。
-	if (!user) throw loginFailed();
-	const ok = await verifyPassword(body.password, user.passwordHash);
-	if (!ok || user.status !== "active") throw loginFailed();
+	// 応答時間も揃えるため、user が居ない／passwordHash が無いときも同じ形のダミーハッシュに対して
+	// verifyPassword を必ず走らせる（早期 return すると PBKDF2 1 回分の時間差でメールの存在が漏れる）。
+	const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+	if (!user || !ok || user.status !== "active") throw loginFailed();
 
 	// 反復回数を上げたあとの初回ログインで静かに貼り替える。
 	if (needsRehash(user.passwordHash)) {
@@ -143,9 +158,23 @@ app.get("/setup-state", async (c) => {
 	return c.json({ needsSetup: Number(owners?.count ?? 0) === 0 });
 });
 
+/**
+ * テスト・ローカル用に配布している既知の値。運用者がそのまま `wrangler secret put` すると、
+ * 誰でも知っている合言葉でオーナーを取れてしまう（vitest.config.ts / scripts/seed-local.mjs）。
+ */
+const KNOWN_DEV_SECRETS = new Set([
+	"test-internal-secret-0123456789",
+	"local-dev-internal-secret-0123456789",
+]);
+
 app.post("/bootstrap", async (c) => {
 	const body = await readJson(c.req, bootstrapBody);
 	const db = c.get("db");
+	const ip = clientIp(c);
+
+	// オーナーが 1 人も居ない窓（デプロイ直後〜初回セットアップ）は認証前なので、
+	// ログインと同じ IP 単位のレート制限を掛ける。
+	await checkRateLimit(c.env.LOGIN_RATE_LIMIT, [`bootstrap:ip:${ip ?? "unknown"}`]);
 
 	const [owners] = await db
 		.select({ count: sql<number>`count(*)` })
@@ -168,6 +197,12 @@ app.post("/bootstrap", async (c) => {
 			"INTERNAL_SECRET が未設定か短すぎます（20 文字以上）。Worker のシークレットに設定してください",
 		);
 	}
+	if (KNOWN_DEV_SECRETS.has(secret)) {
+		throw new ApiError(
+			"forbidden",
+			"INTERNAL_SECRET にテスト・ローカル用の既知の値が設定されています。本番用の乱数に変えてください",
+		);
+	}
 	if (!secretEquals(body.secret, secret)) {
 		throw new ApiError("forbidden", "セットアップの合言葉が違います");
 	}
@@ -183,7 +218,6 @@ app.post("/bootstrap", async (c) => {
 		status: "active",
 	});
 
-	const ip = clientIp(c);
 	await recordAudit(db, {
 		actorId: userId,
 		action: "auth.bootstrap",

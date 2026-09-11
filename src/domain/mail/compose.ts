@@ -1,5 +1,7 @@
 // Message-ID は送信前に自前で採番する。返信がスレッドに刺さるために必要。
-import { createMimeMessage } from "mimetext";
+// node ビルドは eol を node:os の EOL に頼り Workers では bare LF になる。browser ビルドは \r\n 固定。
+import { createMimeMessage } from "mimetext/browser";
+import { MIME_TYPE } from "@/shared/contracts/send";
 import { formatAddressList, parseAddressList } from "./address";
 
 export type ComposeAttachment = {
@@ -19,10 +21,11 @@ export type ComposeInput = {
 	fromName?: string | null;
 	toAddr: string;
 	ccAddr?: string | null;
-	bccAddr?: string | null;
 	subject?: string | null;
 	textBody?: string | null;
 	htmlBody?: string | null;
+	/** ヘッダには書かない。Bcc の宛先はエンベロープだけで配る（sender.ts）。 */
+	bccAddr?: string | null;
 	inReplyTo?: string | null;
 	referencesHeader?: string | null;
 };
@@ -34,7 +37,86 @@ export function generateMessageId(messageId: string, fromAddr: string): string {
 }
 
 export function toMailboxObjects(csv: string): { addr: string; name?: string }[] {
-	return parseAddressList(csv).map((a) => (a.name ? { addr: a.address, name: a.name } : { addr: a.address }));
+	return parseAddressList(csv).map((a) => {
+		assertNoLineBreak("宛先アドレス", a.address);
+		return a.name ? { addr: a.address, name: a.name } : { addr: a.address };
+	});
+}
+
+// mimetext は件名と表示名しかエンコードせず、それ以外の値はヘッダへ素通しする。
+// 改行が 1 つ混ざるだけで任意のヘッダや本文を差し込まれる。
+function assertNoLineBreak(label: string, value: string): void {
+	if (/[\r\n\0]/.test(value)) throw new Error(`${label}に改行を含められません`);
+}
+
+/**
+ * 山括弧の有無が混ざった Message-ID の並びを `<a@x> <b@x>` の形に揃える。
+ * 受信メールの Message-ID は山括弧を外して保存しているので、返信ではここで付け直す。
+ */
+export function formatMessageIdList(
+	value: string | null | undefined,
+	headerName: "In-Reply-To" | "References" = "In-Reply-To",
+): string | null {
+	if (!value) return null;
+	assertNoLineBreak("Message-ID", value);
+	const ids = new Set<string>();
+	for (const token of value.split(/\s+/)) {
+		const id = token.replace(/^<|>$/g, "");
+		if (!id || /[<>\x00-\x1f\x7f]/.test(id)) continue;
+		ids.add(id);
+	}
+	if (ids.size === 0) return null;
+	const wrapped = [...ids].map((id) => `<${id}>`);
+	const kept = clampReferences(wrapped, `${headerName}: `.length);
+	return kept.length > 0 ? kept.join(" ") : null;
+}
+
+// mimetext は filename を `filename="..."` にそのまま埋める。
+function quotedStringContent(value: string): string {
+	return value.replace(/[\\"]/g, "\\$&");
+}
+
+// mimetext はヘッダを折り返さない。RFC 5322 は 1 行 998 文字までなので、
+// "References: " の分を引いた残りに収まるよう、古い ID から捨てる
+// （直近の親を残すのが RFC 5322 §3.6.4 の推奨）。
+const MAX_HEADER_LINE = 998;
+function clampReferences(ids: string[], headerNameLength: number): string[] {
+	const budget = MAX_HEADER_LINE - headerNameLength;
+	const kept: string[] = [];
+	let len = 0;
+	for (let i = ids.length - 1; i >= 0; i--) {
+		const id = ids[i]!;
+		const add = kept.length === 0 ? id.length : id.length + 1;
+		if (len + add > budget) break;
+		kept.unshift(id);
+		len += add;
+	}
+	return kept;
+}
+
+// UTF-8 の 1 文字を跨いで切らない。件名は =?utf-8?B?<base64>?= に膨らむので、
+// 生バイト数はかなり手前で止める（"Subject: =?utf-8?B?" + "?=" のオーバーヘッドと
+// base64 の 4/3 膨張を差し引いた安全側の見積り）。
+const MAX_SUBJECT_BYTES = 600;
+function clampSubjectBytes(value: string, maxBytes: number): string {
+	const bytes = new TextEncoder().encode(value);
+	if (bytes.length <= maxBytes) return value;
+	let end = maxBytes;
+	// 0x80-0xBF は UTF-8 の継続バイト。境界がその途中なら 1 バイトずつ戻る。
+	while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+	return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+const bodyEncoder = new TextEncoder();
+
+// addMessage は encoding を base64 にしても本文を変換しない。宣言と実体を食い違わせないため
+// （受信側が生テキストを base64 と誤読する）、ここで本文を base64 にしておく。#104 の
+// boundary 注入も、base64 なら行が `--<boundary>` になり得ないので同時に塞がる。
+function encodeBodyBase64(value: string): string {
+	const bytes = bodyEncoder.encode(value);
+	let binary = "";
+	for (const b of bytes) binary += String.fromCharCode(b);
+	return btoa(binary);
 }
 
 export function composeMime(
@@ -43,33 +125,57 @@ export function composeMime(
 ): string {
 	const msg = createMimeMessage();
 
+	assertNoLineBreak("差出人アドレス", input.fromAddr);
 	msg.setSender({ addr: input.fromAddr, name: input.fromName ?? undefined });
 	msg.setTo(toMailboxObjects(input.toAddr));
 	if (input.ccAddr) msg.setCc(toMailboxObjects(input.ccAddr));
-	if (input.bccAddr) msg.setBcc(toMailboxObjects(input.bccAddr));
 
 	const rfcMessageId = generateMessageId(input.messageId, input.fromAddr);
 	msg.setHeader("Message-ID", rfcMessageId);
-	if (input.inReplyTo) msg.setHeader("In-Reply-To", input.inReplyTo);
-	if (input.referencesHeader) msg.setHeader("References", input.referencesHeader);
+	const inReplyTo = formatMessageIdList(input.inReplyTo, "In-Reply-To");
+	if (inReplyTo) msg.setHeader("In-Reply-To", inReplyTo);
+	const references = formatMessageIdList(input.referencesHeader, "References");
+	if (references) msg.setHeader("References", references);
 
-	const subject = (input.subject ?? "").trim() || "(件名なし)";
+	const subject = clampSubjectBytes((input.subject ?? "").trim() || "(件名なし)", MAX_SUBJECT_BYTES);
 	msg.setSubject(subject);
 
 	if (input.textBody && input.htmlBody) {
-		msg.addMessage({ contentType: "text/plain", data: input.textBody, charset: "UTF-8" });
-		msg.addMessage({ contentType: "text/html", data: input.htmlBody, charset: "UTF-8" });
+		msg.addMessage({
+			contentType: "text/plain",
+			data: encodeBodyBase64(input.textBody),
+			charset: "UTF-8",
+			encoding: "base64",
+		});
+		msg.addMessage({
+			contentType: "text/html",
+			data: encodeBodyBase64(input.htmlBody),
+			charset: "UTF-8",
+			encoding: "base64",
+		});
 	} else if (input.htmlBody) {
-		msg.addMessage({ contentType: "text/html", data: input.htmlBody, charset: "UTF-8" });
+		msg.addMessage({
+			contentType: "text/html",
+			data: encodeBodyBase64(input.htmlBody),
+			charset: "UTF-8",
+			encoding: "base64",
+		});
 	} else if (input.textBody) {
-		msg.addMessage({ contentType: "text/plain", data: input.textBody, charset: "UTF-8" });
+		msg.addMessage({
+			contentType: "text/plain",
+			data: encodeBodyBase64(input.textBody),
+			charset: "UTF-8",
+			encoding: "base64",
+		});
 	} else {
 		throw new Error("送信する本文（text / html）がありません");
 	}
 
 	for (const a of attachments) {
+		assertNoLineBreak("添付のファイル名", a.filename);
+		if (!MIME_TYPE.test(a.contentType)) throw new Error(`添付の Content-Type が不正です: ${a.contentType}`);
 		msg.addAttachment({
-			filename: a.filename,
+			filename: quotedStringContent(a.filename),
 			contentType: a.contentType,
 			data: a.base64,
 		});

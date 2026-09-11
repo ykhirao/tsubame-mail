@@ -1,11 +1,12 @@
 import { Hono } from "hono";
-import type { Context, MiddlewareHandler } from "hono";
-import { count, eq, inArray } from "drizzle-orm";
+import type { Context } from "hono";
+import { asc, count, eq, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { addresses, domains } from "@/db/schema";
 import { cleanupDomain } from "@/domain/domains/cleanup";
 import {
 	CATCH_ALL_WARNING,
+	assertZoneCatchAllSafe,
 	emailWorkerName,
 	previewDomain,
 	provisionDomain,
@@ -14,29 +15,21 @@ import {
 	verifyDomain,
 } from "@/domain/domains/provision";
 import { createCloudflareApi } from "@/services/cloudflare-api";
+import { requireOwner } from "@/api/middleware/auth";
+import { afterCursor, toPage } from "@/lib/paging";
 import type { AppEnv } from "@/api/types";
+import { paginationQuery } from "@/shared/contracts/common";
 import {
 	catchAllInput,
 	createDomainInput,
 	deleteDomainQuery,
 	previewDomainInput,
 } from "@/shared/contracts/domains";
-import { ApiError, forbidden, invalidRequest, notFound, unauthorized } from "@/shared/errors";
+import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
 
 const app = new Hono<AppEnv>();
 
-const ownerOnly: MiddlewareHandler<AppEnv> = async (c, next) => {
-	const principal = c.get("principal");
-	if (!principal) throw unauthorized();
-	if (principal.role !== "owner") throw forbidden("この操作にはオーナー権限が必要です");
-	// API キーはユーザーの権限を超えられない。admin スコープが無いキーは弾く。
-	if (principal.via === "api_key" && !principal.scopes.includes("admin")) {
-		throw forbidden("この API キーには admin スコープがありません");
-	}
-	await next();
-};
-
-app.use("*", ownerOnly);
+app.use("*", requireOwner);
 
 app.onError((err, c) => {
 	if (err instanceof ApiError) return c.json(err.toJSON(), err.status as 400);
@@ -100,16 +93,27 @@ app.post("/preview", async (c) => {
 });
 
 app.get("/", async (c) => {
+	const query = paginationQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
+	const { limit, cursor } = query.data;
+
 	const db = c.get("db");
-	const rows = await db.select().from(domains);
-	const counts = rows.length
+	const fetched = await db
+		.select()
+		.from(domains)
+		.where(afterCursor(domains, cursor, "asc"))
+		.orderBy(asc(domains.createdAt), asc(domains.id))
+		.limit(limit + 1);
+	const paged = toPage(fetched, limit);
+
+	const counts = paged.rows.length
 		? await db
 				.select({ domainId: addresses.domainId, n: count() })
 				.from(addresses)
 				.where(
 					inArray(
 						addresses.domainId,
-						rows.map((r) => r.id),
+						paged.rows.map((r) => r.id),
 					),
 				)
 				.groupBy(addresses.domainId)
@@ -117,7 +121,7 @@ app.get("/", async (c) => {
 	const countBy = new Map(counts.map((r) => [r.domainId, Number(r.n)]));
 
 	return c.json({
-		data: rows.map((d) => ({
+		data: paged.rows.map((d) => ({
 			id: d.id,
 			name: d.name,
 			zoneId: d.zoneId,
@@ -130,7 +134,7 @@ app.get("/", async (c) => {
 			addressCount: countBy.get(d.id) ?? 0,
 			createdAt: toSeconds(d.createdAt),
 		})),
-		next_cursor: null,
+		next_cursor: paged.next_cursor,
 	});
 });
 
@@ -201,10 +205,24 @@ app.get("/:id", async (c) => {
 app.delete("/:id", async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
 	const query = deleteDomainQuery.safeParse(c.req.query());
-	const doCleanup = query.success ? query.data.cleanup : true;
+	if (!query.success) throw invalidRequest("クエリが不正です", z.treeifyError(query.error));
+	const doCleanup = query.data.cleanup;
+
+	if (domain.mode === "apex") {
+		const rows = await c.get("db").select().from(domains).where(ne(domains.id, domain.id));
+		const below = rows.find((d) => d.name.toLowerCase().endsWith(`.${domain.name.toLowerCase()}`));
+		if (below) {
+			throw conflict(
+				`${below.name} がこのドメインの配下で接続されています。先にそちらを切断してください。`,
+			);
+		}
+	}
 
 	let cleanup = null;
 	if (doCleanup) {
+		if (domain.catchAllEnabled) {
+			await assertZoneCatchAllSafe(c.get("db"), { zoneId: domain.zoneId, domainId: domain.id });
+		}
 		const api = createCloudflareApi(c.env);
 		cleanup = await cleanupDomain(api, {
 			zoneId: domain.zoneId,
@@ -230,9 +248,9 @@ app.post("/:id/catch-all", async (c) => {
 	const domain = await loadDomain(c, c.req.param("id"));
 	const input = await readBody(c, catchAllInput);
 
-	if (input.enabled && !input.confirm) {
+	if (!input.confirm) {
 		throw invalidRequest(
-			`catch-all を有効にするには confirm: true が必要です。${CATCH_ALL_WARNING}`,
+			`catch-all を変更するには confirm: true が必要です（有効化・無効化とも）。${CATCH_ALL_WARNING}`,
 			{ warning: CATCH_ALL_WARNING, zoneName: domain.zoneName, mode: domain.mode },
 		);
 	}

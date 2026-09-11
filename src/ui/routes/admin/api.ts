@@ -60,6 +60,20 @@ export const api = {
 	del: <T,>(path: string) => request<T>("DELETE", path),
 };
 
+/** 管理画面は件数が少ない前提なので、next_cursor を辿って全件を読む。 */
+export async function getAllPages<T>(path: string): Promise<T[]> {
+	const out: T[] = [];
+	let cursor: string | null = null;
+	do {
+		const sep = path.includes("?") ? "&" : "?";
+		const url: string = `${path}${sep}limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+		const page: Page<T> = await api.get<Page<T>>(url);
+		out.push(...page.data);
+		cursor = page.next_cursor;
+	} while (cursor);
+	return out;
+}
+
 export type Role = "owner" | "member" | "agent";
 export type Scope = "read" | "send" | "admin";
 
@@ -171,10 +185,10 @@ export interface AdminAddress {
 	aliasTargetId: string | null;
 	aliasTargetAddress: string | null;
 	isCatchAll: boolean;
+	signature: string | null;
 	color: string | null;
 	archivedAt: number | null;
 	createdAt: number;
-	routingRuleId: string | null;
 }
 
 export interface AdminUser {

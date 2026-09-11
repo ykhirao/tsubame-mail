@@ -27,10 +27,17 @@ export function parseMailboxes(csv: string | null | undefined): SenderMailbox[] 
 	return parseAddressList(csv).map((a) => (a.name ? { address: a.address, name: a.name } : { address: a.address }));
 }
 
-/** 折り返し（継続行）も一緒に消す。 */
+/**
+ * 同名のヘッダが何行あっても全部消す。1 行だけ消すと、注入された 2 行目が残る。
+ * 折り返し（継続行）も一緒に消し、本文には触らない。
+ */
 export function stripHeader(raw: string, name: string): string {
-	const re = new RegExp(`^${name}:[ \\t].*(?:\\r?\\n[ \\t].*)*\\r?\\n?`, "im");
-	return raw.replace(re, "");
+	const blank = /(\r?\n)\r?\n/.exec(raw);
+	const cut = blank ? blank.index + blank[1]!.length : raw.length;
+	const head = raw.slice(0, cut);
+	const rest = raw.slice(cut);
+	const re = new RegExp(`^${name}:.*(?:\\r?\\n[ \\t].*)*(?:\\r?\\n|$)`, "gim");
+	return head.replace(re, "") + rest;
 }
 
 /** 失敗時は即座に throw する。backoff は呼び出し側の責任。 */
@@ -47,7 +54,7 @@ export async function sendRawEmail(
 	const recipients = collectRecipients({ to: params.to, cc: params.cc, bcc: params.bcc });
 	if (recipients.length === 0) throw new Error("送信先が指定されていません");
 
-	// Bcc はエンベロープ宛先にだけ入れ、ヘッダは誰にも見せない。
+	// compose.ts は Bcc ヘッダを書かないが、万一混ざっても受信者には見せない。
 	const raw = stripHeader(params.raw, "Bcc");
 
 	let lastId = "";

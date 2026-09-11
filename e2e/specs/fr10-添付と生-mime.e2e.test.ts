@@ -131,4 +131,43 @@ describe("FR-10 添付と生 MIME", () => {
 			expect([403, 404]).toContain(deniedRaw.status);
 		},
 	);
+
+	scenario("FR-10", "送信者が HTML や SVG と名乗る添付は、ブラウザが描画しない型で返す", async () => {
+		await seedDomain(h, { addresses: ["ai"] });
+		const aiAddr = "ai@mail.tsubame.test";
+
+		for (const [filename, contentType] of [
+			["invoice.html", "text/html"],
+			["logo.svg", "image/svg+xml"],
+			["photo.png", "IMAGE/PNG; name=photo.png"],
+		] as const) {
+			await deliverEmail(h, {
+				from: "evil@ext.example.jp",
+				to: aiAddr,
+				raw: multipartMime({
+					from: "evil@ext.example.jp",
+					to: aiAddr,
+					subject: filename,
+					attachment: { filename, contentType, content: "<script>alert(1)</script>" },
+				}),
+			});
+		}
+		await drainQueues(h);
+
+		const served: Record<string, string | null> = {};
+		const list = await owner.get("/api/v1/messages?limit=10");
+		for (const m of list.body.data) {
+			const detail = await owner.get(`/api/v1/messages/${m.id}`);
+			const att = detail.body.attachments[0];
+			const res = await owner.get(`/api/v1/attachments/${att.id}`);
+			expect(res.status).toBe(200);
+			expect(res.headers.get("content-disposition")).toContain("attachment");
+			served[att.filename] = res.headers.get("content-type");
+		}
+		expect(served).toEqual({
+			"invoice.html": "application/octet-stream",
+			"logo.svg": "application/octet-stream",
+			"photo.png": "image/png",
+		});
+	});
 });

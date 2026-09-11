@@ -4,7 +4,7 @@ import type { MessageDetail } from "@/shared/contracts/messages";
 import { MessagesApi, ThreadsApi } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
-import { MessageHtml } from "@/ui/components/MessageHtml";
+import { hasRemoteImages, MessageHtml } from "@/ui/components/MessageHtml";
 import { Attachments } from "@/ui/components/Attachments";
 import { formatDateTime } from "@/ui/lib/format";
 
@@ -35,6 +35,7 @@ export function ThreadDetail() {
 	const [messages, setMessages] = useState<MessageDetail[] | null>(null);
 	const [subject, setSubject] = useState<string | null>(null);
 	const [notFound, setNotFound] = useState(false);
+	const [imagesAllowed, setImagesAllowed] = useState<ReadonlySet<string>>(new Set());
 
 	useEffect(() => {
 		if (!id) return;
@@ -128,7 +129,22 @@ export function ThreadDetail() {
 
 									<div className="mt-3">
 										{m.htmlBody ? (
-											<MessageHtml html={m.htmlBody} />
+											<>
+												{!imagesAllowed.has(m.id) && hasRemoteImages(m.htmlBody) && (
+													<div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--surface-sunken)] px-3 py-2 text-xs text-[var(--text-muted)]">
+														<span>
+															外部の画像を読み込んでいません。表示すると、開いたことや IP アドレスが送信者に伝わることがあります。
+														</span>
+														<button
+															onClick={() => setImagesAllowed((prev) => new Set(prev).add(m.id))}
+															className="pill shrink-0 border border-[var(--line)] px-3 py-1 text-xs text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)]"
+														>
+															画像を表示
+														</button>
+													</div>
+												)}
+												<MessageHtml html={m.htmlBody} allowRemoteImages={imagesAllowed.has(m.id)} />
+											</>
 										) : m.textBody ? (
 											<div className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)]">
 												{m.textBody}

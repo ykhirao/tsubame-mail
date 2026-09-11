@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AdminAddress, AdminUser, AdminUserDetail, GrantInput } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -12,6 +12,7 @@ import {
 	formatDateTime,
 	Label,
 	Modal,
+	Notice,
 	Page,
 	Select,
 	TableRow,
@@ -241,22 +242,135 @@ function GrantsModal({
 	);
 }
 
+function EditUserModal({
+	user,
+	onClose,
+	onSaved,
+}: {
+	user: AdminUser;
+	onClose: () => void;
+	onSaved: () => void;
+}) {
+	const [name, setName] = useState(user.name);
+	const [role, setRole] = useState<AdminUser["role"]>(user.role);
+	const [status, setStatus] = useState<AdminUser["status"]>(user.status);
+	const [password, setPassword] = useState("");
+	const [error, setError] = useState("");
+	const [busy, setBusy] = useState(false);
+
+	// agent はパスワードを持たない。ロールを agent にすると既存のハッシュも消える。
+	const passwordAllowed = role !== "agent";
+
+	const save = async () => {
+		setError("");
+		setBusy(true);
+		try {
+			await api.patch(`/api/v1/admin/users/${user.id}`, {
+				name: name.trim(),
+				role,
+				status,
+				password: passwordAllowed && password ? password : undefined,
+			});
+			onSaved();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "ユーザーの更新に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const valid = name.trim().length > 0 && (!password || password.length >= 12);
+
+	return (
+		<Modal title="ユーザーを編集" onClose={onClose}>
+			<ErrorBanner message={error} onDismiss={() => setError("")} />
+			<div className="space-y-4">
+				<dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded-md bg-[var(--surface-sunken)] px-4 py-3 text-sm">
+					<dt className="text-[var(--text-muted)]">メールアドレス</dt>
+					<dd className="font-medium text-[var(--text)]">{user.email}</dd>
+					<dt className="text-[var(--text-muted)]">作成日</dt>
+					<dd className="text-[var(--text)]">{formatDateTime(user.createdAt)}</dd>
+				</dl>
+
+				<div>
+					<Label>名前</Label>
+					<TextInput value={name} onChange={(e) => setName(e.target.value)} />
+				</div>
+
+				<div>
+					<Label>ロール</Label>
+					<Select
+						value={role}
+						onChange={(e) => setRole(e.target.value as AdminUser["role"])}
+					>
+						<option value="owner">オーナー</option>
+						<option value="member">メンバー</option>
+						<option value="agent">AI エージェント</option>
+					</Select>
+					{role === "agent" && user.role !== "agent" && (
+						<p className="mt-1 text-xs text-[var(--danger)]">
+							AI エージェントにするとパスワードが消え、ログインできなくなります。API キーだけで動きます。
+						</p>
+					)}
+				</div>
+
+				<div>
+					<Label>状態</Label>
+					<Select
+						value={status}
+						onChange={(e) => setStatus(e.target.value as AdminUser["status"])}
+					>
+						<option value="active">有効</option>
+						<option value="disabled">無効</option>
+					</Select>
+				</div>
+
+				{passwordAllowed && (
+					<div>
+						<Label>パスワードを変更（12 文字以上・空なら変更しない）</Label>
+						<TextInput
+							type="password"
+							autoComplete="new-password"
+							value={password}
+							onChange={(e) => setPassword(e.target.value)}
+						/>
+					</div>
+				)}
+
+				<Notice tone="warn">
+					ロール・状態・パスワードのいずれかを変えると、この利用者の既存セッションは全部切れます。
+				</Notice>
+
+				<div className="flex justify-end gap-2 pt-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button onClick={save} disabled={busy || !valid}>
+						保存する
+					</Button>
+				</div>
+			</div>
+		</Modal>
+	);
+}
+
 export function UsersPage() {
 	const [users, setUsers] = useState<AdminUser[]>([]);
 	const [addresses, setAddresses] = useState<AdminAddress[]>([]);
 	const [error, setError] = useState("");
 	const [showCreate, setShowCreate] = useState(false);
+	const [editTarget, setEditTarget] = useState<AdminUser | null>(null);
 	const [grantsTarget, setGrantsTarget] = useState<AdminUser | null>(null);
 	const [disableTarget, setDisableTarget] = useState<AdminUser | null>(null);
 
 	const load = useCallback(async () => {
 		try {
-			const [uRes, aRes] = await Promise.all([
-				api.get<{ data: AdminUser[] }>("/api/v1/admin/users"),
-				api.get<{ data: AdminAddress[] }>("/api/v1/admin/addresses"),
+			const [userList, addressList] = await Promise.all([
+				getAllPages<AdminUser>("/api/v1/admin/users"),
+				getAllPages<AdminAddress>("/api/v1/admin/addresses"),
 			]);
-			setUsers(uRes.data);
-			setAddresses(aRes.data);
+			setUsers(userList);
+			setAddresses(addressList);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");
 		}
@@ -329,6 +443,9 @@ export function UsersPage() {
 										<td className={tdCls}>{formatDateTime(u.createdAt)}</td>
 										<td className={tdCls}>
 											<div className="flex gap-2">
+												<Button variant="secondary" onClick={() => setEditTarget(u)}>
+													編集
+												</Button>
 												<Button variant="secondary" onClick={() => setGrantsTarget(u)}>
 													権限
 												</Button>
@@ -350,6 +467,17 @@ export function UsersPage() {
 						onClose={() => setShowCreate(false)}
 						onCreated={() => {
 							setShowCreate(false);
+							load();
+						}}
+					/>
+				)}
+
+				{editTarget && (
+					<EditUserModal
+						user={editTarget}
+						onClose={() => setEditTarget(null)}
+						onSaved={() => {
+							setEditTarget(null);
 							load();
 						}}
 					/>

@@ -126,6 +126,23 @@ describe("FR-11 共有メールボックス", () => {
 		expect(addresses.body.data.map((a: { id: string }) => a.id)).toEqual([otherId]);
 	});
 
+	scenario("FR-11", "権限を 1 件も持たない人には何も見えない", async () => {
+		const nobody = await createMember("nobody@tsubame.test", []);
+
+		// 空の権限は「制限なし」ではなく「1 件も見えない」。
+		expect((await nobody.client.get("/api/v1/messages?limit=50")).body.data).toHaveLength(0);
+		expect((await nobody.client.get("/api/v1/threads?limit=50")).body.data).toHaveLength(0);
+		expect((await nobody.client.get("/api/v1/addresses")).body.data).toHaveLength(0);
+		expect((await nobody.client.get("/api/v1/messages?q=%E8%B3%87%E6%96%99")).body.data).toHaveLength(
+			0,
+		);
+
+		const all = await owner.get("/api/v1/messages?limit=50");
+		const anyMessage = all.body.data[0];
+		expect((await nobody.client.get(`/api/v1/messages/${anyMessage.id}`)).status).toBe(404);
+		expect((await nobody.client.get(`/api/v1/threads/${anyMessage.threadId}`)).status).toBe(404);
+	});
+
 	scenario("FR-11", "オーナーは誰がそのアドレスを見られるか分かる", async () => {
 		const a = await createMember("x@tsubame.test", [{ addressId: sharedId, level: "read" }]);
 		const b = await createMember("y@tsubame.test", [{ addressId: sharedId, level: "write" }]);

@@ -40,7 +40,7 @@ describe("CloudflareApi", () => {
 	it("ページングを畳んでゾーンを全部返す", async () => {
 		let page = 0;
 		const api = new CloudflareApi(
-			{ CF_API_TOKEN: "tok" },
+			{ CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "acc" },
 			{
 				fetch: async () => {
 					page += 1;
@@ -82,6 +82,23 @@ describe("CloudflareApi", () => {
 			{ fetch: async () => new Response("<html>502</html>", { status: 502 }) },
 		);
 		await expect(api.listDnsRecords(zone)).rejects.toThrow(/JSON ではない応答/);
+	});
+
+	it("fetch が応答しなくてもタイムアウトで待ち続けない（#97）", async () => {
+		const api = new CloudflareApi(
+			{ CF_API_TOKEN: "tok", CF_ACCOUNT_ID: "acc" },
+			{
+				timeoutMs: 20,
+				pageDeadlineMs: 20,
+				fetch: (_input, init) =>
+					new Promise((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () =>
+							reject(new DOMException("aborted", "AbortError")),
+						);
+					}),
+			},
+		);
+		await expect(api.listAllZones()).rejects.toThrow(/接続できませんでした/);
 	});
 });
 

@@ -1,5 +1,6 @@
-// 同じジョブを二重に送らない。status が sent のジョブは何もせず返す。
-import { eq } from "drizzle-orm";
+// 同じジョブを二重に送らない。claim できなかった（queued でも、期限切れの sending でもない）
+// ジョブは何もせず返す。
+import { and, eq, lt, or } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { attachments, messages, outboundJobs } from "@/db/schema";
 import type { OutboundSendMessage } from "@/services/queue";
@@ -9,6 +10,11 @@ import { composeMime, generateMessageId, type ComposeAttachment } from "./compos
 
 export const OUTBOUND_BACKOFF_SECONDS = [10, 60, 300] as const;
 export const OUTBOUND_MAX_ATTEMPTS = 3;
+
+// Worker が sending への更新後・送信完了前に落ちると、他に誰も拾わない行が残る
+// （精査 #21）。at-least-once のキュー再配達がその job を再訪したときに拾えるよう、
+// この時間を超えた sending は queued と同じに扱う。
+const SENDING_STUCK_SECONDS = 120;
 
 export function backoffDelaySeconds(attempts: number): number {
 	const idx = Math.min(attempts, OUTBOUND_BACKOFF_SECONDS.length) - 1;
@@ -25,15 +31,41 @@ export async function processOutboundSend(
 	_ctx: ExecutionContext,
 ): Promise<void> {
 	const db = getDb(env);
+	const now = new Date();
 
-	// キューは at-least-once。送信前に必ず現状の status を読んで二重送信を防ぐ。
-	const job = await db
-		.select()
-		.from(outboundJobs)
-		.where(eq(outboundJobs.id, msg.jobId))
-		.get();
-	if (!job) return;
-	if (job.status !== "queued") return; // sent / sending / failed は何もしない
+	// 読んでから更新すると、同じ job を 2 つのコンシューマが同時に拾える。
+	// 1 文の UPDATE ... WHERE ... RETURNING で「拾えたのは 1 人だけ」を保証する。
+	// nextAttemptAt を「sending の期限」としても使う。クラッシュで sending のまま
+	// 期限を過ぎた行は、同じ job の再配達（キューは at-least-once）が来たときに拾い直す。
+	const claimed = await db
+		.update(outboundJobs)
+		.set({ status: "sending", nextAttemptAt: new Date(now.getTime() + SENDING_STUCK_SECONDS * 1000) })
+		.where(
+			and(
+				eq(outboundJobs.id, msg.jobId),
+				or(
+					eq(outboundJobs.status, "queued"),
+					and(eq(outboundJobs.status, "sending"), lt(outboundJobs.nextAttemptAt, now)),
+				),
+			),
+		)
+		.returning();
+	const job = claimed[0];
+	if (!job) {
+		// キューの再配達は通常すぐ届く。期限切れの sending だけを拾う設計だと、
+		// 期限（SENDING_STUCK_SECONDS）より前に再配達が来て claim に失敗し、
+		// そのまま ack されて job が二度と配達されなくなる（精査 #21 差し戻し）。
+		// まだ処理中と分かっている sending なら、期限が来る頃に自分を積み直す。
+		const current = await db.select().from(outboundJobs).where(eq(outboundJobs.id, msg.jobId)).get();
+		if (current?.status === "sending" && current.nextAttemptAt && current.nextAttemptAt > now) {
+			const remainingSeconds = Math.ceil((current.nextAttemptAt.getTime() - now.getTime()) / 1000);
+			await env.OUTBOUND_QUEUE.send(
+				{ kind: "outbound.send", jobId: msg.jobId, messageId: msg.messageId },
+				{ delaySeconds: remainingSeconds + 1 },
+			);
+		}
+		return; // sent / failed / 不存在、または上で積み直した
+	}
 
 	const message = await db
 		.select()
@@ -42,11 +74,7 @@ export async function processOutboundSend(
 		.get();
 	if (!message) return;
 
-	await db
-		.update(outboundJobs)
-		.set({ status: "sending" })
-		.where(eq(outboundJobs.id, job.id));
-
+	let raw: string;
 	try {
 		const attachRows = await db
 			.select()
@@ -71,7 +99,7 @@ export async function processOutboundSend(
 			.set({ rfcMessageId })
 			.where(eq(messages.id, message.id));
 
-		const raw = composeMime(
+		raw = composeMime(
 			{
 				messageId: message.id,
 				fromAddr: message.fromAddr,
@@ -95,16 +123,6 @@ export async function processOutboundSend(
 			bcc: parseMailboxes(message.bccAddr),
 			raw,
 		});
-
-		await db
-			.update(messages)
-			.set({ status: "sent" })
-			.where(eq(messages.id, message.id));
-		await db
-			.update(outboundJobs)
-			.set({ status: "sent", sentAt: new Date() })
-			.where(eq(outboundJobs.id, job.id));
-		await dispatchMessageEvent(env, "message.sent", message.id);
 	} catch (err) {
 		const attempts = job.attempts + 1;
 		const lastError = err instanceof Error ? err.message : String(err);
@@ -137,5 +155,23 @@ export async function processOutboundSend(
 			{ kind: "outbound.send", jobId: job.id, messageId: message.id },
 			{ delaySeconds: delay },
 		);
+		return;
+	}
+
+	// ここから下は送信済み。失敗しても再送はしない（再送すると同じメールが再度届く）。
+	// DB 更新や Webhook 配信の失敗は、送信自体の成否とは別に記録するだけにとどめる。
+	try {
+		await db.update(messages).set({ status: "sent" }).where(eq(messages.id, message.id));
+		await db
+			.update(outboundJobs)
+			.set({ status: "sent", sentAt: new Date() })
+			.where(eq(outboundJobs.id, job.id));
+		await dispatchMessageEvent(env, "message.sent", message.id);
+	} catch (err) {
+		console.error("送信後の記録に失敗（メール自体は送信済み）", {
+			jobId: job.id,
+			messageId: message.id,
+			error: err instanceof Error ? err.message : String(err),
+		});
 	}
 }

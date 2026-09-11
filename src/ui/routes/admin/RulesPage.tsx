@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AdminAddress, DomainSummary, Rule, RuleAction, RuleScope } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -64,34 +64,41 @@ function RuleTargetLabel({
 	return <span className="font-medium text-[var(--text)]">{addresses.find((a) => a.id === rule.addressId)?.address ?? rule.addressId}</span>;
 }
 
-function CreateRuleModal({
+// 作成と編集で項目が完全に同じなので 1 つにしてある。rule があれば編集。
+function RuleModal({
 	scope,
 	domains,
 	addresses,
+	rule,
 	onClose,
-	onCreated,
+	onSaved,
 }: {
 	scope: RuleScope;
 	domains: DomainSummary[];
 	addresses: AdminAddress[];
+	rule?: Rule;
 	onClose: () => void;
-	onCreated: () => void;
+	onSaved: () => void;
 }) {
-	const [domainId, setDomainId] = useState(domains[0]?.id ?? "");
-	const [addressId, setAddressId] = useState(addresses.find((a) => a.kind === "mailbox")?.id ?? "");
-	const [name, setName] = useState("");
-	const [action, setAction] = useState<RuleAction>(actionsForScope[scope][0] ?? "deliver");
-	const [matcherFrom, setMatcherFrom] = useState("");
-	const [matcherTo, setMatcherTo] = useState("");
-	const [matcherSubject, setMatcherSubject] = useState("");
-	const [matcherContains, setMatcherContains] = useState("");
-	const [target, setTarget] = useState("");
-	const [priority, setPriority] = useState(0);
-	const [enabled, setEnabled] = useState(true);
+	const [domainId, setDomainId] = useState(rule?.domainId ?? domains[0]?.id ?? "");
+	const [addressId, setAddressId] = useState(
+		rule?.addressId ?? addresses.find((a) => a.kind === "mailbox")?.id ?? "",
+	);
+	const [name, setName] = useState(rule?.name ?? "");
+	const [action, setAction] = useState<RuleAction>(
+		rule?.action ?? actionsForScope[scope][0] ?? "deliver",
+	);
+	const [matcherFrom, setMatcherFrom] = useState(rule?.matcher.from ?? "");
+	const [matcherTo, setMatcherTo] = useState(rule?.matcher.to ?? "");
+	const [matcherSubject, setMatcherSubject] = useState(rule?.matcher.subject ?? "");
+	const [matcherContains, setMatcherContains] = useState(rule?.matcher.contains ?? "");
+	const [target, setTarget] = useState(rule?.target ?? "");
+	const [priority, setPriority] = useState(rule?.priority ?? 0);
+	const [enabled, setEnabled] = useState(rule?.enabled ?? true);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 
-	const create = async () => {
+	const save = async () => {
 		setError("");
 		setBusy(true);
 		try {
@@ -101,7 +108,7 @@ function CreateRuleModal({
 			if (matcherSubject) matcher.subject = matcherSubject;
 			if (matcherContains) matcher.contains = matcherContains;
 
-			await api.post("/api/v1/admin/rules", {
+			const body = {
 				scope,
 				domainId: scope === "domain" ? domainId : undefined,
 				addressId: scope === "address" ? addressId : undefined,
@@ -111,10 +118,18 @@ function CreateRuleModal({
 				target: target.trim() || null,
 				priority,
 				enabled,
-			});
-			onCreated();
+			};
+			if (rule) await api.patch(`/api/v1/admin/rules/${rule.id}`, body);
+			else await api.post("/api/v1/admin/rules", body);
+			onSaved();
 		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "ルールの作成に失敗しました");
+			setError(
+				e instanceof ApiClientError
+					? e.message
+					: rule
+						? "ルールの更新に失敗しました"
+						: "ルールの作成に失敗しました",
+			);
 		} finally {
 			setBusy(false);
 		}
@@ -123,7 +138,10 @@ function CreateRuleModal({
 	const valid = name && (scope === "domain" ? domainId : addressId);
 
 	return (
-		<Modal title={`ルールを作成（${scopeInfo[scope].title}）`} onClose={onClose}>
+		<Modal
+			title={`${rule ? "ルールを編集" : "ルールを作成"}（${scopeInfo[scope].title}）`}
+			onClose={onClose}
+		>
 			<ErrorBanner message={error} onDismiss={() => setError("")} />
 			<div className="space-y-4">
 				<Notice tone={scopeInfo[scope].tone}>{scopeInfo[scope].description}</Notice>
@@ -216,8 +234,8 @@ function CreateRuleModal({
 					<Button variant="secondary" onClick={onClose}>
 						キャンセル
 					</Button>
-					<Button onClick={create} disabled={busy || !valid}>
-						作成する
+					<Button onClick={save} disabled={busy || !valid}>
+						{rule ? "保存する" : "作成する"}
 					</Button>
 				</div>
 			</div>
@@ -230,13 +248,17 @@ function RuleTable({
 	rules,
 	domains,
 	addresses,
+	onEdit,
 	onDelete,
+	onChanged,
 }: {
 	scope: RuleScope;
 	rules: Rule[];
 	domains: DomainSummary[];
 	addresses: AdminAddress[];
+	onEdit: (r: Rule) => void;
 	onDelete: (r: Rule) => void;
+	onChanged: () => void;
 }) {
 	const info = scopeInfo[scope];
 	return (
@@ -244,7 +266,14 @@ function RuleTable({
 			<CardHeader
 				title={info.title}
 				description={info.description}
-				action={<AddButton scope={scope} domains={domains} addresses={addresses} />}
+				action={
+						<AddButton
+							scope={scope}
+							domains={domains}
+							addresses={addresses}
+							onCreated={onChanged}
+						/>
+					}
 			/>
 			{rules.length === 0 ? (
 				<EmptyState message="このスコープのルールはまだありません。" />
@@ -283,9 +312,14 @@ function RuleTable({
 									<Badge color={r.enabled ? "green" : "gray"}>{r.enabled ? "有効" : "無効"}</Badge>
 								</td>
 								<td className={tdCls}>
-									<Button variant="danger" onClick={() => onDelete(r)}>
-										削除
-									</Button>
+									<div className="flex items-center gap-1">
+										<Button variant="secondary" onClick={() => onEdit(r)}>
+											編集
+										</Button>
+										<Button variant="danger" onClick={() => onDelete(r)}>
+											削除
+										</Button>
+									</div>
 								</td>
 							</TableRow>
 						))}
@@ -315,22 +349,27 @@ function AddButton({
 	scope,
 	domains,
 	addresses,
+	onCreated,
 }: {
 	scope: RuleScope;
 	domains: DomainSummary[];
 	addresses: AdminAddress[];
+	onCreated: () => void;
 }) {
 	const [open, setOpen] = useState(false);
 	return (
 		<>
 			<Button onClick={() => setOpen(true)}>ルールを追加</Button>
 			{open && (
-				<CreateRuleModal
+				<RuleModal
 					scope={scope}
 					domains={domains}
 					addresses={addresses}
 					onClose={() => setOpen(false)}
-					onCreated={() => setOpen(false)}
+					onSaved={() => {
+						setOpen(false);
+						onCreated();
+					}}
 				/>
 			)}
 		</>
@@ -352,18 +391,19 @@ export function RulesPage() {
 	const [domains, setDomains] = useState<DomainSummary[]>([]);
 	const [addresses, setAddresses] = useState<AdminAddress[]>([]);
 	const [error, setError] = useState("");
+	const [editTarget, setEditTarget] = useState<Rule | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<Rule | null>(null);
 
 	const load = useCallback(async () => {
 		try {
-			const [rRes, dRes, aRes] = await Promise.all([
-				api.get<{ data: Rule[] }>("/api/v1/admin/rules"),
-				api.get<{ data: DomainSummary[] }>("/api/v1/admin/domains"),
-				api.get<{ data: AdminAddress[] }>("/api/v1/admin/addresses"),
+			const [ruleList, domainList, addressList] = await Promise.all([
+				getAllPages<Rule>("/api/v1/admin/rules"),
+				getAllPages<DomainSummary>("/api/v1/admin/domains"),
+				getAllPages<AdminAddress>("/api/v1/admin/addresses"),
 			]);
-			setRules(rRes.data);
-			setDomains(dRes.data);
-			setAddresses(aRes.data);
+			setRules(ruleList);
+			setDomains(domainList);
+			setAddresses(addressList);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");
 		}
@@ -408,7 +448,9 @@ export function RulesPage() {
 						rules={domainRules}
 						domains={domains}
 						addresses={addresses}
+						onEdit={setEditTarget}
 						onDelete={setDeleteTarget}
+						onChanged={load}
 					/>
 				)}
 
@@ -420,7 +462,23 @@ export function RulesPage() {
 						rules={addressRules}
 						domains={domains}
 						addresses={addresses}
+						onEdit={setEditTarget}
 						onDelete={setDeleteTarget}
+						onChanged={load}
+					/>
+				)}
+
+				{editTarget && (
+					<RuleModal
+						scope={editTarget.scope}
+						domains={domains}
+						addresses={addresses}
+						rule={editTarget}
+						onClose={() => setEditTarget(null)}
+						onSaved={() => {
+							setEditTarget(null);
+							load();
+						}}
 					/>
 				)}
 

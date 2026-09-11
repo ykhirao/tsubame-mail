@@ -79,7 +79,7 @@ export type CreateDomainInput = z.infer<typeof createDomainInput>;
 
 export const catchAllInput = z.object({
 	enabled: z.boolean(),
-	/** 有効化するときだけ必須。ゾーン単位で効くので明示を要求する。 */
+	/** 有効化・無効化とも必須。ゾーン単位で効くので明示を要求する。 */
 	confirm: z.boolean().default(false),
 });
 export type CatchAllInput = z.infer<typeof catchAllInput>;

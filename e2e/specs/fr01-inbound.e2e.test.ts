@@ -113,6 +113,45 @@ describe("FR-1 受信", () => {
 		expect(threadIds.size).toBe(1);
 	});
 
+	scenario("FR-1", "他人の Message-ID を In-Reply-To に入れた第三者のメールは、その会話に混ざらない", async () => {
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test", subject: "契約の件", messageId: "trust-0001" }),
+		});
+		await drainQueues(h);
+
+		await deliverEmail(h, {
+			from: "evil@attacker.example",
+			to: "ai@mail.tsubame.test",
+			raw: mime({
+				from: "a@ext.jp の担当 <evil@attacker.example>",
+				to: "ai@mail.tsubame.test",
+				subject: "Re: 契約の件",
+				messageId: "evil-0001",
+				inReplyTo: "trust-0001@tsubame.test",
+			}),
+		});
+		await drainQueues(h);
+
+		const res = await owner.get("/api/v1/messages?limit=10");
+		const threadIds = new Set(res.body.data.map((m: any) => m.threadId));
+		expect(res.body.data).toHaveLength(2);
+		expect(threadIds.size).toBe(2);
+	});
+
+	scenario("FR-1", "25MB を超えるメールは R2 に置く前に受信ハンドラで拒否する", async () => {
+		const result = await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test", body: "a".repeat(25 * 1024 * 1024) }),
+		});
+		expect(result.rejected).toContain("上限");
+		expect(h.pending).toHaveLength(0);
+		const listed = await h.env.BUCKET.list({ prefix: "raw/" });
+		expect(listed.objects).toHaveLength(0);
+	});
+
 	scenario("FR-1", "+タグ付きのアドレスは元のメールボックスに届く", async () => {
 		const result = await deliverEmail(h, {
 			from: "a@ext.jp",

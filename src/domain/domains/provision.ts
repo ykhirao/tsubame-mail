@@ -2,7 +2,7 @@
  * catch-all は既定で有効化しない。Cloudflare の catch-all はゾーン単位で、
  * apex の MX を奪った瞬間にゾーン宛の全メールを飲み込む。
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { addresses, domains } from "@/db/schema";
 import { newId } from "@/lib/id";
@@ -89,7 +89,7 @@ export async function resolveZone(
 	input: { name: string; zoneId?: string },
 ): Promise<{ id: string; name: string }> {
 	const name = normalizeDnsName(input.name);
-	const zones = await api.listAllZones();
+	const zones = (await api.listAllZones()).filter((z) => z.account?.id === api.accountId);
 
 	if (input.zoneId) {
 		const zone = zones.find((z) => z.id === input.zoneId);
@@ -151,18 +151,36 @@ export function sendingStatusOf(state: SendingDnsState): "pending" | "active" {
 	return state.spf && state.dkim ? "active" : "pending";
 }
 
+async function listRoutingRuleMap(api: CloudflareApi, zone: ZoneRef): Promise<Map<string, string>> {
+	const rules = await api.listEmailRoutingRules(zone);
+	const map = new Map<string, string>();
+	for (const rule of rules) {
+		const id = routingRuleId(rule);
+		for (const m of rule.matchers) {
+			if (m.field === "to" && m.value) map.set(m.value.trim().toLowerCase(), id ?? "");
+		}
+	}
+	return map;
+}
+
 export async function ensureAddressRoutingRule(
 	api: CloudflareApi,
-	params: { zone: ZoneRef; address: string; workerName: string },
+	params: { zone: ZoneRef; address: string; workerName: string; existing?: Map<string, string> },
 ): Promise<string | null> {
 	const address = params.address.trim().toLowerCase();
-	const existing = await api.listEmailRoutingRules(params.zone);
-	const found = existing.find((rule) =>
-		rule.matchers.some(
-			(m) => m.field === "to" && (m.value ?? "").trim().toLowerCase() === address,
-		),
-	);
-	if (found) return routingRuleId(found);
+	const existing =
+		params.existing ??
+		new Map(
+			(await api.listEmailRoutingRules(params.zone))
+				.map((rule) => {
+					const id = routingRuleId(rule);
+					const m = rule.matchers.find((x) => x.field === "to" && x.value);
+					return m && id ? ([m.value!.trim().toLowerCase(), id] as const) : null;
+				})
+				.filter((e): e is readonly [string, string] => e !== null),
+		);
+	const found = existing.get(address);
+	if (found) return found;
 
 	const created = await api.createEmailRoutingRule(params.zone, {
 		name: `tsubame: ${address}`,
@@ -170,7 +188,9 @@ export async function ensureAddressRoutingRule(
 		actions: [workerAction(params.workerName)],
 		enabled: true,
 	});
-	return routingRuleId(created);
+	const id = routingRuleId(created);
+	if (id) existing.set(address, id);
+	return id;
 }
 
 /** 宛先 Worker が一致するルールしか消さない。他が作ったルールは残す。 */
@@ -236,6 +256,7 @@ export async function provisionDomain(params: {
 	});
 
 	const createdAddressIds: string[] = [];
+	let existingRules: Map<string, string> | null = null;
 	let routingStatus: "pending" | "active" | "error" = "pending";
 	let sendingStatus: "disabled" | "pending" | "active" | "error" =
 		input.enableSending === false ? "disabled" : "pending";
@@ -252,7 +273,8 @@ export async function provisionDomain(params: {
 			const localPart = rawLocal.trim().toLowerCase();
 			if (!localPart) continue;
 			const address = `${localPart}@${name}`;
-			await ensureAddressRoutingRule(api, { zone, address, workerName });
+			if (!existingRules) existingRules = await listRoutingRuleMap(api, zone);
+			await ensureAddressRoutingRule(api, { zone, address, workerName, existing: existingRules });
 			const addressId = newId("address");
 			await db.insert(addresses).values({
 				id: addressId,
@@ -324,6 +346,17 @@ export async function verifyDomain(params: {
 	const { db, api, domain } = params;
 	const zone = { id: domain.zoneId, name: domain.zoneName };
 
+	// 接続の途中で失敗した分をここで拾い直す。読み直すだけだと、オンボーディング
+	// 自体が通っていないドメインが pending のまま永久に直らない。
+	let lastError: string | null = null;
+	if (domain.sendingStatus !== "disabled" && domain.sendingStatus !== "active") {
+		try {
+			await api.enableEmailSending(zone, domain.name);
+		} catch (err) {
+			lastError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
 	const records = await api.listDnsRecords(zone);
 	const dnsCheck = inspectDnsRecords({
 		name: domain.name,
@@ -337,11 +370,15 @@ export async function verifyDomain(params: {
 		? "active"
 		: "pending";
 	const sendingStatus: "disabled" | "pending" | "active" | "error" =
-		domain.sendingStatus === "disabled" ? "disabled" : sendingStatusOf(sending);
+		domain.sendingStatus === "disabled"
+			? "disabled"
+			: lastError
+				? "error"
+				: sendingStatusOf(sending);
 
 	await db
 		.update(domains)
-		.set({ routingStatus, sendingStatus, lastError: null })
+		.set({ routingStatus, sendingStatus, lastError })
 		.where(eq(domains.id, domain.id));
 
 	return {
@@ -351,7 +388,7 @@ export async function verifyDomain(params: {
 		sendingStatus,
 		dnsCheck,
 		sending,
-		lastError: null,
+		lastError,
 	};
 }
 
@@ -362,7 +399,31 @@ export type CatchAllResult = {
 	catchAllAddress: string | null;
 };
 
-/** 有効化はゾーン全体に効く。呼び出し側で明示の確認を取ること。 */
+/**
+ * ゾーンの catch-all は 1 本しかない。別のドメインが「有効」と記録している間に
+ * 落とすと、そのドメインの受け皿に黙って届かなくなるので破壊を避ける。
+ */
+export async function assertZoneCatchAllSafe(
+	db: Db,
+	params: { zoneId: string; domainId: string },
+): Promise<void> {
+	const others = await db
+		.select({ id: domains.id })
+		.from(domains)
+		.where(
+			and(
+				eq(domains.zoneId, params.zoneId),
+				eq(domains.catchAllEnabled, true),
+				ne(domains.id, params.domainId),
+			),
+		);
+	if (others.length > 0) {
+		throw conflict(
+			"このゾーンでは別のドメインが catch-all を有効にしています。ゾーン単位の catch-all は 1 本しかないので、先にそちらを無効化してください。",
+		);
+	}
+}
+
 export async function setCatchAll(params: {
 	db: Db;
 	api: CloudflareApi;
@@ -378,10 +439,14 @@ export async function setCatchAll(params: {
 		where: and(eq(addresses.domainId, domain.id), eq(addresses.isCatchAll, true)),
 	});
 
-	if (enabled && !catchAllAddress) {
-		throw invalidRequest(
-			"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
-		);
+	if (enabled) {
+		if (!catchAllAddress) {
+			throw invalidRequest(
+				"catch-all を有効にする前に、受け皿になるアドレス（isCatchAll: true）を 1 件作ってください。",
+			);
+		}
+	} else {
+		await assertZoneCatchAllSafe(db, { zoneId: domain.zoneId, domainId: domain.id });
 	}
 
 	await api.updateCatchAllRule(zone, {

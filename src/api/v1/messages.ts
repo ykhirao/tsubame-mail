@@ -3,7 +3,9 @@ import { eq, sql } from "drizzle-orm";
 import { messages, threads } from "@/db/schema";
 import type { Db } from "@/db/client";
 import type { AppEnv } from "@/api/types";
-import { invalidRequest, notFound } from "@/shared/errors";
+import { readJson } from "@/lib/validate";
+import { forbidden, invalidRequest, notFound } from "@/shared/errors";
+import { canWrite, requireScope } from "@/domain/access/policy";
 import {
 	messageListQuery,
 	messagePatch,
@@ -107,6 +109,7 @@ async function toDetail(db: Db, m: MessageRow): Promise<MessageDetail> {
 routes.get("/", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const parsed = messageListQuery.safeParse(c.req.query());
 	if (!parsed.success) {
 		throw invalidRequest("検索パラメータが不正です", zodIssues(parsed));
@@ -137,24 +140,31 @@ routes.get("/", async (c) => {
 routes.get("/:id", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const id = c.req.param("id");
 	const m = await getMessage(db, principal, id, true);
 	if (!m) throw notFound("メッセージが見つかりません");
 	return c.json(await toDetail(db, m));
 });
 
+// 既読・スターは閲覧に付随する操作なので read で通す。read 割り当ての共有メンバーでも
+// スレッドを開くと既読付けが走る（ThreadDetail.tsx）ため、write を要求すると画面が壊れる。
+// status の変更（ゴミ箱への移動など）だけは send スコープと書き込み権限を必要とする。
 routes.patch("/:id", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const id = c.req.param("id");
-	const body = messagePatch.safeParse(await c.req.json());
-	if (!body.success) {
-		throw invalidRequest("更新内容が不正です", zodIssues(body));
-	}
-	const p = body.data;
+	const p = await readJson(c.req, messagePatch);
 
 	const cur = await getMessage(db, principal, id);
 	if (!cur) throw notFound("メッセージが見つかりません");
+	if (p.status !== undefined) {
+		requireScope(principal, "send");
+		if (!canWrite(principal, cur.addressId)) {
+			throw forbidden("このアドレスのメッセージを移動する権限がありません");
+		}
+	}
 
 	const update: Partial<{
 		isRead: boolean;

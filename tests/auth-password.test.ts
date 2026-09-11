@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { DEFAULT_ITERATIONS, hashPassword, needsRehash, verifyPassword } from "@/lib/password";
+import { describe, expect, it, vi } from "vitest";
+import {
+	DEFAULT_ITERATIONS,
+	DUMMY_PASSWORD_HASH,
+	generateTemporaryPassword,
+	hashPassword,
+	needsRehash,
+	verifyPassword,
+} from "@/lib/password";
 import {
 	API_KEY_PREFIX,
 	apiKeyPrefix,
@@ -52,6 +59,69 @@ describe("hashPassword / verifyPassword", () => {
 		const weak = await hashPassword("some-password-value", 1000);
 		expect(needsRehash(weak)).toBe(true);
 		expect(needsRehash(await hashPassword("some-password-value"))).toBe(false);
+	});
+
+	it("DUMMY_PASSWORD_HASH は既定の反復回数の本物のハッシュとして解釈できる（#26）", async () => {
+		const parts = DUMMY_PASSWORD_HASH.split("$");
+		expect(parts).toHaveLength(5);
+		expect(Number(parts[2])).toBe(DEFAULT_ITERATIONS);
+		// どのパスワードとも一致しない（一致してしまうと想定外の分岐になる）。
+		expect(await verifyPassword("password", DUMMY_PASSWORD_HASH)).toBe(false);
+		// needsRehash はログイン成功時だけ走る経路なので、ダミーに対して呼んでも例外にならないことだけ確認する。
+		expect(needsRehash(DUMMY_PASSWORD_HASH)).toBe(false);
+	});
+});
+
+describe("generateTemporaryPassword（#53）", () => {
+	const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+	it("256 を超えて捨てるべきバイト（224 以上）を引いたら、その分だけ引き直す", () => {
+		// alphabet.length = 56、256 - (256 % 56) = 224 が採用する境目。
+		// 1 回目のチャンクに境目以上のバイトだけを混ぜても、それを飛ばして
+		// 2 回目のチャンクから文字を補うことを crypto.getRandomValues をモックして直接確認する
+		// （統計的な検定はサンプル数に依存して揺れるため避ける）。
+		const spy = vi.spyOn(crypto, "getRandomValues");
+		const chunks: number[][] = [
+			[255, 224], // どちらも 224 以上なので 2 つとも捨てられ、1 文字も採用されない
+			[5, 0], // 引き直しの 2 バイトはどちらも採用される
+		];
+		let call = 0;
+		// @ts-expect-error テスト用に Uint8Array 以外の呼び出しは考慮しない
+		spy.mockImplementation((arr: Uint8Array) => {
+			const bytes = chunks[call] ?? [0];
+			call++;
+			arr.set(bytes.slice(0, arr.length));
+			return arr;
+		});
+
+		const pw = generateTemporaryPassword(2);
+		expect(call).toBe(2);
+		expect(pw).toBe(`${alphabet[5]}${alphabet[0]}`);
+		spy.mockRestore();
+	});
+
+	it("境目ちょうど（224）も捨てる", () => {
+		const spy = vi.spyOn(crypto, "getRandomValues");
+		const chunks: number[][] = [[224], [2]];
+		let call = 0;
+		// @ts-expect-error テスト用に Uint8Array 以外の呼び出しは考慮しない
+		spy.mockImplementation((arr: Uint8Array) => {
+			const bytes = chunks[call] ?? [0];
+			call++;
+			arr.set(bytes.slice(0, arr.length));
+			return arr;
+		});
+
+		const pw = generateTemporaryPassword(1);
+		expect(call).toBe(2);
+		expect(pw).toBe(alphabet[2]);
+		spy.mockRestore();
+	});
+
+	it("既定の長さと文字種は変わらない", () => {
+		const pw = generateTemporaryPassword();
+		expect(pw).toHaveLength(20);
+		expect(pw).toMatch(/^[abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789]+$/);
 	});
 });
 

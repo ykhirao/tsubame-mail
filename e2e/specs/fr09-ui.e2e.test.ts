@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
-import { freshHarness, loginAsOwner, seedDomain, type Client, type Harness } from "../harness";
+import {
+	deliverEmail,
+	drainQueues,
+	freshHarness,
+	loginAsOwner,
+	mime,
+	seedDomain,
+	type Client,
+	type Harness,
+} from "../harness";
 
 describe("FR-9 UI", () => {
 	let h: Harness;
@@ -118,6 +127,30 @@ describe("FR-9 UI", () => {
 			const res = await hit(r.method, path, r.body);
 			assertRouteExists(r.method, path, res);
 		}
+	});
+
+	scenario("FR-9", "送信者が書いた中身を API から開いても、何も読み込ませず埋め込ませない", async () => {
+		await seedDomain(h, { addresses: ["ai"] });
+		const raw = mime({
+			from: "someone@ext.example.jp",
+			to: "ai@mail.tsubame.test",
+			subject: "HTML を仕込んだメール",
+			body: '<script>alert(1)</script><img src="https://attacker.example/p.png">',
+		});
+		await deliverEmail(h, { from: "someone@ext.example.jp", to: "ai@mail.tsubame.test", raw });
+		await drainQueues(h);
+
+		const list = await owner.get("/api/v1/messages?limit=1");
+		const res = await owner.get(`/api/v1/messages/${list.body.data[0].id}/raw`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
+		expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+		expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(res.headers.get("x-frame-options")).toBe("DENY");
+
+		const denied = await owner.get("/api/v1/messages/msg_nope");
+		expect(denied.status).toBe(404);
+		expect(denied.headers.get("content-security-policy")).toContain("default-src 'none'");
 	});
 
 	scenario("FR-9", "作成画面が使う差出人の一覧が空にならない", async () => {

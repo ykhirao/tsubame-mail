@@ -14,12 +14,14 @@ import {
 	resolveMailboxId,
 	toUnix,
 } from "@/domain/search/sql";
+import { requireScope } from "@/domain/access/policy";
 
 const routes = new Hono<AppEnv>();
 
 routes.get("/", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const parsed = threadListQuery.safeParse(c.req.query());
 	if (!parsed.success) {
 		throw invalidRequest(
@@ -72,6 +74,7 @@ routes.get("/", async (c) => {
 routes.get("/:id", async (c) => {
 	const db = c.get("db");
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const id = c.req.param("id");
 
 	const thread = await getThread(db, principal, id);

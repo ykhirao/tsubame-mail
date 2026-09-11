@@ -7,8 +7,10 @@ import {
 	asc,
 	desc,
 	eq,
+	exists,
 	inArray,
 	like,
+	ne,
 	sql,
 	type SQL,
 } from "drizzle-orm";
@@ -134,7 +136,7 @@ function buildMessageConditions(
 	filters: MessageListFilters,
 ): SQL[] {
 	const conds: SQL[] = [];
-	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+	if (principal.addressIds !== "all") {
 		conds.push(inArray(messages.addressId, principal.addressIds));
 	}
 	const s = filters.search;
@@ -228,7 +230,7 @@ export async function getMessage(
 	withBody = false,
 ): Promise<MessageRow | null> {
 	const conds: SQL[] = [eq(messages.id, messageId)];
-	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+	if (principal.addressIds !== "all") {
 		conds.push(inArray(messages.addressId, principal.addressIds));
 	}
 	const columns = withBody
@@ -258,6 +260,8 @@ export type ThreadListParams = {
 	addressId?: string;
 	limit: number;
 	cursor?: string;
+	/** 既定 false。true でゴミ箱しか持たないスレッドも返す。 */
+	includeTrash?: boolean;
 };
 
 const threadColumns = {
@@ -274,7 +278,7 @@ export async function queryThreads(
 	params: ThreadListParams,
 ): Promise<{ rows: ThreadRow[]; nextCursor: string | null }> {
 	const conds: SQL[] = [];
-	if (params.principal.addressIds !== "all" && params.principal.addressIds.length > 0) {
+	if (params.principal.addressIds !== "all") {
 		conds.push(inArray(threads.addressId, params.principal.addressIds));
 	}
 	if (params.addressId) conds.push(eq(threads.addressId, params.addressId));
@@ -282,6 +286,17 @@ export async function queryThreads(
 		const cur = decodeCursor(params.cursor);
 		if (!cur) throw invalidRequest("カーソルが不正です");
 		conds.push(threadCursorCondition(cur));
+	}
+	if (!params.includeTrash) {
+		// メッセージが全てゴミ箱（drop ルールなど）のスレッドを受信箱に出さない（#92）。
+		conds.push(
+			exists(
+				db
+					.select({ one: sql`1` })
+					.from(messages)
+					.where(and(eq(messages.threadId, threads.id), ne(messages.status, "trash"))),
+			),
+		);
 	}
 	const where = conds.length > 0 ? and(...conds) : undefined;
 
@@ -300,7 +315,7 @@ export async function queryThreads(
 	if (hasMore && last) {
 		nextCursor = encodeCursor(toUnix(last.lastMessageAt), last.id);
 	}
-	return { rows: await withLastMessage(db, page), nextCursor };
+	return { rows: await withLastMessage(db, page, !params.includeTrash), nextCursor };
 }
 
 // スレッドごとに 1 クエリ投げず、ページ分をまとめて引いて JS 側で最新を選ぶ。
@@ -310,10 +325,13 @@ async function withLastMessage(
 		ThreadRow,
 		"address" | "addressColor" | "lastFromAddr" | "lastFromName" | "snippet" | "hasAttachments" | "isStarred"
 	>[],
+	excludeTrash: boolean,
 ): Promise<ThreadRow[]> {
 	const ids = page.map((t) => t.id);
 	if (ids.length === 0) return [];
 
+	const msgConds: SQL[] = [inArray(messages.threadId, ids)];
+	if (excludeTrash) msgConds.push(ne(messages.status, "trash"));
 	const rows = await db
 		.select({
 			threadId: messages.threadId,
@@ -325,7 +343,7 @@ async function withLastMessage(
 			receivedAt: messages.receivedAt,
 		})
 		.from(messages)
-		.where(inArray(messages.threadId, ids))
+		.where(and(...msgConds))
 		.orderBy(asc(messages.receivedAt))
 		.all();
 
@@ -367,31 +385,38 @@ export async function getThread(
 	db: Db,
 	principal: Principal,
 	threadId: string,
+	includeTrash = false,
 ): Promise<ThreadRow | null> {
 	const row = await db.select(threadColumns).from(threads).where(eq(threads.id, threadId)).get();
 	if (!row) return null;
 	if (principal.addressIds !== "all" && !principal.addressIds.includes(row.addressId)) {
 		return null;
 	}
-	const [withSummary] = await withLastMessage(db, [row]);
+	const [withSummary] = await withLastMessage(db, [row], !includeTrash);
 	return withSummary ?? null;
 }
+
+/** 同じ From への接ぎ木を無限に続けられても、1 スレッドで返す本文量に上限を付ける。 */
+export const MAX_THREAD_MESSAGES = 200;
 
 export async function queryThreadMessages(
 	db: Db,
 	principal: Principal,
 	threadId: string,
+	includeTrash = false,
 ): Promise<MessageRow[]> {
 	const conds: SQL[] = [eq(messages.threadId, threadId)];
-	if (principal.addressIds !== "all" && principal.addressIds.length > 0) {
+	if (principal.addressIds !== "all") {
 		conds.push(inArray(messages.addressId, principal.addressIds));
 	}
+	if (!includeTrash) conds.push(ne(messages.status, "trash"));
 	return db
 		.select({ ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody })
 		.from(messages)
 		.where(and(...conds))
 		// 同じ秒に届いた分は rowid で決める。id は nanoid なので順序を持たない。
 		.orderBy(messages.receivedAt, sql`rowid`)
+		.limit(MAX_THREAD_MESSAGES)
 		.all();
 }
 
@@ -427,7 +452,8 @@ export function decodeCursor(
 		let s = cursor.replace(/-/g, "+").replace(/_/g, "/");
 		while (s.length % 4 !== 0) s += "=";
 		const decoded = atob(s);
-		const m = decoded.match(/^(\d+):(.+)$/);
+		// received_at は外れ値クランプの前は負数もありえた（#19）。cursor 自体は正負どちらも読めてよい。
+		const m = decoded.match(/^(-?\d+):(.+)$/);
 		if (!m) return null;
 		return { receivedAt: Number(m[1]), id: m[2]! };
 	} catch {

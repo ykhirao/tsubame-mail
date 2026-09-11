@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AdminAddress, AdminUser, ApiKeySummary, CreatedApiKey, Scope } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -270,15 +270,15 @@ export function ApiKeysPage() {
 
 	const load = useCallback(async () => {
 		try {
-			const [kRes, uRes, aRes] = await Promise.all([
-				api.get<{ data: ApiKeySummary[] }>("/api/v1/admin/api-keys"),
-				api.get<{ data: AdminUser[] }>("/api/v1/admin/users"),
+			const [keyList, userList, aRes] = await Promise.all([
+				getAllPages<ApiKeySummary>("/api/v1/admin/api-keys"),
+				getAllPages<AdminUser>("/api/v1/admin/users"),
 				api.get<{ data: AdminAddress[] }>("/api/v1/admin/addresses"),
 			]);
-			setKeys(kRes.data);
-			setUsers(uRes.data);
+			setKeys(keyList);
+			setUsers(userList);
 			setAddresses(aRes.data);
-			setUsersByName(Object.fromEntries(uRes.data.map((u) => [u.id, u])));
+			setUsersByName(Object.fromEntries(userList.map((u) => [u.id, u])));
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");
 		}

@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { attachments, messages } from "@/db/schema";
 import { getAttachment, getRaw } from "@/services/r2";
 import { notFound } from "@/shared/errors";
+import { requireScope } from "@/domain/access/policy";
 import type { AppEnv } from "@/api/types";
 
 export const attachmentsRouter = new Hono<AppEnv>();
@@ -19,8 +20,26 @@ function assertCanAccess(addressIds: string[] | "all", addressId: string): void 
 	}
 }
 
+// 型は送信者が MIME に書いた値なので、そのまま返すと攻撃者の text/html や SVG を
+// このアプリのオリジンから配ることになる。ブラウザが開いても害の無い型だけを通す。
+const SAFE_CONTENT_TYPES = new Set([
+	"image/png",
+	"image/jpeg",
+	"image/gif",
+	"image/webp",
+	"application/pdf",
+	"text/plain",
+	"text/csv",
+]);
+
+function servedContentType(declared: string): string {
+	const essence = declared.split(";")[0]!.trim().toLowerCase();
+	return SAFE_CONTENT_TYPES.has(essence) ? essence : "application/octet-stream";
+}
+
 attachmentsRouter.get("/:id", async (c) => {
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const db = c.get("db");
 
 	const att = await db.select().from(attachments).where(eq(attachments.id, c.req.param("id"))).get();
@@ -33,7 +52,7 @@ attachmentsRouter.get("/:id", async (c) => {
 	const obj = await getAttachment(c.env, att.r2Key);
 	if (!obj) throw notFound("添付の本文が見つかりません");
 
-	c.header("Content-Type", att.contentType);
+	c.header("Content-Type", servedContentType(att.contentType));
 	c.header(
 		"Content-Disposition",
 		`attachment; filename*=UTF-8''${encodeURIComponent(att.filename)}`,
@@ -43,6 +62,7 @@ attachmentsRouter.get("/:id", async (c) => {
 
 rawRouter.get("/messages/:id/raw", async (c) => {
 	const principal = c.get("principal");
+	requireScope(principal, "read");
 	const db = c.get("db");
 
 	const msg = await db
@@ -57,6 +77,6 @@ rawRouter.get("/messages/:id/raw", async (c) => {
 	if (!obj) throw notFound("生 MIME が見つかりません");
 
 	c.header("Content-Type", "message/rfc822");
-	c.header("Content-Disposition", `inline; filename="${msg.id}.eml"`);
+	c.header("Content-Disposition", `attachment; filename="${msg.id}.eml"`);
 	return c.body(await obj.arrayBuffer());
 });

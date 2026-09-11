@@ -20,10 +20,16 @@ export const localPart = z
 	.max(64)
 	.regex(/^[a-z0-9._+-]+$/, "ローカル部に使えない文字が含まれています");
 
+const displayName = z
+	.string()
+	.trim()
+	.max(120)
+	.regex(/^[^\r\n\0]*$/, "改行を含められません");
+
 const addressFields = {
 	domainId: z.string().min(1),
 	localPart,
-	displayName: z.string().trim().max(120).optional(),
+	displayName: displayName.optional(),
 	kind: addressKind.default("mailbox"),
 	aliasTargetId: z.string().min(1).optional(),
 	/** ドメインあたり 1 件まで。一意制約はサーバ側で確認する。 */
@@ -43,7 +49,7 @@ export type CreateAddressInput = z.infer<typeof createAddressInput>;
 
 export const updateAddressInput = z
 	.object({
-		displayName: z.string().trim().max(120).nullable().optional(),
+		displayName: displayName.nullable().optional(),
 		signature: z.string().max(2000).nullable().optional(),
 		/** null にすると既定色に戻す。 */
 		color: hexColor.nullable().optional(),

@@ -1,18 +1,19 @@
 import { Hono } from "hono";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { schema } from "@/db/client";
 import { newId } from "@/lib/id";
 import { generateApiKey } from "@/lib/tokens";
 import { readJson, unixSeconds } from "@/lib/validate";
+import { afterCursor, toPage } from "@/lib/paging";
 import {
 	addressSetHas,
 	recordAudit,
 	resolveUserAddressAccess,
 } from "@/domain/access/policy";
-import { adminCreateApiKeyBody } from "@/shared/contracts/api-keys";
+import { adminApiKeyListQuery, adminCreateApiKeyBody } from "@/shared/contracts/api-keys";
 import { invalidRequest, notFound } from "@/shared/errors";
 import { clientIp, getPrincipal, requireOwner } from "../../middleware/auth";
-import { serializeKey } from "../me";
+import { serializeKey, assertAddressesExist } from "../me";
 import type { AppEnv } from "../../types";
 
 const app = new Hono<AppEnv>();
@@ -20,14 +21,23 @@ const app = new Hono<AppEnv>();
 app.use("*", requireOwner);
 
 app.get("/", async (c) => {
+	const query = adminApiKeyListQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", query.error.issues);
+	const { userId, limit, cursor } = query.data;
 	const db = c.get("db");
-	const userId = c.req.query("userId");
 	const rows = await db
 		.select()
 		.from(schema.apiKeys)
-		.where(userId ? eq(schema.apiKeys.userId, userId) : undefined)
-		.orderBy(desc(schema.apiKeys.createdAt));
-	return c.json({ data: rows.map(serializeKey), next_cursor: null });
+		.where(
+			and(
+				userId ? eq(schema.apiKeys.userId, userId) : undefined,
+				afterCursor(schema.apiKeys, cursor, "desc"),
+			),
+		)
+		.orderBy(desc(schema.apiKeys.createdAt), desc(schema.apiKeys.id))
+		.limit(limit + 1);
+	const page = toPage(rows, limit);
+	return c.json({ data: page.rows.map(serializeKey), next_cursor: page.next_cursor });
 });
 
 app.post("/", async (c) => {
@@ -58,6 +68,10 @@ app.post("/", async (c) => {
 	const generated = await generateApiKey();
 	const id = newId("apiKey");
 	const addressIds = requested ? [...new Set(requested)] : null;
+	if (addressIds) await assertAddressesExist(db, addressIds);
+	// zod の max で範囲の手前は落ちるが、NaN のまま保存すると「無期限」として読まれるのでここでも落とす（#83）。
+	const expiresAt = body.expiresAt ? new Date(body.expiresAt * 1000) : null;
+	if (expiresAt && !Number.isFinite(expiresAt.getTime())) throw invalidRequest("expiresAt が不正です");
 
 	await db.insert(schema.apiKeys).values({
 		id,
@@ -67,7 +81,7 @@ app.post("/", async (c) => {
 		keyHash: generated.hash,
 		scopes: [...new Set(body.scopes)],
 		addressIds,
-		expiresAt: body.expiresAt ? new Date(body.expiresAt * 1000) : null,
+		expiresAt,
 	});
 
 	await recordAudit(db, {

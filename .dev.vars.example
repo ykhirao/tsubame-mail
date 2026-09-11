@@ -1,5 +1,4 @@
 # ローカル開発用。Worker Secret に入れるものと同じ名前で置く。
-AUTH_SECRET=
 # 最初のオーナーを作るときの合言葉。20 文字以上。
 # 本番は `openssl rand -base64 32` などで作って Worker Secret に入れる。
 INTERNAL_SECRET=

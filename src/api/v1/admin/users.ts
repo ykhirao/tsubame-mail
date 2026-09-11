@@ -1,11 +1,13 @@
 import { Hono } from "hono";
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
 import { newId } from "@/lib/id";
 import { generateTemporaryPassword, hashPassword } from "@/lib/password";
 import { readJson, unixSeconds } from "@/lib/validate";
-import { countActiveOwners, recordAudit } from "@/domain/access/policy";
+import { afterCursor, toPage } from "@/lib/paging";
+import { recordAudit } from "@/domain/access/policy";
 import {
+	adminUserListQuery,
 	createUserBody,
 	putGrantsBody,
 	updateUserBody,
@@ -50,10 +52,29 @@ async function loadGrants(db: AppEnv["Variables"]["db"], userId: string) {
 		.where(eq(schema.addressGrants.userId, userId));
 }
 
+/**
+ * 「数えてから更新する」の 2 手順の間に別リクエストが割り込むと、2 人の owner が同時に
+ * 互いを降格・無効化・削除して 0 人になりうる（#54）。同じ判定を UPDATE / DELETE の
+ * WHERE 句に埋め込み、1 文で完結させる。
+ */
+function otherActiveOwnersExist(excludeUserId: string) {
+	return sql`(select count(*) from ${schema.users} where ${schema.users.role} = 'owner'
+		and ${schema.users.status} = 'active' and ${schema.users.id} <> ${excludeUserId}) > 0`;
+}
+
 app.get("/", async (c) => {
+	const query = adminUserListQuery.safeParse(c.req.query());
+	if (!query.success) throw invalidRequest("クエリが不正です", query.error.issues);
+	const { limit, cursor } = query.data;
 	const db = c.get("db");
-	const rows = await db.select().from(schema.users).orderBy(asc(schema.users.createdAt));
-	return c.json({ data: rows.map(serializeUser), next_cursor: null });
+	const rows = await db
+		.select()
+		.from(schema.users)
+		.where(afterCursor(schema.users, cursor, "asc"))
+		.orderBy(asc(schema.users.createdAt), asc(schema.users.id))
+		.limit(limit + 1);
+	const page = toPage(rows, limit);
+	return c.json({ data: page.rows.map(serializeUser), next_cursor: page.next_cursor });
 });
 
 app.get("/:id", async (c) => {
@@ -116,13 +137,8 @@ app.patch("/:id", async (c) => {
 	const db = c.get("db");
 
 	const user = await loadUser(db, id);
-
-	// 最後の owner を降格・無効化させない。
-	const losesOwnership =
-		user.role === "owner" &&
-		((body.role !== undefined && body.role !== "owner") || body.status === "disabled");
-	if (losesOwnership && (await countActiveOwners(db, user.id)) === 0) {
-		throw conflict("最後のオーナーを降格・無効化することはできません");
+	if (body.password !== undefined && (body.role ?? user.role) === "agent") {
+		throw invalidRequest("agent ロールはパスワードを持ちません");
 	}
 
 	const patch: Partial<typeof schema.users.$inferInsert> = {};
@@ -130,18 +146,43 @@ app.patch("/:id", async (c) => {
 	if (body.role !== undefined) patch.role = body.role;
 	if (body.status !== undefined) patch.status = body.status;
 	if (body.password !== undefined) {
-		if ((body.role ?? user.role) === "agent") {
-			throw invalidRequest("agent ロールはパスワードを持ちません");
-		}
 		patch.passwordHash = await hashPassword(body.password);
+		// owner が決めたパスワードのまま使い続けられないよう、初回変更を必須にする（#98）。
+		patch.mustChangePassword = true;
 	}
 	if (body.role === "agent") patch.passwordHash = null;
 
-	await db.update(schema.users).set(patch).where(eq(schema.users.id, id));
+	// この PATCH が owner から降ろす／無効化する可能性がある変更かどうかは、
+	// リクエストボディだけで決まる（"owner のまま" の role 指定や name だけの更新は対象外）。
+	const mayLoseOwnership = (body.role !== undefined && body.role !== "owner") || body.status === "disabled";
+	// 「今 owner か」と「他に有効な owner が居るか」を UPDATE の WHERE 句で直接見るので、
+	// 確認と更新の間に別リクエストが割り込む隙間が無い（#54）。
+	const guard = mayLoseOwnership
+		? or(ne(schema.users.role, "owner"), otherActiveOwnersExist(id))
+		: undefined;
+
+	const result = await db
+		.update(schema.users)
+		.set(patch)
+		.where(guard ? and(eq(schema.users.id, id), guard) : eq(schema.users.id, id))
+		.run();
+	if (result.meta.changes === 0) {
+		// WHERE 句が絞った理由（行が無い／ガードに落ちた）を UPDATE の結果だけでは区別できないので、
+		// 404 と 409 を正しく出し分けるために loadUser を挟む。
+		await loadUser(db, id);
+		throw conflict("最後のオーナーを降格・無効化することはできません");
+	}
 
 	// 無効化・降格・パスワード変更のいずれでも、既存セッションは切る。
 	if (body.status === "disabled" || body.role !== undefined || body.password !== undefined) {
 		await db.delete(schema.sessions).where(eq(schema.sessions.userId, id));
+	}
+	// パスワードを変えたら発行済みの API キーも失効させる（#99）。
+	if (body.password !== undefined) {
+		await db
+			.update(schema.apiKeys)
+			.set({ revokedAt: new Date() })
+			.where(and(eq(schema.apiKeys.userId, id), isNull(schema.apiKeys.revokedAt)));
 	}
 
 	await recordAudit(db, {
@@ -149,7 +190,12 @@ app.patch("/:id", async (c) => {
 		action: "user.update",
 		targetType: "user",
 		targetId: id,
-		meta: { name: body.name, role: body.role, status: body.status, password: undefined },
+		meta: {
+			name: body.name,
+			role: body.role,
+			status: body.status,
+			passwordChanged: body.password !== undefined,
+		},
 		ip: clientIp(c),
 	});
 
@@ -162,12 +208,17 @@ app.delete("/:id", async (c) => {
 	const db = c.get("db");
 
 	const user = await loadUser(db, id);
-	if (user.role === "owner" && (await countActiveOwners(db, user.id)) === 0) {
+
+	// 「今 owner か」と「他に有効な owner が居るか」を DELETE の WHERE 句で直接見るので、
+	// 確認と削除の間に別リクエストが割り込む隙間が無い（#54）。
+	// sessions / api_keys / address_grants は外部キーの cascade で消える。
+	const result = await db
+		.delete(schema.users)
+		.where(and(eq(schema.users.id, id), or(ne(schema.users.role, "owner"), otherActiveOwnersExist(id))))
+		.run();
+	if (result.meta.changes === 0) {
 		throw conflict("最後のオーナーを削除することはできません");
 	}
-
-	// sessions / api_keys / address_grants は外部キーの cascade で消える。
-	await db.delete(schema.users).where(eq(schema.users.id, id));
 
 	await recordAudit(db, {
 		actorId: principal.userId,

@@ -23,8 +23,6 @@ declare global {
 			CF_API_TOKEN?: string;
 			/** Cloudflare アカウント ID。Worker Secret または var。 */
 			CF_ACCOUNT_ID?: string;
-			/** セッション Cookie と API キーのハッシュに使うソルト。Worker Secret。 */
-			AUTH_SECRET: string;
 			/**
 			 * 最初のオーナーを作るときの合言葉。**20 文字以上**。Worker Secret。
 			 *

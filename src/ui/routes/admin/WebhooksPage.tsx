@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Webhook, WebhookCreate, WebhookDelivery, WebhookEvent } from "./api";
-import { api, ApiClientError } from "./api";
+import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -29,20 +29,28 @@ const eventLabels: Record<WebhookEvent, string> = {
 	"message.failed": "送信失敗",
 };
 
-function CreateWebhookModal({
+// 作成と編集で入力項目が同じなので 1 つにしてある。secret は作成時しか返らない。
+function WebhookModal({
 	addresses,
+	webhook,
 	onClose,
 	onCreated,
+	onUpdated,
 }: {
 	addresses: { id: string; address: string }[];
+	webhook?: Webhook;
 	onClose: () => void;
-	onCreated: (w: WebhookCreate) => void;
+	onCreated?: (w: WebhookCreate) => void;
+	onUpdated?: () => void;
 }) {
-	const [name, setName] = useState("");
-	const [url, setUrl] = useState("");
-	const [events, setEvents] = useState<WebhookEvent[]>([]);
-	const [addressMode, setAddressMode] = useState<"all" | "specific">("all");
-	const [selected, setSelected] = useState<string[]>([]);
+	const [name, setName] = useState(webhook?.name ?? "");
+	const [url, setUrl] = useState(webhook?.url ?? "");
+	const [events, setEvents] = useState<WebhookEvent[]>(webhook?.events ?? []);
+	const [addressMode, setAddressMode] = useState<"all" | "specific">(
+		webhook?.addressIds ? "specific" : "all",
+	);
+	const [selected, setSelected] = useState<string[]>(webhook?.addressIds ?? []);
+	const [enabled, setEnabled] = useState(webhook?.enabled ?? true);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 
@@ -54,20 +62,31 @@ function CreateWebhookModal({
 		setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 	};
 
-	const create = async () => {
+	const save = async () => {
 		setError("");
 		setBusy(true);
 		try {
-			const res = await api.post<WebhookCreate>("/api/v1/webhooks", {
+			const body = {
 				name,
 				url,
 				events,
 				addressIds: addressMode === "specific" ? selected : null,
-				enabled: true,
-			});
-			onCreated(res);
+				enabled,
+			};
+			if (webhook) {
+				await api.patch(`/api/v1/webhooks/${webhook.id}`, body);
+				onUpdated?.();
+			} else {
+				onCreated?.(await api.post<WebhookCreate>("/api/v1/webhooks", body));
+			}
 		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "Webhook の作成に失敗しました");
+			setError(
+				e instanceof ApiClientError
+					? e.message
+					: webhook
+						? "Webhook の更新に失敗しました"
+						: "Webhook の作成に失敗しました",
+			);
 		} finally {
 			setBusy(false);
 		}
@@ -76,7 +95,7 @@ function CreateWebhookModal({
 	const valid = name && url && events.length > 0;
 
 	return (
-		<Modal title="Webhook を作成" onClose={onClose}>
+		<Modal title={webhook ? "Webhook を編集" : "Webhook を作成"} onClose={onClose}>
 			<ErrorBanner message={error} onDismiss={() => setError("")} />
 			<div className="space-y-4">
 				<div>
@@ -133,12 +152,17 @@ function CreateWebhookModal({
 						)}
 					</div>
 				</div>
+				<label className="flex items-center gap-2 text-sm text-[var(--text)]">
+					<Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+					有効
+				</label>
+
 				<div className="flex justify-end gap-2 pt-2">
 					<Button variant="secondary" onClick={onClose}>
 						キャンセル
 					</Button>
-					<Button onClick={create} disabled={busy || !valid}>
-						作成する
+					<Button onClick={save} disabled={busy || !valid}>
+						{webhook ? "保存する" : "作成する"}
 					</Button>
 				</div>
 			</div>
@@ -273,17 +297,18 @@ export function WebhooksPage() {
 	const [error, setError] = useState("");
 	const [showCreate, setShowCreate] = useState(false);
 	const [created, setCreated] = useState<WebhookCreate | null>(null);
+	const [editTarget, setEditTarget] = useState<Webhook | null>(null);
 	const [deliveriesTarget, setDeliveriesTarget] = useState<Webhook | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<Webhook | null>(null);
 
 	const load = useCallback(async () => {
 		try {
-			const [wRes, aRes] = await Promise.all([
-				api.get<Webhook[]>("/api/v1/webhooks"),
-				api.get<{ data: { id: string; address: string }[] }>("/api/v1/admin/addresses"),
+			const [list, addressList] = await Promise.all([
+				getAllPages<Webhook>("/api/v1/webhooks"),
+				getAllPages<{ id: string; address: string }>("/api/v1/admin/addresses"),
 			]);
-			setWebhooks(wRes);
-			setAddresses(aRes.data);
+			setWebhooks(list);
+			setAddresses(addressList);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "一覧の取得に失敗しました");
 		}
@@ -360,6 +385,9 @@ export function WebhooksPage() {
 										</td>
 										<td className={tdCls}>
 											<div className="flex gap-2">
+												<Button variant="secondary" onClick={() => setEditTarget(w)}>
+													編集
+												</Button>
 												<Button variant="secondary" onClick={() => setDeliveriesTarget(w)}>
 													配信履歴
 												</Button>
@@ -377,12 +405,24 @@ export function WebhooksPage() {
 				</Card>
 
 				{showCreate && (
-					<CreateWebhookModal
+					<WebhookModal
 						addresses={addresses}
 						onClose={() => setShowCreate(false)}
 						onCreated={(w) => {
 							setShowCreate(false);
 							setCreated(w);
+							load();
+						}}
+					/>
+				)}
+
+				{editTarget && (
+					<WebhookModal
+						addresses={addresses}
+						webhook={editTarget}
+						onClose={() => setEditTarget(null)}
+						onUpdated={() => {
+							setEditTarget(null);
 							load();
 						}}
 					/>

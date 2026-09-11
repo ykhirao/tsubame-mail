@@ -1,6 +1,6 @@
 // to / cc は複数アドレスになりうる。カンマ結合した完全なリストで保持する。
 import PostalMime, { type Address, type Email } from "postal-mime";
-import { formatAddressList, type ParsedAddress } from "./address";
+import { formatAddressList, normalizeAddress, type ParsedAddress } from "./address";
 
 export type ParsedAttachment = {
 	filename: string;
@@ -28,25 +28,37 @@ export type ParsedMessage = {
 	attachments: ParsedAttachment[];
 };
 
+// postal-mime は encoded-word をデコードするので、Message-ID 系ヘッダに CRLF が混入しうる
+// （実害は無いが、返信生成時に assertNoLineBreak が throw して失敗する）。トークンをこの形に絞る。
+const MESSAGE_ID_TOKEN = /^[^\s<>\x00-\x1f\x7f]+$/;
+
 function stripBrackets(value: string | undefined | null): string | null {
-	const t = value?.trim();
-	return t ? t.replace(/^<|>$/g, "").trim() : null;
+	const t = value?.trim().replace(/^<|>$/g, "").trim();
+	return t && MESSAGE_ID_TOKEN.test(t) ? t : null;
 }
 
 function cleanReferences(ref: string | undefined | null): string | null {
 	if (!ref) return null;
-	return ref
+	const tokens = ref
 		.split(/\s+/)
 		.map((t) => t.replace(/^<|>$/g, "").trim())
-		.filter(Boolean)
-		.join(" ");
+		.filter((t) => t && MESSAGE_ID_TOKEN.test(t));
+	return tokens.length > 0 ? tokens.join(" ") : null;
+}
+
+function toParsedAddress(a: { address?: string; name?: string }): ParsedAddress | null {
+	// postal-mime は address をそのまま渡す。タブなどの制御文字が混じっていると
+	// normalizeAddress に通す返信時まで気付かず、その時点で宛先ゼロになって黙って失敗する。
+	if (!a.address) return null;
+	const address = normalizeAddress(a.address);
+	return address ? { address, name: a.name || undefined } : null;
 }
 
 function flattenAddresses(list: Address[] | undefined): ParsedAddress[] {
 	if (!list) return [];
 	return list.flatMap((a) => {
-		if (a.address) return [{ address: a.address, name: a.name || undefined }];
-		if (a.group) return a.group.map((g) => ({ address: g.address, name: g.name || undefined }));
+		if (a.address) return [toParsedAddress(a)].filter((p): p is ParsedAddress => p !== null);
+		if (a.group) return a.group.map((g) => toParsedAddress(g)).filter((p): p is ParsedAddress => p !== null);
 		return [];
 	});
 }
@@ -64,8 +76,13 @@ function parseDate(value: string | undefined, fallback: number | null): number |
 	return Math.floor(t / 1000);
 }
 
+/** 200 文字を作るのに巨大な本文全体を正規表現に通さない。 */
+const SNIPPET_SOURCE_CHARS = 20_000;
+
 function buildSnippet(text: string | null | undefined, html: string | null | undefined): string {
-	const raw = text?.trim() || (html ? html.replace(/<[^>]*>/g, " ").trim() : "");
+	const plain = text?.slice(0, SNIPPET_SOURCE_CHARS).trim();
+	const raw =
+		plain || (html ? html.slice(0, SNIPPET_SOURCE_CHARS).replace(/<[^>]*>/g, " ").trim() : "");
 	return raw.replace(/\s+/g, " ").slice(0, 200);
 }
 

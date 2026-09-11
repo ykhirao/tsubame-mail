@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import addressRoutes from "@/api/v1/addresses";
 import adminAddressRoutes from "@/api/v1/admin/addresses";
 import adminDomainRoutes from "@/api/v1/admin/domains";
@@ -36,7 +37,11 @@ beforeEach(() => {
 const adminDomains = () => mountRouter("/", adminDomainRoutes, ownerPrincipal);
 const adminAddresses = () => mountRouter("/", adminAddressRoutes, ownerPrincipal);
 
-async function seedDomain(id = "dom_test", name = "mail.example.com") {
+async function seedDomain(
+	id = "dom_test",
+	name = "mail.example.com",
+	mode: "apex" | "subdomain" = "subdomain",
+) {
 	await getTestDb()
 		.insert(domains)
 		.values({
@@ -44,7 +49,7 @@ async function seedDomain(id = "dom_test", name = "mail.example.com") {
 			name,
 			zoneId: "zone1",
 			zoneName: "example.com",
-			mode: "subdomain",
+			mode,
 			routingStatus: "active",
 			sendingStatus: "active",
 			catchAllEnabled: false,
@@ -177,6 +182,71 @@ describe("POST /admin/domains/:id/catch-all", () => {
 		expect(fake.catchAll.enabled).toBe(true);
 		expect(fake.catchAll.actions).toEqual([{ type: "worker", value: ["tsubame"] }]);
 	});
+
+	it("無効化にも confirm が要る（#85）", async () => {
+		const id = await seedDomain("dom_disable_no_confirm", "mail.no-confirm.example.com");
+		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, id));
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${id}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false }),
+		});
+
+		expect(res.status).toBe(400);
+		expect(res.json.error.message).toContain("confirm: true");
+	});
+
+	it("同じゾーンの他ドメインが有効なら無効化を 409 にする（#85）", async () => {
+		const idA = await seedDomain("dom_disable_a", "mail.disable-a.example.com");
+		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idA));
+		const idB = await seedDomain("dom_disable_b", "mail.disable-b.example.com");
+		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idB));
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${idB}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+
+		expect(res.status).toBe(409);
+		expect(res.json.error.message).toContain("別のドメインが catch-all を有効");
+		// ゾーンの catch-all は落ちない（A の受け皿への到達を黙って止めない）。
+		expect(fake.catchAll.enabled).toBe(true);
+	});
+
+	it("他ドメインが残らなければ無効化できる（#85）", async () => {
+		const id = await seedDomain("dom_disable_ok", "mail.disable-ok.example.com");
+		await getTestDb()
+			.update(domains)
+			// このファイルの DB は共有で、他のテストが zone1 に catch-all を有効にしているので、
+			// 「他ドメイン無し」を作るために別ゾーンへ移す。
+			.set({ zoneId: "zone-ok", catchAllEnabled: true })
+			.where(eq(domains.id, id));
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${id}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false, confirm: true }),
+		});
+
+		expect(res.status).toBe(200);
+		expect(res.json.data.enabled).toBe(false);
+		expect(fake.catchAll.enabled).toBe(false);
+	});
+
+	it("切断の無効化も他ドメインが有効なら 409 で止める（#85）", async () => {
+		const idA = await seedDomain("dom_delete_a", "mail.delete-a.example.com");
+		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idA));
+		const idB = await seedDomain("dom_delete_b", "mail.delete-b.example.com");
+		await getTestDb().update(domains).set({ catchAllEnabled: true }).where(eq(domains.id, idB));
+		fake.catchAll.enabled = true;
+
+		const res = await callJson(adminDomains(), `/${idB}`, { method: "DELETE" });
+
+		expect(res.status).toBe(409);
+		expect(fake.catchAll.enabled).toBe(true);
+	});
 });
 
 describe("POST /admin/domains/:id/verify と DELETE", () => {
@@ -211,6 +281,45 @@ describe("POST /admin/domains/:id/verify と DELETE", () => {
 		expect(res.status).toBe(200);
 		expect(res.json.data.cleanup.removedDnsRecords).toEqual(["MX mail.gone.example.com"]);
 		expect(fake.dnsRecords.some((r) => r.id === "apex-mx")).toBe(true);
+	});
+
+	it("apex 切断は配下に別接続のサブドメインがあれば 409（#18）", async () => {
+		const apexId = await seedDomain("dom_apex_a", "apex-a.example.com", "apex");
+		await seedDomain("dom_sub_a", "mail.apex-a.example.com", "subdomain");
+
+		const res = await callJson(adminDomains(), `/${apexId}`, { method: "DELETE" });
+
+		expect(res.status).toBe(409);
+		expect(fake.dnsRecords.some((r) => r.id === "apex-mx")).toBe(true);
+	});
+
+	it("apex 切断は配下の接続を先に外せば通る（#18）", async () => {
+		const apexId = await seedDomain("dom_apex_b", "apex-b.example.com", "apex");
+		const subId = await seedDomain("dom_sub_b", "mail.apex-b.example.com", "subdomain");
+
+		expect((await callJson(adminDomains(), `/${subId}`, { method: "DELETE" })).status).toBe(200);
+		expect((await callJson(adminDomains(), `/${apexId}`, { method: "DELETE" })).status).toBe(200);
+	});
+
+	it("cleanup クエリが不正なら 400（#18）", async () => {
+		const id = await seedDomain("dom_badquery", "mail.badquery.example.com");
+		const res = await callJson(adminDomains(), `/${id}?cleanup=maybe`, { method: "DELETE" });
+		expect(res.status).toBe(400);
+	});
+});
+
+describe("管理系ルータの門（#31）", () => {
+	it.each([
+		["domains", adminDomainRoutes],
+		["addresses", adminAddressRoutes],
+	] as const)("%s のルータ単体でも、admin スコープの無い owner は 403", async (_name, router) => {
+		const app = mountRouter("/", router, {
+			...ownerPrincipal,
+			via: "api_key",
+			scopes: ["read", "send"],
+		});
+		const res = await callJson(app, "/");
+		expect(res.status).toBe(403);
 	});
 });
 
@@ -301,6 +410,55 @@ describe("POST /admin/addresses", () => {
 		const body = JSON.stringify({ domainId: id, localPart: "same" });
 		expect((await callJson(adminAddresses(), "/", { method: "POST", body })).status).toBe(201);
 		expect((await callJson(adminAddresses(), "/", { method: "POST", body })).status).toBe(409);
+	});
+});
+
+describe("PATCH /admin/addresses/:id でエイリアスの連鎖を作れない（#36）", () => {
+	it("A→B の状態で B を alias→C にはできない", async () => {
+		const id = await seedDomain("dom_chain", "mail.chain.example.com");
+		const b = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "b" }),
+		});
+		const c = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "c" }),
+		});
+		const a = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({
+				domainId: id,
+				localPart: "a",
+				kind: "alias",
+				aliasTargetId: b.json.data.id,
+			}),
+		});
+		expect(a.status).toBe(201);
+
+		// B を alias→C にすると、A 宛のメールが宛先を失う（連鎖）。拒否する。
+		const res = await callJson(adminAddresses(), `/${b.json.data.id}`, {
+			method: "PATCH",
+			body: JSON.stringify({ kind: "alias", aliasTargetId: c.json.data.id }),
+		});
+		expect(res.status).toBe(409);
+	});
+
+	it("誰もエイリアス先にしていないアドレスは alias 化できる", async () => {
+		const id = await seedDomain("dom_chain2", "mail.chain2.example.com");
+		const target = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "target" }),
+		});
+		const solo = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "solo" }),
+		});
+
+		const res = await callJson(adminAddresses(), `/${solo.json.data.id}`, {
+			method: "PATCH",
+			body: JSON.stringify({ kind: "alias", aliasTargetId: target.json.data.id }),
+		});
+		expect(res.status).toBe(200);
 	});
 });
 

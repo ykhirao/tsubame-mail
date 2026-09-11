@@ -161,14 +161,51 @@ describe("FR-8 Webhook", () => {
 		expect(second[0]!.nextRetryAt!.getTime()).toBeGreaterThan(first[0]!.nextRetryAt!.getTime());
 	});
 
+	scenario("FR-8", "内部向け・http の URL は登録できず、配信はリダイレクトを追わない", async () => {
+		for (const url of [
+			"http://hook.example.com/tsubame",
+			"https://127.0.0.1/tsubame",
+			"https://169.254.169.254/latest/meta-data",
+			"https://[::1]/tsubame",
+			"https://localhost/tsubame",
+		]) {
+			const res = await owner.post("/api/v1/webhooks", {
+				name: "hook",
+				url,
+				events: ["message.received"],
+			});
+			expect(res.status, url).toBe(400);
+		}
+
+		await createWebhook({ addressIds: [aiId] });
+		const inits: RequestInit[] = [];
+		vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+			inits.push(init ?? {});
+			return new Response(null, { status: 302, headers: { Location: "http://127.0.0.1/" } });
+		});
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await processOne(h);
+
+		expect(inits).toHaveLength(1);
+		expect(inits[0]!.redirect).toBe("manual");
+		const hooks = await owner.get("/api/v1/webhooks");
+		const deliveries = await owner.get(`/api/v1/webhooks/${hooks.body.data[0].id}/deliveries`);
+		expect(deliveries.body.data[0].httpStatus).toBe(302);
+		expect(deliveries.body.data[0].status).not.toBe("success");
+	});
+
 	scenario("FR-8", "secret は作成時だけ返り、一覧には出ない", async () => {
 		const created = await createWebhook({ url: "https://hook.example.com/tsubame" });
 		expect(created.secret).toBeTruthy();
 
 		const list = await owner.get("/api/v1/webhooks");
 		expect(list.status).toBe(200);
-		expect(Array.isArray(list.body)).toBe(true);
-		expect(list.body[0].secret).toBeUndefined();
-		expect(list.body[0].id).toBe(created.id);
+		expect(list.body.next_cursor).toBeNull();
+		expect(list.body.data[0].secret).toBeUndefined();
+		expect(list.body.data[0].id).toBe(created.id);
 	});
 });

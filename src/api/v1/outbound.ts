@@ -1,13 +1,16 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { bodyLimit } from "hono/body-limit";
+import { eq, sql } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { addresses, attachments, messages, outboundJobs, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
 import type { AppEnv } from "@/api/types";
 import { forbidden, invalidRequest, notFound } from "@/shared/errors";
-import { normalizeAddress, parseAddressList, formatAddressList } from "@/domain/mail/address";
+import { baseAddressOf, normalizeAddress, parseAddressList, formatAddressList } from "@/domain/mail/address";
 import { addressListToCsv } from "@/domain/mail/compose";
+import { canRead, requireScope } from "@/domain/access/policy";
 import { canSendFrom } from "@/services/sender";
+import { putAttachment } from "@/services/r2";
 import { buildReplyQuote, referencesFor, replySubject } from "@/domain/mail/quote";
 import {
 	sendMessageInput,
@@ -17,18 +20,30 @@ import {
 
 const router = new Hono<AppEnv>();
 
+// 添付は base64 で JSON に乗るため、25MB の合計上限より一回り大きく見て
+// 本文全体としての上限を置く（zod の上限はここを通った後段の話）。
+router.use(
+	"*",
+	bodyLimit({
+		maxSize: 40 * 1024 * 1024,
+		onError: () => {
+			throw invalidRequest("リクエストが大きすぎます");
+		},
+	}),
+);
+
 async function resolveOwnAddress(
 	db: ReturnType<typeof getDb>,
 	fromRaw: string,
-): Promise<string | null> {
+): Promise<{ id: string; kind: string; archivedAt: Date | null } | null> {
 	const normalized = normalizeAddress(fromRaw);
 	if (!normalized) return null;
 	const row = await db
-		.select({ id: addresses.id })
+		.select({ id: addresses.id, kind: addresses.kind, archivedAt: addresses.archivedAt })
 		.from(addresses)
 		.where(eq(addresses.address, normalized))
 		.get();
-	return row?.id ?? null;
+	return row ?? null;
 }
 
 async function assertCanSend(
@@ -36,36 +51,53 @@ async function assertCanSend(
 	input: { from: string },
 	principal: AppEnv["Variables"]["principal"],
 ): Promise<string> {
-	const addressId = await resolveOwnAddress(db, input.from);
-	if (!addressId) throw forbidden("この差出人アドレスは登録されていません");
-	if (!canSendFrom(principal.writableAddressIds, addressId)) {
+	requireScope(principal, "send");
+	const row = await resolveOwnAddress(db, input.from);
+	if (!row) throw forbidden("この差出人アドレスは登録されていません");
+	if (row.archivedAt) throw forbidden("アーカイブ済みのアドレスからは送信できません");
+	if (row.kind === "alias") throw forbidden("エイリアスのアドレスからは送信できません");
+	if (!canSendFrom(principal.writableAddressIds, row.id)) {
 		throw forbidden("このアドレスから送信する権限がありません");
 	}
-	if (principal.via === "api_key" && !principal.scopes.includes("send")) {
-		throw forbidden("この API キーには send スコープがありません");
-	}
-	return addressId;
+	return row.id;
+}
+
+type DecodedAttachment = { filename: string; contentType: string; bytes: Uint8Array };
+
+// メッセージの行を作る前に弾く。後で落ちると、送られないまま queued の行だけが残る。
+function decodeAttachments(input: SendMessageInput["attachments"]): DecodedAttachment[] {
+	return (input ?? []).map((att) => {
+		let binary: string;
+		try {
+			binary = atob(att.base64);
+		} catch {
+			throw invalidRequest(`添付「${att.filename}」の base64 が不正です`);
+		}
+		return {
+			filename: att.filename,
+			contentType: att.contentType,
+			bytes: Uint8Array.from(binary, (c) => c.charCodeAt(0)),
+		};
+	});
 }
 
 async function storeAttachments(
 	db: ReturnType<typeof getDb>,
 	env: CloudflareEnv,
 	messageId: string,
-	attachmentsInput: SendMessageInput["attachments"],
+	list: DecodedAttachment[],
 ): Promise<void> {
-	if (!attachmentsInput?.length) return;
-	for (let i = 0; i < attachmentsInput.length; i++) {
-		const att = attachmentsInput[i]!;
+	for (const att of list) {
 		const attId = newId("attachment");
-		const r2Key = `outbound/${messageId}/${i}-${att.filename}`;
-		const bytes = Uint8Array.from(atob(att.base64), (c) => c.charCodeAt(0));
-		await env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: att.contentType } });
+		// キーはサーバ採番の id だけで作る。ファイル名を入れると `../raw/...` で他のメッセージの
+		// 生 MIME と同じキーを作れてしまう。
+		const r2Key = await putAttachment(env, messageId, attId, att.bytes, att.contentType);
 		await db.insert(attachments).values({
 			id: attId,
 			messageId,
 			filename: att.filename,
 			contentType: att.contentType,
-			sizeBytes: bytes.byteLength,
+			sizeBytes: att.bytes.byteLength,
 			isInline: false,
 			r2Key,
 		});
@@ -86,25 +118,8 @@ type QueuedMessage = {
 	referencesHeader?: string | null;
 	/** 返信なら元メッセージのスレッド。無ければ新しいスレッドを作る。 */
 	threadId?: string | null;
-	attachments?: SendMessageInput["attachments"];
+	attachments: DecodedAttachment[];
 };
-
-async function createOutboundThread(
-	db: ReturnType<typeof getDb>,
-	m: QueuedMessage,
-	now: Date,
-): Promise<string> {
-	const threadId = newId("thread");
-	await db.insert(threads).values({
-		id: threadId,
-		addressId: m.addressId,
-		subject: m.subject ?? null,
-		lastMessageAt: now,
-		messageCount: 1,
-		unreadCount: 0,
-	});
-	return threadId;
-}
 
 async function enqueueOutbound(
 	db: ReturnType<typeof getDb>,
@@ -113,12 +128,15 @@ async function enqueueOutbound(
 ): Promise<{ id: string; status: string }> {
 	const messageId = newId("message");
 	const now = new Date();
+	const jobId = newId("job");
 
 	// 返信は元のスレッドに入れる。指定が無ければ自分だけのスレッドを立てる。
-	// ここを落とすと、送った返信が会話から外れて別の行として並ぶ。
-	const threadId = m.threadId ?? (await createOutboundThread(db, m, now));
+	// スレッド作成とメッセージ挿入を分けて await すると、間で失敗したとき
+	// メッセージの無い空スレッド行が残る（精査 #22）。同じ batch で 1 トランザクションにする。
+	const newThreadId = m.threadId ? null : newId("thread");
+	const threadId = newThreadId ?? m.threadId!;
 
-	await db.insert(messages).values({
+	const messageInsert = db.insert(messages).values({
 		id: messageId,
 		addressId: m.addressId,
 		direction: "outbound",
@@ -134,25 +152,39 @@ async function enqueueOutbound(
 		inReplyTo: m.inReplyTo ?? null,
 		referencesHeader: m.referencesHeader ?? null,
 		threadId,
-		hasAttachments: (m.attachments?.length ?? 0) > 0,
+		hasAttachments: m.attachments.length > 0,
 		receivedAt: now,
 	});
+	const jobInsert = db.insert(outboundJobs).values({ id: jobId, messageId, status: "queued" });
 
-	if (m.threadId) {
-		const t = await db.select().from(threads).where(eq(threads.id, m.threadId)).get();
-		if (t) {
-			await db
-				.update(threads)
-				.set({ lastMessageAt: now, messageCount: t.messageCount + 1 })
-				.where(eq(threads.id, m.threadId));
-		}
+	if (newThreadId) {
+		const threadInsert = db.insert(threads).values({
+			id: newThreadId,
+			addressId: m.addressId,
+			subject: m.subject ?? null,
+			lastMessageAt: now,
+			messageCount: 1,
+			unreadCount: 0,
+		});
+		await db.batch([threadInsert, messageInsert, jobInsert]);
+	} else {
+		const threadUpdate = db
+			.update(threads)
+			.set({ lastMessageAt: now, messageCount: sql`${threads.messageCount} + 1` })
+			.where(eq(threads.id, threadId));
+		await db.batch([messageInsert, threadUpdate, jobInsert]);
 	}
 
-	await storeAttachments(db, env, messageId, m.attachments);
-
-	const jobId = newId("job");
-	await db.insert(outboundJobs).values({ id: jobId, messageId, status: "queued" });
-	await env.OUTBOUND_QUEUE.send({ kind: "outbound.send", jobId, messageId });
+	try {
+		await storeAttachments(db, env, messageId, m.attachments);
+		await env.OUTBOUND_QUEUE.send({ kind: "outbound.send", jobId, messageId });
+	} catch (err) {
+		// batch は確定済みなので差し戻せない。送られもせず queued のまま残らないよう、
+		// 添付保存やキュー投入の失敗で行を failed に落とす（#90）。
+		await db.update(messages).set({ status: "failed" }).where(eq(messages.id, messageId));
+		await db.update(outboundJobs).set({ status: "failed" }).where(eq(outboundJobs.id, jobId));
+		throw err;
+	}
 
 	return { id: messageId, status: "queued" };
 }
@@ -166,6 +198,7 @@ router.post("/", async (c) => {
 	const input = parsed.data;
 
 	const addressId = await assertCanSend(db, input, principal);
+	const decoded = decodeAttachments(input.attachments);
 
 	const result = await enqueueOutbound(db, c.env, {
 		addressId,
@@ -177,7 +210,7 @@ router.post("/", async (c) => {
 		textBody: input.text ?? null,
 		htmlBody: input.html ?? null,
 		inReplyTo: input.inReplyTo ?? null,
-		attachments: input.attachments,
+		attachments: decoded,
 	});
 
 	return c.json(result, 202);
@@ -194,27 +227,54 @@ router.post("/:id/reply", async (c) => {
 	if (!parsed.success) throw invalidRequest("返信内容が不正です", parsed.error);
 	const input = parsed.data;
 
+	// 返信は元メッセージを読んで引用するので、send だけでなく read も要る。
+	requireScope(principal, "read");
+	requireScope(principal, "send");
+
 	const message = await db.select().from(messages).where(eq(messages.id, id)).get();
-	if (!message) throw notFound("メッセージが見つかりません");
-	if (principal.addressIds !== "all" && !principal.addressIds.includes(message.addressId)) {
-		throw forbidden("このメッセージにアクセスする権限がありません");
+	// 権限外も 404。403 だと id の総当たりで存在を推測される。
+	if (!message || !canRead(principal, message.addressId)) {
+		throw notFound("メッセージが見つかりません");
 	}
 
 	const mailbox = await db.select().from(addresses).where(eq(addresses.id, message.addressId)).get();
 	if (!mailbox) throw notFound("差出人アドレスが不正です");
+	if (mailbox.archivedAt) throw forbidden("アーカイブ済みのアドレスからは送信できません");
+	if (mailbox.kind === "alias") throw forbidden("エイリアスのアドレスからは送信できません");
 	if (!canSendFrom(principal.writableAddressIds, mailbox.id)) {
 		throw forbidden("このアドレスから送信する権限がありません");
 	}
-	if (principal.via === "api_key" && !principal.scopes.includes("send")) {
-		throw forbidden("この API キーには send スコープがありません");
-	}
+	const decoded = decodeAttachments(input.attachments);
 
 	// 宛先: replyAll なら To+Cc から自分のアドレスを除く + 元の From。そうでなければ元の From。
+	// isSelf は完全一致だけでなく、自分の +タグ 付きアドレスと、このメールボックスを指す
+	// エイリアスも含める（精査 #23）。含めないと、返信が自分の受信箱に戻ってしまう。
 	const own = normalizeAddress(mailbox.address)!;
+	const aliasRows = await db
+		.select({ address: addresses.address })
+		.from(addresses)
+		.where(eq(addresses.aliasTargetId, mailbox.id))
+		.all();
+	const ownAliases = new Set(aliasRows.map((r) => normalizeAddress(r.address)).filter((a): a is string => !!a));
+	const isSelf = (addr: string) => {
+		const n = normalizeAddress(addr);
+		if (!n) return false;
+		// own 自身に +タグ が無ければ box+news@ のようなタグ付き宛先も同じメールボックスとして
+		// 自分に含める。own 側の base は取らないので、own に +タグ がある（box+a@x）ときの
+		// box@x・box+b@x はここでは一致せず、別人のまま残る（精査 #23 再検査: 別人を自分扱いする退行）。
+		if (n === own || baseAddressOf(n) === own) return true;
+		if (ownAliases.has(n)) return true;
+		const base = baseAddressOf(n);
+		return base !== null && ownAliases.has(base);
+	};
 	const originalFrom = parseAddressList(message.fromAddr);
-	const isSelf = (addr: string) => normalizeAddress(addr) === own;
 
-	const recipients = replyAllRecipients(originalFrom, message.toAddr, message.ccAddr, isSelf, input.replyAll);
+	// UI が最終宛先を表示・編集できるよう、明示指定があればそれを使う（精査 #23）。
+	// 省略時は従来どおりサーバが計算する。cc の明示指定は無ければ空にする（replyAll の Cc を混ぜない）。
+	const recipients = input.to
+		? dedupeRecipients(parseAddressList(addressListToCsv(input.to)), isSelf)
+		: replyAllRecipients(originalFrom, message.toAddr, message.ccAddr, isSelf, input.replyAll);
+	const ccRecipients = input.cc ? dedupeRecipients(parseAddressList(addressListToCsv(input.cc)), isSelf) : [];
 
 	const subject = replySubject(message.subject);
 	const inReplyTo = message.rfcMessageId ?? null;
@@ -232,6 +292,7 @@ router.post("/:id/reply", async (c) => {
 	const htmlBody = input.html ? input.html + quote.html : quote.html;
 
 	const toAddr = formatAddressList(recipients);
+	const ccAddr = ccRecipients.length > 0 ? formatAddressList(ccRecipients) : null;
 	const addressId = mailbox.id;
 
 	const result = await enqueueOutbound(db, env, {
@@ -239,17 +300,33 @@ router.post("/:id/reply", async (c) => {
 		fromAddr: mailbox.address,
 		fromName: mailbox.displayName ?? undefined,
 		toAddr,
+		ccAddr,
 		subject,
 		textBody,
 		htmlBody,
 		inReplyTo,
 		referencesHeader: references,
 		threadId: message.threadId,
-		attachments: input.attachments,
+		attachments: decoded,
 	});
 
 	return c.json(result, 202);
 });
+
+export function dedupeRecipients(
+	list: { address: string; name?: string }[],
+	isSelf: (addr: string) => boolean,
+): { address: string; name?: string }[] {
+	const seen = new Set<string>();
+	const out: { address: string; name?: string }[] = [];
+	for (const m of list) {
+		const key = normalizeAddress(m.address) ?? m.address.toLowerCase();
+		if (isSelf(m.address) || seen.has(key)) continue;
+		seen.add(key);
+		out.push(m);
+	}
+	return out;
+}
 
 export function replyAllRecipients(
 	originalFrom: { address: string; name?: string }[],

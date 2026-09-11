@@ -16,7 +16,8 @@ export default defineConfig({
 					TEST_MIGRATIONS: migrations,
 					// テストで最初のオーナーを作れるようにする。本番は Worker Secret に 1 件だけ入れる。
 					// 最初のオーナーを作るときの合言葉。本番は 20 文字以上の乱数を Worker Secret に入れる。
-					INTERNAL_SECRET: "test-internal-secret-0123456789",
+					// seed-local.mjs の既知値とは別にしてある（#48: bootstrap はその 2 値を拒否する）。
+					INTERNAL_SECRET: "vitest-fixture-internal-secret-9f8e7d6c",
 				},
 			},
 		}),

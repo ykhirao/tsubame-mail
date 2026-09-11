@@ -9,7 +9,15 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import type { MyAddress } from "@/shared/contracts/addresses";
 import { MessagesApi } from "@/ui/lib/api";
 import { useAuth } from "@/ui/lib/auth";
+import { isSelfAddress, looseAddressOf } from "@/ui/lib/looseAddress";
+import { formatAddress, parseAddressList } from "@/domain/mail/address";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
+
+// 表示専用の簡易パース。実際の重複除去・自分除外はサーバ側（outbound.ts）が行う。
+// 素の .split(",") だと、引用された表示名 "Doe, John" のカンマまでも割ってしまう（精査 #82）。
+function splitAddressCsv(csv: string): string[] {
+	return parseAddressList(csv).map(formatAddress);
+}
 
 function readAsBase64(file: File): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -75,8 +83,13 @@ export function Compose() {
 	const [replyText, setReplyText] = useState("");
 	const [replyBusy, setReplyBusy] = useState(false);
 	const [originalSubject, setOriginalSubject] = useState<string | null>(null);
+	const [original, setOriginal] = useState<{ fromAddr: string; toAddr: string; ccAddr: string | null } | null>(
+		null,
+	);
 	const [replyTo, setReplyTo] = useState("");
 	const [replyCc, setReplyCc] = useState("");
+	// 宛先を手で編集したら、以後は replyAll を切り替えても上書きしない。
+	const [recipientsEdited, setRecipientsEdited] = useState(false);
 
 	const writable = (me?.addresses ?? []).filter((a) => a.level === "write");
 
@@ -96,8 +109,7 @@ export function Compose() {
 			.then((m) => {
 				if (!alive) return;
 				setOriginalSubject(m.subject);
-				setReplyTo(m.fromAddr);
-				setReplyCc(m.ccAddr ?? "");
+				setOriginal({ fromAddr: m.fromAddr, toAddr: m.toAddr, ccAddr: m.ccAddr });
 
 				// 返信の差出人はサーバも元メッセージの受信アドレスで決めるので、ここも合わせる。
 				const mailboxId = m.addressId;
@@ -109,6 +121,24 @@ export function Compose() {
 			alive = false;
 		};
 	}, [replyMessageId, me]);
+
+	// 全員に返信の宛先には受信 To 由来のアドレスも入る（精査 #23）。サーバと同じ計算を
+	// 見せてから編集させる。自分を手で除きたい場合に備えて、自分を含めた素の値を出す。
+	useEffect(() => {
+		if (!original || recipientsEdited) return;
+		if (replyAll) {
+			const fromKey = looseAddressOf(original.fromAddr);
+			const others = splitAddressCsv(original.toAddr).filter((a) => {
+				return looseAddressOf(a) !== fromKey && !isSelfAddress(a, from);
+			});
+			setReplyTo([original.fromAddr, ...others].join(", "));
+			setReplyCc(original.ccAddr ?? "");
+		} else {
+			setReplyTo(original.fromAddr);
+			setReplyCc("");
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [original, replyAll, from, recipientsEdited]);
 
 	useEffect(() => {
 		if (replyMessageId) return;
@@ -167,12 +197,18 @@ export function Compose() {
 
 	const submitReply = async (e: FormEvent) => {
 		e.preventDefault();
+		if (replyTo.trim() === "") {
+			setError("宛先を入力してください");
+			return;
+		}
 		setReplyBusy(true);
 		setError(null);
 		try {
 			const res = await MessagesApi.reply(replyMessageId!, {
 				text: replyText,
 				replyAll,
+				to: replyTo.trim(),
+				cc: replyCc.trim() ? replyCc.trim() : undefined,
 				attachments: pending.map((p) => ({
 					filename: p.file.name,
 					contentType: p.file.type || "application/octet-stream",
@@ -232,12 +268,28 @@ export function Compose() {
 					</div>
 					<div className="flex items-center gap-2">
 						<span className={labelCls}>宛先</span>
-						<span className="flex-1 truncate text-sm text-[var(--text)]">{replyTo}</span>
+						<input
+							value={replyTo}
+							onChange={(e) => {
+								setRecipientsEdited(true);
+								setReplyTo(e.target.value);
+							}}
+							placeholder="カンマ区切りで複数"
+							className={underlineCls}
+						/>
 					</div>
-					{replyAll && replyCc && (
+					{replyAll && (
 						<div className="flex items-center gap-2">
 							<span className={labelCls}>Cc</span>
-							<span className="flex-1 truncate text-sm text-[var(--text)]">{replyCc}</span>
+							<input
+								value={replyCc}
+								onChange={(e) => {
+									setRecipientsEdited(true);
+									setReplyCc(e.target.value);
+								}}
+								placeholder="カンマ区切りで複数"
+								className={underlineCls}
+							/>
 						</div>
 					)}
 

@@ -27,7 +27,7 @@ export type RecordedRequest = {
 	body: Record<string, unknown> | null;
 };
 
-export type FakeZone = { id: string; name: string; status?: string };
+export type FakeZone = { id: string; name: string; status?: string; account?: { id: string; name?: string } };
 export type FakeDnsRecord = {
 	id: string;
 	type: string;
@@ -79,7 +79,9 @@ const ng = (status: number, errors: { code?: number; message: string }[]) =>
 
 export function createFakeCloudflare(options: FakeCloudflareOptions = {}): FakeCloudflare {
 	const requests: RecordedRequest[] = [];
-	const zones = options.zones ?? [{ id: "zone1", name: "example.com", status: "active" }];
+	const zones = (options.zones ?? [
+		{ id: "zone1", name: "example.com", status: "active" },
+	]).map((z) => ({ account: { id: "test-account", name: "test" }, ...z }));
 	const dnsRecords = [...(options.dnsRecords ?? [])];
 	const routingRules = [...(options.routingRules ?? [])];
 	const catchAll: FakeRoutingRule & { enabled: boolean } = {
@@ -90,6 +92,7 @@ export function createFakeCloudflare(options: FakeCloudflareOptions = {}): FakeC
 		actions: [{ type: "drop", value: [] }],
 	};
 
+	const sendingSubdomains: { id: string; name: string; enabled: boolean }[] = [];
 	let seq = 0;
 	const nextId = () => `rec${++seq}`;
 
@@ -113,7 +116,13 @@ export function createFakeCloudflare(options: FakeCloudflareOptions = {}): FakeC
 
 			if (method === "GET" && p === "/zones") {
 				const name = url.searchParams.get("name");
-				return ok(zones.filter((z) => (name ? z.name === name : true)));
+				const accountId = url.searchParams.get("account.id");
+				return ok(
+					zones.filter(
+						(z) =>
+							(name ? z.name === name : true) && (accountId ? z.account?.id === accountId : true),
+					),
+				);
 			}
 
 			const dnsList = p.match(/^\/zones\/([^/]+)\/dns_records$/);
@@ -188,11 +197,24 @@ export function createFakeCloudflare(options: FakeCloudflareOptions = {}): FakeC
 				return ok(routingRules);
 			}
 
-			if (/\/email\/sending\/(enable|disable)$/.test(p)) {
-				return ok({ enabled: p.endsWith("enable"), name: String(body?.name ?? "") });
+			const sendingOne = p.match(/^\/zones\/([^/]+)\/email\/sending\/subdomains\/([^/]+?)(\/dns)?$/);
+			if (sendingOne) {
+				if (sendingOne[3]) return ok([]);
+				if (method === "DELETE") {
+					const index = sendingSubdomains.findIndex((s) => s.id === sendingOne[2]);
+					if (index >= 0) sendingSubdomains.splice(index, 1);
+					return ok({ id: sendingOne[2] });
+				}
+				return ok(sendingSubdomains.find((s) => s.id === sendingOne[2]) ?? null);
 			}
-			if (/\/email\/sending(\/dns)?$/.test(p)) {
-				return ok([]);
+
+			if (/\/email\/sending\/subdomains$/.test(p)) {
+				if (method === "POST") {
+					const created = { id: `sub${++seq}`, name: String(body?.name ?? ""), enabled: true };
+					sendingSubdomains.push(created);
+					return ok(created);
+				}
+				return ok(sendingSubdomains);
 			}
 
 			return ng(404, [{ code: 7003, message: `未対応のパス: ${p}` }]);

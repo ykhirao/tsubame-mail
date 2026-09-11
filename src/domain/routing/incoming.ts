@@ -10,6 +10,9 @@ import { resolveIncoming } from "./resolve";
 
 const FORWARD_HEADER = "X-Tsubame-Forwarded";
 
+/** Email Routing 自体の上限と同じ。コンシューマはこれを超える生 MIME をパースしない。 */
+export const MAX_RAW_BYTES = 25 * 1024 * 1024;
+
 export async function handleIncomingEmail(
 	message: ForwardableEmailMessage,
 	env: CloudflareEnv,
@@ -32,7 +35,8 @@ export async function handleIncomingEmail(
 				return;
 			}
 			const headers = new Headers(message.headers);
-			headers.set(FORWARD_HEADER, message.to);
+			// 値は「転送済みか」の検知にしか使わない。エンベロープ宛先を外部に漏らす理由が無い。
+			headers.set(FORWARD_HEADER, "1");
 			await message.forward(result.to, headers);
 			return;
 		}
@@ -41,6 +45,11 @@ export async function handleIncomingEmail(
 			return;
 
 		case "deliver": {
+			// rawSize が無い実行環境でも受け取りは止めず、上限の検査はコンシューマ側に任せる。
+			if (typeof message.rawSize === "number" && message.rawSize > MAX_RAW_BYTES) {
+				message.setReject("メールのサイズが上限（25MB）を超えています");
+				return;
+			}
 			const messageId = newId("message");
 			const rawKey = await saveRaw(env, messageId, message.raw, new Date(), message.rawSize);
 			const payload: InboundQueueMessage = {
@@ -50,7 +59,9 @@ export async function handleIncomingEmail(
 				envelope: { from: message.from, to: message.to },
 				receivedAt: Date.now(),
 			};
-			ctx.waitUntil(env.INBOUND_QUEUE.send(payload));
+			// waitUntil だと投入失敗がハンドラの外で起き、送信側 MTA には 250 が返って再送も来ない。
+			// await にして失敗を例外にし、Email Routing に一時失敗として再送させる。
+			await env.INBOUND_QUEUE.send(payload);
 			return;
 		}
 	}

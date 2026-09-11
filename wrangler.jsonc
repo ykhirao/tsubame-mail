@@ -12,7 +12,10 @@
 	"assets": {
 		"binding": "ASSETS",
 		"directory": "./dist/client",
-		"not_found_handling": "single-page-application"
+		"not_found_handling": "single-page-application",
+		// 無いと、添付のダウンロードリンクのようなナビゲーションは Worker を通らず
+		// index.html が返る（SPA モードの既定動作）。
+		"run_worker_first": ["/api/*"]
 	},
 
 	"vars": {
@@ -38,8 +41,13 @@
 			{ "binding": "OUTBOUND_QUEUE", "queue": "tsubame-outbound" }
 		],
 		"consumers": [
-			{ "queue": "tsubame-inbound", "max_batch_size": 5, "max_retries": 3 },
-			{ "queue": "tsubame-outbound", "max_batch_size": 5, "max_retries": 3 }
+			{
+				"queue": "tsubame-inbound",
+				"max_batch_size": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "tsubame-inbound-dlq"
+			},
+			{ "queue": "tsubame-outbound", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "tsubame-outbound-dlq" }
 		]
 	},
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { schema } from "@/db/client";
 import {
 	buildTestApp,
@@ -29,7 +29,7 @@ async function ownerCookie(email = "owner@example.test") {
 			email,
 			name: "オーナー",
 			password: PASSWORD,
-			secret: "test-internal-secret-0123456789",
+			secret: "vitest-fixture-internal-secret-9f8e7d6c",
 		}),
 	);
 	expect(res.status).toBe(201);
@@ -87,6 +87,15 @@ describe("POST /v1/admin/users", () => {
 		expect(agent.status).toBe(201);
 		const agentBody = (await agent.json()) as { hasPassword: boolean; temporaryPassword: null };
 		expect(agentBody).toMatchObject({ hasPassword: false, temporaryPassword: null });
+	});
+
+	it("agent に password を付けると 400（#51: 以前は POST だけ黙って捨てていた）", async () => {
+		const cookie = await ownerCookie();
+		const res = await request(app, "/api/v1/admin/users", {
+			...json({ email: "ai2@example.test", name: "AI2", role: "agent", password: PASSWORD }),
+			cookie,
+		});
+		expect(res.status).toBe(400);
 	});
 
 	it("メールアドレスの重複は 409", async () => {
@@ -160,6 +169,46 @@ describe("最後の owner は消せない", () => {
 			cookie,
 		});
 		expect(res.status).toBe(200);
+	});
+
+	it("owner 2 人が同時に互いを降格しても 0 人にならない（#54）", async () => {
+		const cookie = await ownerCookie();
+		const second = await request(app, "/api/v1/admin/users", {
+			...json({ email: "o3@example.test", name: "O3", role: "owner", password: PASSWORD }),
+			cookie,
+		});
+		const created = (await second.json()) as { id: string };
+		const cookie2 = await loginCookie("o3@example.test");
+		const [firstOwner] = await db()
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(eq(schema.users.email, "owner@example.test"))
+			.limit(1);
+
+		// UPDATE の WHERE 句に「他に有効な owner が居るか」を埋め込んでいるので、
+		// 同時に投げても D1 は 1 件ずつ直列に処理し、両方成功することは無い。
+		const [resA, resB] = await Promise.all([
+			request(app, `/api/v1/admin/users/${firstOwner!.id}`, {
+				method: "PATCH",
+				cookie: cookie2,
+				body: JSON.stringify({ role: "member" }),
+			}),
+			request(app, `/api/v1/admin/users/${created.id}`, {
+				method: "PATCH",
+				cookie,
+				body: JSON.stringify({ role: "member" }),
+			}),
+		]);
+
+		const statuses = [resA.status, resB.status].sort();
+		// どちらか一方だけ成功し、もう片方は 409（最後の owner を降格できない）になる。
+		expect(statuses).toEqual([200, 409]);
+
+		const remainingOwners = await db()
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(and(eq(schema.users.role, "owner"), eq(schema.users.status, "active")));
+		expect(remainingOwners.length).toBeGreaterThanOrEqual(1);
 	});
 });
 
@@ -364,8 +413,9 @@ describe("/v1/me/api-keys は自分のキーだけ", () => {
 		await grant(user.id, a, "write");
 		await grant(user.id, b, "write");
 
-		// a だけに絞られたキー。ここから b を含むキーを作れてはいけない。
-		const narrow = await createApiKeyFor({ userId: user.id, addressIds: [a], scopes: ["read"] });
+		// a だけに絞られた admin スコープ付きキー。#25 でキー管理自体が admin 限定になったので、
+		// clampAddressIds / clampScopes（広げられない）を確かめるにはキー管理の門を通る必要がある。
+		const narrow = await createApiKeyFor({ userId: user.id, addressIds: [a], scopes: ["read", "admin"] });
 
 		const widerAddress = await request(app, "/api/v1/me/api-keys", {
 			...json({ name: "k", scopes: ["read"], addressIds: [b] }),
@@ -385,5 +435,79 @@ describe("/v1/me/api-keys は自分のキーだけ", () => {
 		});
 		expect(same.status).toBe(201);
 		expect((await same.json()) as { addressIds: string[] }).toMatchObject({ addressIds: [a] });
+	});
+
+	it("read だけのキーからはキー管理そのものができない（#25）", async () => {
+		await ownerCookie();
+		const user = await createUser({ role: "member", email: "e@example.test", password: PASSWORD });
+		const readOnly = await createApiKeyFor({ userId: user.id, scopes: ["read"] });
+
+		const res = await request(app, "/api/v1/me/api-keys", {
+			...json({ name: "k", scopes: ["read"] }),
+			bearer: readOnly.token,
+		});
+		expect(res.status).toBe(403);
+	});
+});
+
+describe("管理一覧のページング（#15）", () => {
+	type Page = { data: { id: string }[]; next_cursor: string | null };
+
+	async function readAll(path: string, cookie: string, limit: number) {
+		const seen: string[] = [];
+		let cursor: string | null = null;
+		let pages = 0;
+		do {
+			const sep = path.includes("?") ? "&" : "?";
+			const url: string = `${path}${sep}limit=${limit}${cursor ? `&cursor=${cursor}` : ""}`;
+			const res = await request(app, url, { cookie });
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as Page;
+			expect(body.data.length).toBeLessThanOrEqual(limit);
+			seen.push(...body.data.map((r) => r.id));
+			cursor = body.next_cursor;
+			pages++;
+		} while (cursor);
+		return { seen, pages };
+	}
+
+	it("ユーザー一覧は limit ごとに区切られ、同じ秒に作られた行も漏れず重複しない", async () => {
+		const cookie = await ownerCookie();
+		for (let i = 0; i < 4; i++) await createUser({ role: "member", email: `p${i}@example.test` });
+		const all = await db().select({ id: schema.users.id }).from(schema.users);
+
+		const { seen, pages } = await readAll("/api/v1/admin/users", cookie, 2);
+		expect(pages).toBe(3);
+		expect(new Set(seen).size).toBe(seen.length);
+		expect([...seen].sort()).toEqual(all.map((u) => u.id).sort());
+	});
+
+	it("API キー一覧も userId で絞ったままページングできる", async () => {
+		const cookie = await ownerCookie();
+		const agent = await createUser({ role: "agent", email: "paged-bot@example.test" });
+		const other = await createUser({ role: "agent", email: "other-bot@example.test" });
+		const mine: string[] = [];
+		for (let i = 0; i < 3; i++) mine.push((await createApiKeyFor({ userId: agent.id, scopes: ["read"] })).id);
+		await createApiKeyFor({ userId: other.id, scopes: ["read"] });
+
+		const { seen, pages } = await readAll(`/api/v1/admin/api-keys?userId=${agent.id}`, cookie, 2);
+		expect(pages).toBe(2);
+		expect([...seen].sort()).toEqual([...mine].sort());
+	});
+
+	it("limit の上限超え・壊れた cursor・空の userId は 400", async () => {
+		const cookie = await ownerCookie();
+		expect((await request(app, "/api/v1/admin/users?limit=101", { cookie })).status).toBe(400);
+		expect((await request(app, "/api/v1/admin/users?cursor=%%%", { cookie })).status).toBe(400);
+		expect((await request(app, "/api/v1/admin/api-keys?userId=", { cookie })).status).toBe(400);
+		expect((await request(app, "/api/v1/admin/api-keys?cursor=bm9wZQ", { cookie })).status).toBe(400);
+	});
+
+	it("既定の上限は 25 件", async () => {
+		const cookie = await ownerCookie();
+		for (let i = 0; i < 26; i++) await createUser({ role: "member", email: `d${i}@example.test` });
+		const body = (await (await request(app, "/api/v1/admin/users", { cookie })).json()) as Page;
+		expect(body.data).toHaveLength(25);
+		expect(body.next_cursor).toBeTruthy();
 	});
 });

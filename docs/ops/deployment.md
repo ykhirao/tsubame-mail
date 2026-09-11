@@ -43,10 +43,15 @@ npx wrangler d1 create tsubame
 # R2（生 MIME と添付）
 npx wrangler r2 bucket create tsubame-mail
 
-# Queues（受信・送信）
+# Queues（受信・送信とそれぞれの DLQ）
 npx wrangler queue create tsubame-inbound
 npx wrangler queue create tsubame-outbound
+npx wrangler queue create tsubame-inbound-dlq
+npx wrangler queue create tsubame-outbound-dlq
 ```
+
+受信・送信のキューはどちらも 3 回失敗すると DLQ（`tsubame-inbound-dlq` /
+`tsubame-outbound-dlq`）に落ちる。作っておかないとデプロイが失敗する。
 
 `npx wrangler d1 create tsubame` の出力に `database_id = "<UUID>"` がある。
 
@@ -65,7 +70,7 @@ npx wrangler queue create tsubame-outbound
 ```bash
 npx wrangler secret put CF_API_TOKEN
 npx wrangler secret put CF_ACCOUNT_ID
-npx wrangler secret put AUTH_SECRET
+npx wrangler secret put INTERNAL_SECRET
 ```
 
 それぞれの値は以下。
@@ -93,16 +98,16 @@ Zone リソースは **初期は `example.com` の 1 ゾーンだけ**に限定�
 
 アカウント ID（Cloudflare のダッシュボード右側に出る 32 桁の英数字）。
 
-### AUTH_SECRET
+### INTERNAL_SECRET
 
-セッション Cookie と API キーのハッシュ用ソルト（`worker-env.d.ts` 参照）。
-必ず 32 バイト以上の乱数を値にする:
+最初のオーナーを作るときの合言葉（`worker-env.d.ts` 参照）。**20 文字以上**の乱数にする:
 
 ```bash
-openssl rand -hex 32
+openssl rand -base64 32
 ```
 
-出力された 48 文字の hex を `AUTH_SECRET` として投入する。**漏れたら全セッションと API キーを失効させる**想定で取り扱う。
+未設定、または 20 文字未満だと `POST /api/v1/auth/bootstrap` が 403 を返し、
+**誰もオーナーを作れない**（安全側に倒してある）。詳細は第 8 節。
 
 > GitHub Actions でデプロイする場合は、上記 3 つに加えて
 > `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `RIDLEY_DATABASE_ID` を
@@ -245,10 +250,59 @@ curl -X POST "https://<あなたの公開ホスト>/api/v1/auth/bootstrap" \
       `GET /api/v1/messages`（API キー or セッション）で見える
 - [ ] **送信**: API キーか UI から `POST /api/v1/messages`（scope: send）で送信し、
       相手に届く。`outbound_jobs` の status が `sent` になる
-- [ ] **API キーでの取得**: 管理画面で API キーを発行し、`rid_...` を
+- [ ] **API キーでの取得**: 管理画面で API キーを発行し、`tsb_...` を
       `Authorization: Bearer` に載せて `GET /api/v1/messages` が読める（scope: read）
 
 受信の詳細な観測は `docs/ops/operations.md` の `wrangler tail` を参照。
+
+---
+
+## 10. Webhook の署名検証（受け手向け）
+
+登録した Webhook の URL には、`message.received` / `message.sent` / `message.failed` の
+通知が `X-Tsubame-Signature` ヘッダ付きで届く。受け手はこのヘッダを検証してから本文を信用すること。
+
+### ヘッダの形式
+
+```
+X-Tsubame-Signature: t=<配信時刻の unix 秒>,v1=<HMAC-SHA256 の hex>
+```
+
+`v1` は、Webhook 作成時に一度だけ表示される `secret` を鍵にした
+`HMAC-SHA256("<t>.<body>")` の 16 進数表現。`<t>.<body>` はドットで結合した文字列で、
+`body` は実際に送信された JSON のバイト列そのもの（受信後に整形・再パースしたものではない）。
+
+### 検証手順
+
+1. ヘッダを `t=...,v1=...` でパースする。
+2. `HMAC-SHA256(secret, ` + `` `${t}.${body}` `` + `)` を自分で計算する。
+3. 計算した値と受け取った `v1` を**定数時間比較**する（`v1` の文字列比較に
+   単純な `===` を使うとタイミング攻撃の余地が残る。Node の `crypto.timingSafeEqual`、
+   Workers なら固定長のバイト列を XOR して OR で畳み込む自作関数などを使う）。
+4. `t` が現在時刻から離れすぎていないか確認する（**許容幅の目安は前後 5 分**）。
+   古い署名済みリクエストのリプレイを防ぐため。
+
+### 実装例（Node.js）
+
+```js
+import { timingSafeEqual, createHmac } from "node:crypto";
+
+function verify(secret, header, body, toleranceSec = 300) {
+  const m = /^t=(\d+),v1=([0-9a-f]+)$/.exec(header);
+  if (!m) return false;
+  const [, tStr, v1] = m;
+  const t = Number(tStr);
+  if (Math.abs(Date.now() / 1000 - t) > toleranceSec) return false;
+
+  const expected = createHmac("sha256", secret).update(`${t}.${body}`).digest("hex");
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(v1, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+```
+
+`secret` は作成レスポンス（`POST /api/v1/webhooks`）にのみ平文で含まれ、以後は取得できない。
+紛失した場合は Webhook を作り直す。
 
 ---
 

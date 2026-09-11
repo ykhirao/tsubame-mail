@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { schema } from "@/db/client";
 import {
 	buildTestApp,
 	createAddress,
 	createApiKeyFor,
 	createDomain,
 	createUser,
+	db,
 	grant,
 	json,
 	request,
@@ -20,7 +23,7 @@ const OWNER = {
 	email: "owner@example.test",
 	name: "オーナー",
 	password: "correct-horse-1234",
-	secret: "test-internal-secret-0123456789",
+	secret: "vitest-fixture-internal-secret-9f8e7d6c",
 };
 
 async function bootstrap() {
@@ -52,6 +55,38 @@ describe("POST /v1/auth/bootstrap", () => {
 	it("短すぎるパスワードは 400", async () => {
 		const res = await request(app, "/api/v1/auth/bootstrap", json({ ...OWNER, password: "short" }));
 		expect(res.status).toBe(400);
+	});
+
+	it("INTERNAL_SECRET がテスト・ローカル用の既知の値だと拒否する（#48）", async () => {
+		const knownSecrets = ["test-internal-secret-0123456789", "local-dev-internal-secret-0123456789"];
+		for (const secret of knownSecrets) {
+			const res = await request(app, "/api/v1/auth/bootstrap", {
+				...json({ ...OWNER, secret }),
+				env: { INTERNAL_SECRET: secret },
+			});
+			expect(res.status).toBe(403);
+		}
+
+		const stateRes = await request(app, "/api/v1/auth/setup-state");
+		const state = (await stateRes.json()) as { needsSetup: boolean };
+		expect(state.needsSetup).toBe(true);
+	});
+
+	it("bootstrap は IP 単位でレート制限される（#52）", async () => {
+		let sawRateLimited = false;
+		const fixedIp = "203.0.113.1";
+		for (let i = 0; i < 25; i++) {
+			const res = await request(app, "/api/v1/auth/bootstrap", {
+				...json({ ...OWNER, email: `owner-${i}@example.test`, secret: "wrong-secret-value" }),
+				headers: { "cf-connecting-ip": fixedIp },
+			});
+			if (res.status === 429) {
+				sawRateLimited = true;
+				break;
+			}
+			expect(res.status).toBe(403);
+		}
+		expect(sawRateLimited).toBe(true);
 	});
 });
 
@@ -112,6 +147,22 @@ describe("POST /v1/auth/login", () => {
 			json({ email: agent.email, password: "anything-1234" }),
 		);
 		expect(res.status).toBe(401);
+	});
+
+	it("居ないメールでも agent でも、同じダミーハッシュに対して verifyPassword を走らせる（#26）", async () => {
+		await bootstrap();
+		const agent = await createUser({ role: "agent", email: "agent2@example.test" });
+		const password = await import("@/lib/password");
+		const spy = vi.spyOn(password, "verifyPassword");
+
+		await request(app, "/api/v1/auth/login", json({ email: "nobody2@example.test", password: "x-0000000000" }));
+		await request(app, "/api/v1/auth/login", json({ email: agent.email, password: "x-0000000000" }));
+
+		expect(spy).toHaveBeenCalledTimes(2);
+		for (const call of spy.mock.calls) {
+			expect(call[1]).toBe(password.DUMMY_PASSWORD_HASH);
+		}
+		spy.mockRestore();
 	});
 
 	it("総当たりはレート制限で 429 になる", async () => {
@@ -278,6 +329,104 @@ describe("API キーの受け付け", () => {
 		const res = await request(app, "/api/v1/me/api-keys", { bearer: key.token });
 		const body = (await res.json()) as { data: { id: string; lastUsedAt: number | null }[] };
 		expect(body.data[0]!.lastUsedAt).not.toBeNull();
+	});
+});
+
+describe("/v1/me/api-keys のスコープの門（#25）", () => {
+	it("read だけのキーでは新しいキーを作れない", async () => {
+		const owner = await createUser({ role: "owner", email: "gate1@example.test" });
+		const leaked = await createApiKeyFor({ userId: owner.id, scopes: ["read"] });
+
+		const res = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			bearer: leaked.token,
+			body: JSON.stringify({ name: "子キー", scopes: ["read"] }),
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("send だけのキーでは他のキーを失効できない", async () => {
+		const owner = await createUser({ role: "owner", email: "gate2@example.test" });
+		const target = await createApiKeyFor({ userId: owner.id, scopes: ["read"] });
+		const attacker = await createApiKeyFor({ userId: owner.id, scopes: ["send"] });
+
+		const res = await request(app, `/api/v1/me/api-keys/${target.id}`, {
+			method: "DELETE",
+			bearer: attacker.token,
+		});
+		expect(res.status).toBe(403);
+
+		const still = await request(app, "/api/v1/me/api-keys", { bearer: target.token });
+		expect(still.status).toBe(200);
+	});
+
+	it("admin スコープのキーからは作成・失効できる", async () => {
+		const owner = await createUser({ role: "owner", email: "gate3@example.test" });
+		const adminKey = await createApiKeyFor({ userId: owner.id, scopes: ["admin", "read"] });
+
+		const created = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			bearer: adminKey.token,
+			body: JSON.stringify({ name: "admin 発行", scopes: ["read"] }),
+		});
+		expect(created.status).toBe(201);
+		const createdBody = (await created.json()) as { id: string };
+
+		const revoked = await request(app, `/api/v1/me/api-keys/${createdBody.id}`, {
+			method: "DELETE",
+			bearer: adminKey.token,
+		});
+		expect(revoked.status).toBe(200);
+	});
+
+	it("Cookie セッションからは常に作成・失効できる", async () => {
+		const { cookie } = await bootstrap();
+		const created = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			cookie,
+			body: JSON.stringify({ name: "セッション発行", scopes: ["read"] }),
+		});
+		expect(created.status).toBe(201);
+	});
+
+	it("期限付きの親キーからは、親の期限を超える子キーを作れない（clamp）", async () => {
+		const owner = await createUser({ role: "owner", email: "gate4@example.test" });
+		const parentExpiresAt = new Date(Date.now() + 60_000);
+		const parent = await createApiKeyFor({
+			userId: owner.id,
+			scopes: ["admin", "read"],
+			expiresAt: parentExpiresAt,
+		});
+
+		const farFuture = Math.floor(Date.now() / 1000) + 86_400 * 365;
+		const res = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			bearer: parent.token,
+			body: JSON.stringify({ name: "無期限を狙う子キー", scopes: ["read"], expiresAt: farFuture }),
+		});
+		expect(res.status).toBe(201);
+		const body = (await res.json()) as { expiresAt: number | null };
+		expect(body.expiresAt).not.toBeNull();
+		expect(body.expiresAt!).toBeLessThanOrEqual(Math.floor(parentExpiresAt.getTime() / 1000));
+	});
+
+	it("監査ログに apiKeyId が残る", async () => {
+		const owner = await createUser({ role: "owner", email: "gate5@example.test" });
+		const adminKey = await createApiKeyFor({ userId: owner.id, scopes: ["admin", "read"] });
+
+		const created = await request(app, "/api/v1/me/api-keys", {
+			method: "POST",
+			bearer: adminKey.token,
+			body: JSON.stringify({ name: "監査確認", scopes: ["read"] }),
+		});
+		expect(created.status).toBe(201);
+
+		const rows = await db()
+			.select()
+			.from(schema.auditLogs)
+			.where(eq(schema.auditLogs.action, "api_key.create"));
+		const last = rows[rows.length - 1];
+		expect((last?.meta as { apiKeyId?: string } | null)?.apiKeyId).toBe(adminKey.id);
 	});
 });
 

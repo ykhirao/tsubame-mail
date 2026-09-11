@@ -54,6 +54,23 @@ describe("FR-7 ルーティングルール", () => {
 		expect(h.pending).toHaveLength(0);
 	});
 
+	scenario("FR-7", "宛先の reject は +タグ を足しても効く", async () => {
+		await createDomainRule({
+			name: "ai 宛てを拒否",
+			action: "reject",
+			matcher: { to: "ai@mail.tsubame.test" },
+			target: "この宛先は受け付けていません",
+		});
+
+		const result = await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai+x@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai+x@mail.tsubame.test" }),
+		});
+		expect(result.rejected).toBe("この宛先は受け付けていません");
+		expect(h.pending).toHaveLength(0);
+	});
+
 	scenario("FR-7", "domain スコープの forward が転送され、ループ防止ヘッダ付きは転送しない", async () => {
 		await createDomainRule({
 			name: "外部へ転送",

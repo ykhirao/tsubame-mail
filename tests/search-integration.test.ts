@@ -4,13 +4,17 @@ import { applyMigrations } from "./helpers/migrate";
 import initSql from "../migrations/0000_init.sql?raw";
 import ftsSql from "../migrations/0001_search_fts.sql?raw";
 import { drizzle } from "drizzle-orm/d1";
+import { eq } from "drizzle-orm";
 import * as schema from "@/db/schema";
 import type { Principal } from "@/shared/contracts/common";
 import {
 	queryMessages,
+	queryThreadMessages,
+	queryThreads,
 	resolveMailboxId,
 	decodeCursor,
 	encodeCursor,
+	MAX_THREAD_MESSAGES,
 } from "@/domain/search/sql";
 import { parseSearchQuery } from "@/domain/search/query";
 
@@ -225,6 +229,86 @@ describe("認可: 権限外のアドレスのメッセージを返さない", ()
 	});
 });
 
+describe("FTS 同期トリガの delete コマンド形式（#27）", () => {
+	it("UPDATE 後は旧語で MATCH してもヒットしない", async () => {
+		await insertMessage({
+			id: "msg_fts_upd",
+			addressId: "adr_a",
+			subject: "secret invoice",
+			receivedAt: new Date(1_770_002_000_000),
+		});
+		const before = await queryMessages(db, {
+			principal: principal("all", "owner"),
+			filters: { search: parseSearchQuery("secret invoice") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(before.rows.map((r) => r.id)).toContain("msg_fts_upd");
+
+		await db
+			.update(schema.messages)
+			.set({ subject: "changed" })
+			.where(eq(schema.messages.id, "msg_fts_upd"));
+
+		const stale = await queryMessages(db, {
+			principal: principal("all", "owner"),
+			filters: { search: parseSearchQuery("secret invoice") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(stale.rows.map((r) => r.id)).not.toContain("msg_fts_upd");
+
+		const fresh = await queryMessages(db, {
+			principal: principal("all", "owner"),
+			filters: { search: parseSearchQuery("changed") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(fresh.rows.map((r) => r.id)).toContain("msg_fts_upd");
+	});
+
+	it("DELETE 後、rowid が再利用されても別アドレスの新しい行が旧語でヒットしない", async () => {
+		await insertMessage({
+			id: "msg_fts_del",
+			addressId: "adr_a",
+			subject: "world exclusive",
+			receivedAt: new Date(1_770_003_000_000),
+		});
+		const row = await env.DB.prepare(
+			`select rowid as r from messages where id = ?`,
+		)
+			.bind("msg_fts_del")
+			.first<{ r: number }>();
+		const rowid = row!.r;
+
+		await db.delete(schema.messages).where(eq(schema.messages.id, "msg_fts_del"));
+
+		await env.DB.prepare(
+			`insert into messages
+				(rowid, id, thread_id, address_id, direction, status, from_addr, to_addr, subject, received_at, is_read, is_starred, has_attachments)
+			values (?, ?, 'thr_b', 'adr_b', 'inbound', 'received', 'sender@example.com', 'b@ex.com', 'hello', ?, 0, 0, 0)`,
+		)
+			.bind(rowid, "msg_fts_reused", 1_770_003_500_000)
+			.run();
+
+		const falsePositive = await queryMessages(db, {
+			principal: principal("all", "owner"),
+			filters: { search: parseSearchQuery("world exclusive") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(falsePositive.rows.map((r) => r.id)).not.toContain("msg_fts_reused");
+
+		const genuine = await queryMessages(db, {
+			principal: principal("all", "owner"),
+			filters: { search: parseSearchQuery("hello") },
+			order: "received_at",
+			limit: 25,
+		});
+		expect(genuine.rows.map((r) => r.id)).toContain("msg_fts_reused");
+	});
+});
+
 describe("カーソルページング", () => {
 	it("limit をまたいでも重複・取りこぼしがない", async () => {
 
@@ -258,5 +342,77 @@ describe("カーソルページング", () => {
 		const cur = encodeCursor(1_770_000_000, "msg_x");
 		expect(decodeCursor(cur)).toEqual({ receivedAt: 1_770_000_000, id: "msg_x" });
 		expect(decodeCursor("invalid!!")).toBeNull();
+	});
+
+	it("負数の receivedAt も読める（#19: 1970 年以前のクランプ前の値でも次ページが 400 にならない）", () => {
+		const cur = encodeCursor(-62135596800, "msg_old");
+		expect(decodeCursor(cur)).toEqual({ receivedAt: -62135596800, id: "msg_old" });
+	});
+});
+
+describe("queryThreadMessages", () => {
+	it("同じ From への接ぎ木で無限に伸ばせないよう上限を付ける（#35）", async () => {
+		const total = MAX_THREAD_MESSAGES + 5;
+		for (let i = 0; i < total; i++) {
+			await insertMessage({
+				id: `msg_thr_${i}`,
+				addressId: "adr_a",
+				subject: `続き ${i}`,
+				receivedAt: new Date(1_770_002_000_000 + i * 1000),
+				threadId: "thr_a",
+			});
+		}
+		const rows = await queryThreadMessages(db, principal("all", "owner"), "thr_a");
+		expect(rows.length).toBeLessThanOrEqual(MAX_THREAD_MESSAGES);
+	});
+});
+
+describe("スレッド一覧・詳細は既定でゴミ箱を除外する（#92）", () => {
+	it("全メッセージが trash のスレッドは受信箱に出ず、includeTrash で出せる", async () => {
+		const thrId = "thr_trash";
+		await insertMessage({
+			id: "msg_a1",
+			addressId: "adr_a",
+			subject: "普通のメール",
+			receivedAt: new Date(1_770_010_000_000),
+		});
+		await db.insert(schema.threads).values({
+			id: thrId,
+			addressId: "adr_a",
+			subject: "宣伝",
+			lastMessageAt: new Date(1_770_011_000_000),
+			messageCount: 1,
+			unreadCount: 0,
+		});
+		await db.insert(schema.messages).values({
+			id: "msg_trash",
+			threadId: thrId,
+			addressId: "adr_a",
+			direction: "inbound",
+			status: "trash",
+			fromAddr: "spam@evil.jp",
+			toAddr: "a@ex.com",
+			subject: "宣伝",
+			receivedAt: new Date(1_770_011_000_000),
+			isRead: false,
+			isStarred: false,
+			hasAttachments: false,
+		});
+
+		const normal = await queryThreads(db, { principal: principal("all", "owner"), limit: 25 });
+		expect(normal.rows.map((t) => t.id)).toContain("thr_a");
+		expect(normal.rows.map((t) => t.id)).not.toContain(thrId);
+
+		const withTrash = await queryThreads(db, {
+			principal: principal("all", "owner"),
+			limit: 25,
+			includeTrash: true,
+		});
+		expect(withTrash.rows.map((t) => t.id)).toContain(thrId);
+
+		const msgs = await queryThreadMessages(db, principal("all", "owner"), thrId);
+		expect(msgs).toHaveLength(0);
+		const allMsgs = await queryThreadMessages(db, principal("all", "owner"), thrId, true);
+		expect(allMsgs.map((m) => m.id)).toContain("msg_trash");
 	});
 });

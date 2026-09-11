@@ -4,14 +4,30 @@
 // メールは必ず本物の受信ハンドラ（/cdn-cgi/handler/email）を通すこと。SQL で messages に
 // 直接入れるとスレッドの無い行ができ、「サイドバーの未読は 1 なのに一覧は空」になる。
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const BASE = process.env.RIDLEY_BASE ?? "http://127.0.0.1:8787";
+
+// bootstrap は配布済みの既知の合言葉を拒否する（精査 #48）ので、既定値は持たず
+// wrangler dev が読む .dev.vars と同じ値を使う。
+function readDevVarsSecret() {
+	try {
+		const m = readFileSync(".dev.vars", "utf8").match(/^INTERNAL_SECRET\s*=\s*"?([^"\n]*)"?\s*$/m);
+		return m?.[1]?.trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+const secret = process.env.RIDLEY_INTERNAL_SECRET ?? readDevVarsSecret();
+if (!secret) {
+	console.error("INTERNAL_SECRET が見つかりません。.dev.vars に 20 文字以上の値を入れるか RIDLEY_INTERNAL_SECRET を指定してください。");
+	process.exit(1);
+}
 const OWNER = {
 	email: "owner@example.com",
 	name: "オーナー",
 	password: "correct-horse-battery",
-	// .dev.vars の INTERNAL_SECRET と揃える。
-	secret: process.env.RIDLEY_INTERNAL_SECRET ?? "local-dev-internal-secret-0123456789",
+	secret,
 };
 const reset = process.argv.includes("--reset");
 

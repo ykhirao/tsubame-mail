@@ -58,6 +58,47 @@ describe("isOwnDnsRecord", () => {
 		).toBe(true);
 	});
 
+	it("apex 切断は名前の完全一致だけを対象にし、他のサブドメインの DNS は残す（#18）", () => {
+		const apexTarget = { ...target, name: "example.com", mode: "apex" as const };
+
+		// 自分の apex 宛 MX / SPF / DKIM（cf-bounce._domainkey.<apex> の完全一致）は対象。
+		expect(
+			isOwnDnsRecord({ type: "MX", name: "example.com", content: "route1.mx.cloudflare.net" }, apexTarget),
+		).toBe(true);
+		expect(
+			isOwnDnsRecord(
+				{ type: "TXT", name: "cf-bounce._domainkey.example.com", content: "v=DKIM1; p=AAA" },
+				apexTarget,
+			),
+		).toBe(true);
+
+		// 他のサブドメイン（他のツールや別接続）の DNS はゾーン内でも触らない。
+		expect(
+			isOwnDnsRecord(
+				{ type: "MX", name: "mail.example.com", content: "route1.mx.cloudflare.net" },
+				apexTarget,
+			),
+		).toBe(false);
+		expect(
+			isOwnDnsRecord(
+				{ type: "TXT", name: "mail.example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+				apexTarget,
+			),
+		).toBe(false);
+		expect(
+			isOwnDnsRecord(
+				{ type: "TXT", name: "cf-bounce._domainkey.mail.example.com", content: "v=DKIM1; p=AAA" },
+				apexTarget,
+			),
+		).toBe(false);
+		expect(
+			isOwnDnsRecord(
+				{ type: "MX", name: "other.example.com", content: "route1.mx.cloudflare.net" },
+				apexTarget,
+			),
+		).toBe(false);
+	});
+
 	it("apex と他人のレコードには触らない", () => {
 		expect(
 			isOwnDnsRecord({ type: "MX", name: "example.com", content: "aspmx.l.google.com" }, target),
@@ -148,5 +189,38 @@ describe("cleanupDomain", () => {
 
 		expect(result.catchAllDisabled).toBe(true);
 		expect(fake.catchAll.enabled).toBe(false);
+	});
+
+	it("apex 切断で他のサブドメインのメール用 DNS を消さない（#18・実証）", async () => {
+		const apexTarget = {
+			zoneId: "zone1",
+			zoneName: "example.com",
+			name: "example.com",
+			mode: "apex" as const,
+			workerName: "tsubame",
+			catchAllEnabled: false,
+		};
+		const fake = createFakeCloudflare({
+			zones: [{ id: "zone1", name: "example.com" }],
+			dnsRecords: [
+				{ id: "apex-mx", type: "MX", name: "example.com", content: "route1.mx.cloudflare.net" },
+				{ id: "apex-spf", type: "TXT", name: "example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+				{ id: "apex-dkim", type: "TXT", name: "cf-bounce._domainkey.example.com", content: "v=DKIM1; p=AAA" },
+				// 別接続（他のツールが張った、または別ドメイン行の）サブドメインの DNS。巻き込んではいけない。
+				{ id: "sub-mx", type: "MX", name: "mail.example.com", content: "route1.mx.cloudflare.net" },
+				{ id: "sub-spf", type: "TXT", name: "mail.example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+				{ id: "sub-dkim", type: "TXT", name: "cf-bounce._domainkey.mail.example.com", content: "v=DKIM1; p=AAA" },
+				{ id: "other-mx", type: "MX", name: "other.example.com", content: "route1.mx.cloudflare.net" },
+			],
+		});
+
+		const result = await cleanupDomain(new CloudflareApi(testEnv, { fetch: fake.fetch }), apexTarget);
+
+		expect(result.removedDnsRecords.sort()).toEqual([
+			"MX example.com",
+			"TXT cf-bounce._domainkey.example.com",
+			"TXT example.com",
+		]);
+		expect(fake.dnsRecords.map((r) => r.id).sort()).toEqual(["other-mx", "sub-dkim", "sub-mx", "sub-spf"]);
 	});
 });

@@ -1,21 +1,11 @@
-import { Link, useNavigate, useSearchParams } from "react-router";
-import { useEffect, useState, type FormEvent } from "react";
+import { Navigate, useNavigate, useSearchParams } from "react-router";
+import { useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
-import { AuthApi } from "@/ui/lib/api";
+import { FullScreenSpinner } from "@/ui/components/Spinner";
+import { useSetupState } from "@/ui/lib/setup";
 
 export function Login() {
-	const [needsSetup, setNeedsSetup] = useState(false);
-
-	useEffect(() => {
-		let alive = true;
-		AuthApi.setupState()
-			.then((r) => alive && setNeedsSetup(r.needsSetup))
-			.catch(() => {});
-		return () => {
-			alive = false;
-		};
-	}, []);
-
+	const setup = useSetupState();
 	const { login } = useAuth();
 	const navigate = useNavigate();
 	const [params] = useSearchParams();
@@ -39,6 +29,10 @@ export function Login() {
 			setBusy(false);
 		}
 	};
+
+	// オーナーが 1 人も居ない間はログインできる相手が存在しない。作成画面だけを出す。
+	if (setup === "loading") return <FullScreenSpinner />;
+	if (setup === "needs-setup") return <Navigate to="/bootstrap" replace />;
 
 	const inputCls =
 		"mb-4 w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] outline-none transition-colors focus:border-[var(--accent)]";
@@ -91,16 +85,6 @@ export function Login() {
 				>
 					{busy ? "ログイン中…" : "ログイン"}
 				</button>
-
-				{/* オーナーが居る間は初回セットアップへの入口を出さない。 */}
-				{needsSetup && (
-					<p className="mt-6 text-center text-xs text-[var(--text-muted)]">
-						初めてのセットアップですか？{" "}
-						<Link to="/bootstrap" className="text-[var(--accent)] hover:underline">
-							最初のオーナーを作成
-						</Link>
-					</p>
-				)}
 			</form>
 		</div>
 	);

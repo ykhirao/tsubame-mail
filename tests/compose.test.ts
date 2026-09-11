@@ -52,6 +52,21 @@ describe("buildReplyQuote", () => {
 		const { text } = buildReplyQuote({ fromAddr: "a@b.jp", receivedAt: src.receivedAt });
 		expect(text).toContain("（本文なし）");
 	});
+
+	it("受信 HTML の script / img / blockquote 脱出をサニタイズする（#16）", () => {
+		const { html } = buildReplyQuote({
+			fromAddr: "attacker@evil.example",
+			receivedAt: src.receivedAt,
+			htmlBody: '<p>hi</p><img src="https://attacker.example/t.png"></blockquote><script>1</script>',
+		});
+		expect(html).not.toContain("<script>");
+		expect(html).not.toContain("<img");
+		expect(html).not.toContain("</blockquote><script>");
+		// blockquote は 1 個だけ（開閉とも quoteHtml 由来）
+		expect(html.match(/<blockquote>/g)).toHaveLength(1);
+		expect(html.match(/<\/blockquote>/g)).toHaveLength(1);
+		expect(html).toContain("hi");
+	});
 });
 
 describe("replySubject", () => {
@@ -73,6 +88,15 @@ describe("referencesFor", () => {
 	});
 	it("既にあれば重複させない", () => {
 		expect(referencesFor("<c@x>", "<c@x>")).toBe("<c@x>");
+	});
+
+	it("大量の References は直近だけ残す（#34）", () => {
+		const long = Array.from({ length: 200 }, (_, i) => `<${i}@x.jp>`).join(" ");
+		const result = referencesFor(long, "<200@x.jp>");
+		const ids = result.split(" ");
+		expect(ids.length).toBeLessThanOrEqual(50);
+		expect(ids.at(-1)).toBe("<200@x.jp>");
+		expect(result.length).toBeLessThan(998);
 	});
 });
 

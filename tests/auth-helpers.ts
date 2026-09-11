@@ -48,13 +48,18 @@ export type TestApp = ReturnType<typeof buildTestApp>;
 export function request(
 	app: TestApp,
 	path: string,
-	init?: RequestInit & { cookie?: string; bearer?: string },
+	init?: RequestInit & { cookie?: string; bearer?: string; env?: Partial<CloudflareEnv> },
 ) {
 	const headers = new Headers(init?.headers);
 	if (init?.body && !headers.has("content-type")) headers.set("content-type", "application/json");
 	if (init?.cookie) headers.set("cookie", init.cookie);
 	if (init?.bearer) headers.set("authorization", `Bearer ${init.bearer}`);
-	return app.request(path, { ...init, headers }, testEnv);
+	// LOGIN_RATE_LIMIT は #52 で ip 単独の鍵も見るようになった。cf-connecting-ip を指定しない呼び出しが
+	// 全部同じ "unknown" 扱いになると、無関係なテスト同士がバケットを取り合って 429 で落ちる。
+	// 呼び出し側が明示的に ip を模したいとき（総当たりテストなど）だけ、ヘッダを渡して固定できる。
+	if (!headers.has("cf-connecting-ip")) headers.set("cf-connecting-ip", crypto.randomUUID());
+	const env = init?.env ? { ...testEnv, ...init.env } : testEnv;
+	return app.request(path, { ...init, headers }, env);
 }
 
 export function json(body: unknown): RequestInit {

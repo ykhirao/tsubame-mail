@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { role } from "./common";
+import { paginationQuery, role } from "./common";
 import { passwordSchema } from "./auth";
 
 export const grantLevel = z.enum(["read", "write"]);
@@ -17,8 +17,15 @@ export const createUserBody = z
 		password: passwordSchema.optional(),
 	})
 	.superRefine((v, ctx) => {
-		void v;
-		void ctx;
+		// agent はパスワードを持たない（PATCH /admin/users/:id と同じ制約）。
+		// 以前はここが no-op で、POST に password を付けると黙って捨てられていた。
+		if (v.role === "agent" && v.password !== undefined) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["password"],
+				message: "agent ロールはパスワードを持ちません",
+			});
+		}
 	});
 export type CreateUserBody = z.infer<typeof createUserBody>;
 
@@ -64,3 +71,5 @@ export const updateMeBody = z
 		}
 	});
 export type UpdateMeBody = z.infer<typeof updateMeBody>;
+
+export const adminUserListQuery = paginationQuery;

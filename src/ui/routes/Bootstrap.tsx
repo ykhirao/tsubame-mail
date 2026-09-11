@@ -1,28 +1,19 @@
-import { Link, useNavigate } from"react-router";
-import { useEffect, useState, type FormEvent } from"react";
-import { useAuth } from"@/ui/lib/auth";
-import { AuthApi } from"@/ui/lib/api";
+import { Navigate, useNavigate } from "react-router";
+import { useState, type FormEvent } from "react";
+import { useAuth } from "@/ui/lib/auth";
+import { AuthApi } from "@/ui/lib/api";
+import { FullScreenSpinner } from "@/ui/components/Spinner";
+import { useSetupState } from "@/ui/lib/setup";
 
 // これが唯一の自己登録経路。オーナーが既に居ればサーバが 409 を返す。
 export function Bootstrap() {
+	const setup = useSetupState();
 	const { refresh } = useAuth();
 	const navigate = useNavigate();
 	const [email, setEmail] = useState("");
 	const [name, setName] = useState("");
 	const [password, setPassword] = useState("");
 	const [secret, setSecret] = useState("");
-
-	useEffect(() => {
-		let alive = true;
-		AuthApi.setupState()
-			.then((r) => {
-				if (alive && !r.needsSetup) navigate("/login", { replace: true });
-			})
-			.catch(() => {});
-		return () => {
-			alive = false;
-		};
-	}, [navigate]);
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -44,6 +35,9 @@ export function Bootstrap() {
 			setBusy(false);
 		}
 	};
+
+	if (setup === "loading") return <FullScreenSpinner />;
+	if (setup === "ready") return <Navigate to="/login" replace />;
 
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-[var(--surface-sunken)] px-4">
@@ -121,13 +115,6 @@ export function Bootstrap() {
 				>
 					{busy ?"作成中…" :"オーナーを作成"}
 				</button>
-
-				<p className="mt-5 text-center text-xs text-[var(--text-muted)]">
-					アカウントをお持ちの方は{""}
-					<Link to="/login" className="text-blue-600 hover:underline dark:text-blue-400">
-						ログイン
-					</Link>
-				</p>
 			</form>
 		</div>
 	);
