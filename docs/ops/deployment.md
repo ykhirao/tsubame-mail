@@ -113,8 +113,8 @@ openssl rand -base64 32
 **誰もオーナーを作れない**（安全側に倒してある）。詳細は第 8 節。
 
 > GitHub Actions でデプロイする場合は、上記 3 つに加えて
-> `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `D1_DATABASE_ID` を
-> リポジトリの Secrets に登録する（第 7 節の GitHub Actions を参照）。
+> `TSUBAME_CLOUDFLARE_API_TOKEN` / `TSUBAME_CLOUDFLARE_ACCOUNT_ID` /
+> `TSUBAME_D1_DATABASE_ID` をリポジトリの Secrets に登録する（第 7 節を参照）。
 
 ---
 
@@ -203,12 +203,16 @@ D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 
 | シークレット名 | 値 |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | 第 3 節の CF_API_TOKEN と同じ値 |
-| `CLOUDFLARE_ACCOUNT_ID` | アカウント ID |
-| `D1_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
+| `TSUBAME_CLOUDFLARE_API_TOKEN` | 第 3 節の CF_API_TOKEN と同じ値 |
+| `TSUBAME_CLOUDFLARE_ACCOUNT_ID` | アカウント ID |
+| `TSUBAME_D1_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
 
-`CLOUDFLARE_API_TOKEN` は wrangler 本体の認証にも使う（Workers Scripts Edit 等の
-権限が必要になる場合がある。トークンに Workers Scripts: Edit を加える）。
+トークンは wrangler 本体の認証にも使うため、第 3 節の権限に加えて
+**Workers Scripts: Edit** が要る。
+
+> `TSUBAME_` が付くのは GitHub の Secret 名だけ。ワークフローはこれを
+> `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` という名前で wrangler に渡す
+> （wrangler が読む環境変数名は決まっていて変えられない）。
 
 実行: *Actions → Deploy → Run workflow*。
 
