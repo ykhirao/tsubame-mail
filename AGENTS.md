@@ -33,6 +33,8 @@ npm run deploy           # build + wrangler deploy
 
 ## 規約
 
+- **開発は最新の `main` から始め、`main` へはスカッシュマージする。**
+  始める前に `git fetch` し、`origin/main` から枝を切る。枝の途中のコミットは `main` に残さない。
 - **コメントは負債。書かないのが既定で、why だけを例外として残す。**
   区切り線・章立て、識別子を言い換えただけの JSDoc、ファイル冒頭の設計解説は書かない
   （`.agents/skills/comments/SKILL.md`。`npm run check:comments` と commit フックで見張る）。
