@@ -9,6 +9,8 @@
   **各要件には、それを検証する e2e が必ず 1 つ以上ある**（下の「検証状況」を参照）。
 - [設計](architecture.html) — どう作るか。ディレクトリの所有権、データモデル、API 契約。
 - [検索方式の決定](adr-search.html) — 日本語検索を実測で決めた記録。
+- 検討中: [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
+  まだ要件に入れていない。実装に着手するときに FR-15 / FR-16 として要件へ移す。
 
 運用は別冊: [デプロイ](../ops/deployment.html) / [切り替え](../ops/cutover.html) /
 [日々の運用](../ops/operations.html)
