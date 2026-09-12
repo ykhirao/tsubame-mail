@@ -52,9 +52,12 @@ const messageListItem = {
 		},
 		subject: { type: ["string", "null"] },
 		snippet: { type: ["string", "null"] },
-		fromAddr: { type: "string" },
+		fromAddr: { type: "string", description: "差出人。応答側の名前は `from` ではない。" },
 		fromName: { type: ["string", "null"] },
-		toAddr: { type: "string" },
+		toAddr: {
+			type: "string",
+			description: "宛先。`+タグ` は付いたまま入るので、確認に生 MIME は要らない。",
+		},
 		ccAddr: { type: ["string", "null"] },
 		spamVerdict: { type: ["string", "null"] },
 		receivedAt: { type: "integer", description: "Unix 秒。" },
@@ -145,7 +148,10 @@ const spec = {
 				description:
 					"`status` を指定しなければゴミ箱は除いて返る。\n\n" +
 					"`q` では `from:` `to:` `subject:` `body:` `since:` `until:` `is:` `has:` `in:` が使える。" +
-					"演算子に該当しない語（フリーワード）は 10 個まで。",
+					"演算子に該当しない語（フリーワード）は 10 個まで。\n\n" +
+					"**宛先と差出人は、絞り込みが `to` / `from`、返る値が `toAddr` / `fromAddr` で名前が違う。**" +
+					"応答に `to` / `from` という項目は無い（送信のボディだけがその名前を使う）。" +
+					"`toAddr` には `+タグ` が付いたままの宛先が入るので、サブアドレスの確認に生 MIME は要らない。",
 				parameters: [
 					param("limit", { type: "integer", minimum: 1, maximum: 100, default: 25 }, "1 ページの件数。"),
 					param("cursor", { type: "string" }, "前のページの `next_cursor`。"),
