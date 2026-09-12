@@ -111,6 +111,54 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 		expect(row.unreadCount).toBe(1);
 	});
 
+	// ゴミ箱の会話は受信箱に出ないので、開いて消すことができない。数えると
+	// 「濃い行が 1 つも無いのにバッジだけ残る」状態になる。
+	it("ゴミ箱だけの未読はバッジに出さない", async () => {
+		const db = getTestDb();
+		const domainId = newId("domain");
+		await db.insert(domains).values({
+			id: domainId,
+			name: "trashonly.test",
+			zoneId: "zone3",
+			zoneName: "trashonly.test",
+			mode: "subdomain",
+		});
+		const addressId = newId("address");
+		await db.insert(addresses).values({
+			id: addressId,
+			domainId,
+			localPart: "inbox",
+			address: "inbox@trashonly.test",
+		});
+		const threadId = newId("thread");
+		await db.insert(threads).values({
+			id: threadId,
+			addressId,
+			subject: "s",
+			lastMessageAt: new Date(),
+			messageCount: 1,
+			unreadCount: 1,
+		});
+		await db.insert(messages).values({
+			id: newId("message"),
+			addressId,
+			threadId,
+			direction: "inbound",
+			status: "trash",
+			isRead: false,
+			fromAddr: "a@b.test",
+			toAddr: "inbox@trashonly.test",
+			subject: "s",
+			receivedAt: new Date(),
+		});
+
+		const app = mountRouter("/", addressRoutes, ownerPrincipal);
+		const res = await callJson(app, "/?limit=200");
+
+		const row = res.json.data.find((a: { id: string }) => a.id === addressId);
+		expect(row.unreadCount).toBe(0);
+	});
+
 	describe("PATCH /:id/signature", () => {
 		async function seedMailbox(): Promise<string> {
 			const db = getTestDb();
