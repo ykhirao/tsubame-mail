@@ -30,8 +30,7 @@
 ### 認可（S-2）
 
 - `却下` **返信経路だけ権限外を 403 で返す。** 読めない id は 404 に揃っている。403 は「読めるが書けない」ときだけで、存在は既に分かっている。
-- `未確認` **範囲を絞った admin キーで他人のキーを失効できる。** `src/api/v1/admin/api-keys.ts` の `DELETE /:id` に `requireUnrestricted` が無い（POST は clamp、webhook・ルール・ドメイン・アドレスの変更系は #129 で 403）。
-  addressIds を絞ったキーで別ユーザーの全開放キーを `DELETE` して 200 になるか、`tests/security-129-restricted-admin.test.ts` に足して確かめる。
+- `解決` **範囲を絞った admin キーで他人のキーを失効できる。** 成立していた（200）。`DELETE /admin/api-keys/:id` に `requireUnrestricted` を足し、`tests/api-key-cascade.test.ts` で 403 を確かめる。
 
 ### 受信（S-3）
 
@@ -60,8 +59,9 @@
 
 ### 可用性（S-9）
 
-- `未確認` **Webhook の POST が受信コンシューマの中で直列に走る。** `services/webhooks.ts` `dispatchMessageEvent` は有効な Webhook 全部へ `Promise.all` で `fetch`（各 10 秒タイムアウト）し、`inbound.ts` がそれを `await` する。
-  Webhook が多い・遅いと受信 1 通の処理が長引き、Free の外部リクエスト上限（50）にも当たる。Webhook 5 本を 10 秒遅延で用意して `drainQueues` の所要時間と `item.retry` の有無を見る。
+- `解決` **Webhook の POST が受信コンシューマの中で待たせる。** 成立していた（受信 1 通ごとに最大 10 秒、キューは 5 通を順に処理）。初回の POST も `webhook.retry` としてキューに積み、コンシューマは待たないようにした。
+
+- `解決` **手動再送と、遅れて届いた同じ試行のキューが同時に走ると二重 POST しうる。** `runDelivery` が POST の前に試行番号を条件付き UPDATE で取り、取れた 1 つだけが送る（`tests/webhook-deliveries.test.ts`）。
 
 - `解決` **精査 #5 の「回り続ける」は `max_retries: 3` で止まる。** 精査 #20。`wrangler.jsonc` に受信・送信の DLQ を足し、パース例外は `inbound.ts` `parseErrorPlaceholder` で行を残すようにした。DLQ に落ちた分の見方は運用文書に無い（バックログ）。
 

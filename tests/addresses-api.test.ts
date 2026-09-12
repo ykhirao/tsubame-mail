@@ -119,8 +119,8 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 			return {
 				userId: "usr_member",
 				role: "member",
-				via: "api_key",
-				scopes: ["read", "send"],
+				via: "session",
+				scopes: ["read", "send", "admin"],
 				addressIds: ids,
 				writableAddressIds: ids,
 			};
@@ -242,6 +242,26 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 				body: JSON.stringify({ signature: "あ".repeat(2001) }),
 			});
 			expect(res.status).toBe(400);
+		});
+
+		it("send スコープのキー（write 権限の agent など）でも 403（#143）", async () => {
+			const id = await seedMailbox();
+			const agentKey: Principal = {
+				userId: "usr_agent",
+				role: "agent",
+				via: "api_key",
+				scopes: ["read", "send"],
+				addressIds: [id],
+				writableAddressIds: [id],
+			};
+			const app = mountRouter("/", addressRoutes, agentKey);
+			const before = await countAudits("address.signature");
+			const res = await callJson(app, `/${id}/signature`, {
+				method: "PATCH",
+				body: JSON.stringify({ signature: "https://evil.example/login" }),
+			});
+			expect(res.status).toBe(403);
+			expect(await countAudits("address.signature")).toBe(before);
 		});
 
 		it("read スコープだけのキーと未認証は 403 / 401", async () => {

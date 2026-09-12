@@ -111,9 +111,10 @@ app.get("/", async (c) => {
 app.patch("/:id/signature", async (c) => {
 	const principal = c.get("principal");
 	if (!principal) throw unauthorized();
-	// 署名の変更は送信と同じく、そのメールボックスの書き込み権が要る。
-	if (principal.via === "api_key" && !principal.scopes.includes("send")) {
-		throw forbidden("この API キーには send スコープがありません");
+	// 署名は人が作成画面で書くメール全部に差し込まれ、キーを失効しても残る。乗っ取られたエージェントの
+	// キーから人のメールに文言やリンクを混ぜられないよう、画面のログインからしか変えさせない（#143）。
+	if (principal.via !== "session") {
+		throw forbidden("署名は画面から変更してください（API キーでは変更できません）");
 	}
 	const db = c.get("db");
 	const id = c.req.param("id");

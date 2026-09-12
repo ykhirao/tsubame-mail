@@ -1,4 +1,7 @@
 import { EmailMessage } from "cloudflare:email";
+import { eq } from "drizzle-orm";
+import type { Db } from "@/db/client";
+import { domains } from "@/db/schema";
 import { normalizeAddress, parseAddressList } from "@/domain/mail/address";
 
 export type SenderMailbox = { address: string; name?: string };
@@ -90,4 +93,12 @@ export function bytesToBase64(bytes: Uint8Array): string {
 		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
 	}
 	return btoa(binary);
+}
+
+export const SENDING_DISABLED_MESSAGE = "このドメインは送信が無効になっています（管理画面のドメインで有効にできます）";
+
+/** 管理画面で送信を無効にしたドメインからは送らない（#144）。DNS も Cloudflare 側もそのままなので、止めるのはここだけ。 */
+export async function isSendingDisabled(db: Db, domainId: string): Promise<boolean> {
+	const row = await db.select({ status: domains.sendingStatus }).from(domains).where(eq(domains.id, domainId)).get();
+	return row?.status === "disabled";
 }

@@ -910,9 +910,9 @@ describe("processInbound", () => {
 		expect((await storedRow(key)).isRead).toBe(true);
 	});
 
-	it("X-CF-SpamH-Score が 5 以上なら spam_verdict を suspicious にして保存する（#128）", async () => {
+	it("X-CF-SpamH-Score が 3 以上なら spam_verdict を suspicious にして保存する（#128 / #140）", async () => {
 		await seed();
-		const key = await storeRaw(cfMail({ score: "8" }));
+		const key = await storeRaw(cfMail({ score: "3" }));
 		await processInbound(payload(key), env, fakeCtx);
 		expect((await storedRow(key)).spamVerdict).toBe("suspicious");
 	});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSrcDoc } from "@/ui/components/MessageHtml";
+import { buildSrcDoc, safeLinkHref } from "@/ui/components/MessageHtml";
 
 // #17 再検査失敗（第 2 回）の再現。この実行環境（@cloudflare/vitest-pool-workers、workerd）には
 // DOMParser が無いので、ここで通っているのは常に正規表現の代用経路（MessageHtml.tsx の
@@ -115,5 +115,34 @@ describe("MessageHtml buildSrcDoc — pre の先頭 LF を壊さない（正規�
 		const doc = buildSrcDoc("<pre>\n\n\n\n\nfoo</pre><p>keep</p>", false);
 		expect(doc).toContain("foo");
 		expect(doc).toContain("<p>keep</p>");
+	});
+});
+
+describe("safeLinkHref — 新しいタブで開けるリンク（#141）", () => {
+	it("http(s) と mailto と本文内の # だけを通す", () => {
+		expect(safeLinkHref("https://example.com/a?b=1")).toBe("https://example.com/a?b=1");
+		expect(safeLinkHref(" http://example.com ")).toBe("http://example.com/");
+		expect(safeLinkHref("mailto:someone@example.com")).toBe("mailto:someone@example.com");
+		expect(safeLinkHref("#section-2")).toBe("#section-2");
+	});
+
+	it("popup が sandbox を抜けるので、スクリプトや別オリジンの文書になる URL は落とす", () => {
+		expect(safeLinkHref("javascript:alert(1)")).toBeNull();
+		expect(safeLinkHref(" JaVaScRiPt:alert(1)")).toBeNull();
+		expect(safeLinkHref("java\tscript:alert(1)")).toBeNull();
+		expect(safeLinkHref("data:text/html,<script>alert(1)</script>")).toBeNull();
+		expect(safeLinkHref("blob:https://example.com/x")).toBeNull();
+		expect(safeLinkHref("about:blank")).toBeNull();
+		expect(safeLinkHref("relative/path")).toBeNull();
+		expect(safeLinkHref(null)).toBeNull();
+	});
+});
+
+describe("buildSrcDoc の正規表現経路でも危ないリンクと base を落とす（#141）", () => {
+	it("javascript: の href と <base> は残らない", () => {
+		const out = buildSrcDoc('<base target="_blank"><a href=" javascript:alert(1)">x</a><a href="https://example.com">ok</a>', false);
+		expect(out).not.toMatch(/href\s*=\s*["']?\s*javascript:/i);
+		expect(out).not.toContain("<base");
+		expect(out).toContain('href="https://example.com"');
 	});
 });

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { messages, webhooks, webhookDeliveries } from "@/db/schema";
 import { newId } from "@/lib/id";
@@ -101,12 +101,14 @@ export async function dispatchMessageEvent(
 		return w.addressIds.includes(message.addressId);
 	});
 
+	// 受け手への POST（最大 10 秒）は受信・送信のコンシューマの中で待たず、キューに積んで別に流す。
+	// 積むのに失敗したら例外にして、呼び出し元のキュー処理ごと再試行させる。
 	await Promise.all(
 		targets.map(async (w) => {
 			// at-least-once の再配達で同じ Webhook・同じメッセージ・同じイベントの配信行が
 			// 既にあれば作らない。二重配信を防ぐ（精査 #77）。
 			const already = await db
-				.select({ id: webhookDeliveries.id })
+				.select({ id: webhookDeliveries.id, status: webhookDeliveries.status, attempt: webhookDeliveries.attempt })
 				.from(webhookDeliveries)
 				.where(
 					and(
@@ -116,9 +118,10 @@ export async function dispatchMessageEvent(
 					),
 				)
 				.get();
-			if (already) return;
-			try {
-				const deliveryId = newId("delivery");
+			// 行を作った後に積むのが失敗した再配達では、まだ 1 回も送っていない行を積み直す。
+			if (already && !(already.status === "pending" && already.attempt === 0)) return;
+			const deliveryId = already?.id ?? newId("delivery");
+			if (!already) {
 				await db.insert(webhookDeliveries).values({
 					id: deliveryId,
 					webhookId: w.id,
@@ -129,10 +132,8 @@ export async function dispatchMessageEvent(
 					// claim に使うので、初回 attempt 1 が誤って claim されないようにする（#86）。
 					attempt: 0,
 				});
-				await runDelivery(env, deliveryId, 1);
-			} catch (err) {
-				console.error("webhook 配信に失敗", w.id, err);
 			}
+			await env.OUTBOUND_QUEUE.send({ kind: "webhook.retry", deliveryId, webhookId: w.id, attempt: 1 });
 		}),
 	);
 }
@@ -204,6 +205,20 @@ export async function runDelivery(
 		// pending の delivery に attempt+1 を渡すので、この claim をまたいで POST に進むことはない（#118）。
 		return;
 	}
+
+	// 同じ試行番号で走る実行（手動再送と遅れて届いたキューなど）のうち、試行番号を先に取れた 1 つだけが POST する。
+	const claimed = await db
+		.update(webhookDeliveries)
+		.set({ attempt })
+		.where(
+			and(
+				eq(webhookDeliveries.id, deliveryId),
+				eq(webhookDeliveries.status, "pending"),
+				lt(webhookDeliveries.attempt, attempt),
+			),
+		)
+		.returning({ id: webhookDeliveries.id });
+	if (claimed.length === 0) return;
 
 	const started = Date.now();
 	let httpStatus: number | null = null;

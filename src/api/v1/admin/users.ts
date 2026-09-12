@@ -16,7 +16,7 @@ import type { GrantInput } from "@/shared/contracts/users";
 import { conflict, invalidRequest, notFound } from "@/shared/errors";
 import { clientIp, getPrincipal, requireOwner, requireSession } from "../../middleware/auth";
 import type { AppEnv } from "../../types";
-import { revokeKeyTree } from "../me";
+import { revokeKeyTree, revokeKeysIssuedBy } from "../me";
 
 const app = new Hono<AppEnv>();
 
@@ -178,14 +178,18 @@ app.patch("/:id", requireSession, async (c) => {
 	if (body.status === "disabled" || body.role !== undefined || body.password !== undefined) {
 		await db.delete(schema.sessions).where(eq(schema.sessions.userId, id));
 	}
-	// パスワードを変えたら発行済みの API キーも失効させる（#99）。
+	// パスワードを変えたら発行済みの API キーも失効させる（#99）。無効化でも、その人のキーから
+	// 他の利用者向けに発行したキーは本人の状態と関係なく動き続けるので失効させる（#142）。
+	const now = new Date();
 	if (body.password !== undefined) {
 		await db.delete(schema.pushDevices).where(eq(schema.pushDevices.userId, id));
 		await db
 			.update(schema.apiKeys)
-			.set({ revokedAt: new Date() })
+			.set({ revokedAt: now })
 			.where(and(eq(schema.apiKeys.userId, id), isNull(schema.apiKeys.revokedAt)));
 	}
+	const revokedDescendantKeys =
+		body.password !== undefined || body.status === "disabled" ? await revokeKeysIssuedBy(db, id, now) : [];
 
 	await recordAudit(db, {
 		actorId: principal.userId,
@@ -197,6 +201,7 @@ app.patch("/:id", requireSession, async (c) => {
 			role: body.role,
 			status: body.status,
 			passwordChanged: body.password !== undefined,
+			revokedDescendantKeys,
 		},
 		ip: clientIp(c),
 	});

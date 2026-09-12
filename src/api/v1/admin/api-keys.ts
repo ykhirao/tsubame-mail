@@ -12,7 +12,7 @@ import {
 } from "@/domain/access/policy";
 import { adminApiKeyListQuery, adminCreateApiKeyBody } from "@/shared/contracts/api-keys";
 import { invalidRequest, notFound } from "@/shared/errors";
-import { clientIp, getPrincipal, requireOwner } from "../../middleware/auth";
+import { clientIp, getPrincipal, requireOwner, requireUnrestricted } from "../../middleware/auth";
 import {
 	assertAddressesExist,
 	clampAddressIds,
@@ -129,7 +129,8 @@ app.post("/", async (c) => {
 	return c.json({ ...serializeKey(row!), token: generated.token }, 201);
 });
 
-app.delete("/:id", async (c) => {
+// 範囲を絞ったキーで、範囲外の利用者のキーまで止められないようにする（#129 と同じ線）。
+app.delete("/:id", requireUnrestricted, async (c) => {
 	const principal = getPrincipal(c);
 	const id = c.req.param("id");
 	const db = c.get("db");

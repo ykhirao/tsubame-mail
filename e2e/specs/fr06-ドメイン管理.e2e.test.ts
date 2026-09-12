@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, vi } from "vitest";
 import { scenario } from "../registry";
-import { freshHarness, loginAsOwner, type Client, type Harness } from "../harness";
+import { drainQueues, freshHarness, loginAsOwner, seedDomain, type Client, type Harness } from "../harness";
 import { createFakeCloudflare, type FakeCloudflare } from "../../tests/domains-helpers";
 
 describe("FR-6 ドメイン管理", () => {
@@ -120,5 +120,32 @@ describe("FR-6 ドメイン管理", () => {
 		});
 		expect(disable.status).toBe(200);
 		expect(disable.body.data.sendingStatus).toBe("disabled");
+	});
+
+	scenario("FR-6", "送信を無効にしたドメインからは送れず、無効にする前に積まれた送信も送らない", async () => {
+		const { domainId } = await seedDomain(h, { addresses: ["ai"] });
+		const sent: unknown[] = [];
+		(h.env as unknown as { EMAIL: unknown }).EMAIL = {
+			send: async (m: unknown) => {
+				sent.push(m);
+				return { messageId: "mock-message-id" };
+			},
+		};
+		const mail = { from: "ai@mail.tsubame.test", to: ["dest@example.net"], subject: "件名", text: "本文" };
+
+		const queued = await owner.post("/api/v1/messages", mail);
+		expect(queued.status).toBe(202);
+
+		const off = await owner.post(`/api/v1/admin/domains/${domainId}/sending`, { enabled: false });
+		expect(off.status).toBe(200);
+
+		const refused = await owner.post("/api/v1/messages", mail);
+		expect(refused.status).toBe(409);
+		expect(refused.body.error.message).toContain("送信が無効");
+
+		await drainQueues(h);
+		expect(sent).toHaveLength(0);
+		const job = await owner.get(`/api/v1/messages/${queued.body.id}`);
+		expect(job.body.status).toBe("failed");
 	});
 });

@@ -1,7 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { schema } from "@/db/client";
-import { buildTestApp, createApiKeyFor, createUser, db, json, request, resetDb, sessionCookie } from "./auth-helpers";
+import {
+	buildTestApp,
+	createAddress,
+	createApiKeyFor,
+	createDomain,
+	createUser,
+	db,
+	json,
+	request,
+	resetDb,
+	sessionCookie,
+} from "./auth-helpers";
 
 const app = buildTestApp();
 
@@ -115,5 +126,80 @@ describe("#25 子キーのカスケード失効", () => {
 		const res = await request(app, `/api/v1/admin/users/${second.id}`, { method: "DELETE", cookie: owner.cookie });
 		expect(res.status).toBe(200);
 		expect(await revokedAt(memberKey.id)).not.toBeNull();
+	});
+});
+
+describe("範囲を絞った admin キーでは管理 API からキーを失効できない", () => {
+	it("他の利用者のキーの DELETE は 403 で、キーは生きている", async () => {
+		const owner = await createUser({ role: "owner" });
+		const member = await createUser({ role: "member" });
+		const domainId = await createDomain("example.com");
+		const addressId = await createAddress(domainId, "scoped", "example.com");
+		const restricted = await createApiKeyFor({ userId: owner.id, addressIds: [addressId] });
+		const victim = await createApiKeyFor({ userId: member.id });
+
+		const res = await request(app, `/api/v1/admin/api-keys/${victim.id}`, { method: "DELETE", bearer: restricted.token });
+		expect(res.status).toBe(403);
+		expect(await revokedAt(victim.id)).toBeNull();
+	});
+});
+
+describe("#142 パスワード変更・無効化で、その人のキーから他人向けに発行したキーも失効する", () => {
+	async function issueForMember(parentToken: string, memberId: string): Promise<{ id: string; token: string }> {
+		const res = await request(app, "/api/v1/admin/api-keys", {
+			method: "POST",
+			bearer: parentToken,
+			body: JSON.stringify({ userId: memberId, name: "メンバー用", scopes: ["read"] }),
+		});
+		expect(res.status).toBe(201);
+		return (await res.json()) as { id: string; token: string };
+	}
+
+	it("本人が /me でパスワードを変える", async () => {
+		const owner = await bootstrapOwner();
+		const member = await createUser({ role: "member" });
+		const root = await createApiKeyFor({ userId: owner.id, scopes: ["read", "admin"] });
+		const child = await issueForMember(root.token, member.id);
+
+		const res = await request(app, "/api/v1/me", {
+			method: "PATCH",
+			cookie: owner.cookie,
+			body: JSON.stringify({ currentPassword: OWNER.password, newPassword: "brand-new-1234" }),
+		});
+		expect(res.status).toBe(200);
+		expect((await request(app, "/api/v1/me", { bearer: child.token })).status).toBe(401);
+	});
+
+	it("別の owner が管理 API でパスワードを変える", async () => {
+		const owner = await bootstrapOwner();
+		const second = await createUser({ role: "owner" });
+		const member = await createUser({ role: "member" });
+		const root = await createApiKeyFor({ userId: second.id, scopes: ["read", "admin"] });
+		const child = await issueForMember(root.token, member.id);
+
+		const res = await request(app, `/api/v1/admin/users/${second.id}`, {
+			method: "PATCH",
+			cookie: owner.cookie,
+			body: JSON.stringify({ password: "another-pass-1234" }),
+		});
+		expect(res.status).toBe(200);
+		expect((await request(app, "/api/v1/me", { bearer: child.token })).status).toBe(401);
+	});
+
+	it("別の owner が無効化する（本人のキーは残し、他人向けの子だけ失効）", async () => {
+		const owner = await bootstrapOwner();
+		const second = await createUser({ role: "owner" });
+		const member = await createUser({ role: "member" });
+		const root = await createApiKeyFor({ userId: second.id, scopes: ["read", "admin"] });
+		const child = await issueForMember(root.token, member.id);
+
+		const res = await request(app, `/api/v1/admin/users/${second.id}`, {
+			method: "PATCH",
+			cookie: owner.cookie,
+			body: JSON.stringify({ status: "disabled" }),
+		});
+		expect(res.status).toBe(200);
+		expect((await request(app, "/api/v1/me", { bearer: child.token })).status).toBe(401);
+		expect(await revokedAt(root.id)).toBeNull();
 	});
 });

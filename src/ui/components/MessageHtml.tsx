@@ -44,12 +44,47 @@ function restoreConsumedLeadingNewlines(doc: Document): void {
 	}
 }
 
+/**
+ * 本文のリンクは新しいタブで開く（#141）。popup は sandbox を抜けるので、`javascript:` などを
+ * 残すと tsubame のオリジンで動いてしまう。http(s) と mailto と本文内の `#` だけを通す。
+ */
+export function safeLinkHref(href: string | null): string | null {
+	const value = href?.trim() ?? "";
+	if (value.startsWith("#")) return value;
+	try {
+		const url = new URL(value);
+		return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
+	} catch {
+		return null;
+	}
+}
+
+function rewriteLinks(doc: Document): void {
+	for (const el of doc.querySelectorAll("a[href], area[href]")) {
+		const href = safeLinkHref(el.getAttribute("href"));
+		if (href === null) {
+			el.removeAttribute("href");
+			continue;
+		}
+		el.setAttribute("href", href);
+		if (href.startsWith("#")) {
+			el.removeAttribute("target");
+		} else {
+			el.setAttribute("target", "_blank");
+			el.setAttribute("rel", "noopener noreferrer");
+		}
+	}
+}
+
 function stripDangerousOnceDom(html: string): string {
 	const doc = new DOMParser().parseFromString(html, "text/html");
 	for (const tag of DANGEROUS_TAGS) {
 		for (const el of [...doc.querySelectorAll(tag)]) el.remove();
 	}
+	rewriteLinks(doc);
 	for (const link of [...doc.querySelectorAll("link")]) link.remove();
+	// href は CSP の base-uri で効かないが target は効くので、本文内の # まで新しいタブで開いてしまう。
+	for (const base of [...doc.querySelectorAll("base")]) base.remove();
 	for (const meta of [...doc.querySelectorAll('meta[http-equiv="refresh" i]')]) meta.remove();
 	restoreConsumedLeadingNewlines(doc);
 	// outerHTML は doctype を含まない。落とすと srcdoc が互換モードになる。
@@ -65,6 +100,8 @@ function stripDangerousOnceRegex(html: string): string {
 	return html
 		.replace(DANGEROUS_TAG_RE, "")
 		.replace(/<link\b[^>]*>/gi, "")
+		.replace(/<base\b[^>]*>/gi, "")
+		.replace(/\bhref\s*=\s*(["']?)\s*(?:javascript|vbscript|data):/gi, "data-blocked-href=$1")
 		.replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, "");
 }
 
@@ -107,8 +144,10 @@ export function buildSrcDoc(rawHtml: string, allowRemoteImages: boolean): string
 
 /**
  * sandbox に allow-scripts を足してはいけない。スクリプトを実行させないことが
- * サニタイズの代わりになっている。allow-same-origin だけは、onLoad で内容の高さを
- * 読んで iframe を伸ばすために要る。
+ * サニタイズの代わりになっている。allow-same-origin は、onLoad で内容の高さを
+ * 読んで iframe を伸ばすために要る。allow-popups と allow-popups-to-escape-sandbox は
+ * リンクを iframe の中ではなく新しいタブで開くため（#141。偽の画面を本文に見せない）。
+ * 開けるリンクは rewriteLinks が http(s) / mailto に絞っている。
  */
 export function MessageHtml({
 	html,
@@ -126,7 +165,7 @@ export function MessageHtml({
 			<iframe
 				ref={ref}
 				title="メール本文"
-				sandbox="allow-same-origin"
+				sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
 				referrerPolicy="no-referrer"
 				className="block w-full border-0"
 				style={{ minHeight: 120 }}

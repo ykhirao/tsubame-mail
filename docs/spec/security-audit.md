@@ -5,33 +5,14 @@
 
 - 解決済みの指摘は消した。#1〜#120 の再現・対応・再検査の記録は `git show 84eb932:docs/spec/security-audit.md`、
   #121〜#126・#129 はその対応のコミット（`git log --grep '#121'` など）にある。コードのコメントにある「#n」「精査 #n」はその番号。
-- 番号は通しで、**次に振る番号は #142**。
+- 番号は通しで、**次に振る番号は #145**。
 - 進め方（対応 → 再検査 → 次の精査）は `.agents/skills/security-audit/SKILL.md`。「この文書を進めて」と言われたらそれに従う。
 
 ## 1. 対応予定
 
 ### 直すもの
 
-| # | 深刻度 | 内容 | 場所 |
-| --- | --- | --- | --- |
-| 140 | 低 | `spam_verdict` のしきい値 5 が高すぎる。明らかなスパムの内容でも 3〜4 で、`clean` になる（実証済み） | `domain/mail/parse.ts` `spamVerdictFromScore` |
-
-- **#140** 2026-09-12 に test ドメインへ送って `X-CF-SpamH-Score` を集めた。Gmail から 0、Cloudflare Email Sending 経由の普通のメールは内容によらず 1、
-  GTUBE の文字列が 2、スパム語を並べた平文が 3、IP 直書きの `.exe` へのリンクが 4。尺度は 0 から始まる小さな整数。
-  スパム語・トラッキング画像・`.exe` リンクを全部入れた HTML は、Email Sending が送信の時点で「スパムとして拒否」した（ダッシュボードの Activity log で確認）ので、
-  受信側で 5 以上が付くかは見られていない。直し方: しきい値を 3 以上に下げる（3 と 4 を `suspicious`、2 以下を `clean`）。
-  1 通ずつの観測なので、外部から届く実際のメールで値が集まったら見直す。
-
-### 設計判断が要るもの
-
-| # | 深刻度 | 内容 | 場所 |
-| --- | --- | --- | --- |
-| 141 | 低 | 本文の HTML のリンクを押すと、リンク先のページがメール本文の iframe の中に開く（実証済み・Chrome 152） | `ui/components/MessageHtml.tsx` |
-
-- **#141** iframe は `sandbox="allow-same-origin"` だけなので、`<a>` のナビゲーションは iframe 自身の中で起きる（`target="_blank"` は popups が無いので開かない）。
-  開いたページは sandbox を引き継ぐのでスクリプトもフォーム送信も動かず、親の画面にも触れない。ただ外部のページが tsubame の画面の中に表示されるので、
-  偽のログイン画面を本文の一部に見せる余地は残る（送信はできない）。新しいタブで開くなら `allow-popups allow-popups-to-escape-sandbox` と
-  `<base target="_blank">` が要り、sandbox を緩める判断になる。
+今は無い。
 
 ## 2. デプロイ時に要る作業
 
@@ -59,8 +40,8 @@
   Cloudflare を通らない経路（テストのひな形・将来の別の受け口）では偽の ARC で接ぎ木できる（#127）。
 - 受信の接ぎ木は、Cloudflare が一番上に足したヘッダのまとまり（CF ブロック）の認証結果で DMARC pass か From のドメインの DKIM pass を要求する（#127）。
   DMARC も DKIM も無い小さなドメインの正規の返信は新しいスレッドになる（受け入れた副作用）。Cloudflare が ARC も Authentication-Results も付けなかったメールは未認証扱い。
-- `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 5 以上で `suspicious`、未満で `clean`、無ければ null（#128）。`spam` は出さない。
-  実機で見えた値は 0〜4 で、明らかなスパムでも 3〜4 だった（#140 で直す）。
+- `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 3 以上で `suspicious`、未満で `clean`、無ければ null（#128 / #140）。`spam` は出さない。
+  実機で見えた値は普通のメールが 0〜1、GTUBE が 2、スパム語や IP 直書きの `.exe` リンクが 3〜4 で、5 以上は Worker まで届かない。1 通ずつの観測なので、実運用で値が集まったら `parse.ts` `spamVerdictFromScore` を見直す。
 - CF ブロックの並びは、実機の 10 通（Cloudflare Email Sending 経由と Gmail から）で必ず `Received` → `ARC-Seal` → `ARC-Message-Signature` →
   `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` だった。
 - 受け取りの Worker が例外を投げると、Email Routing は一時失敗を返し、送信側が再送する（#24。実機で確認）。Cloudflare Email Sending は
@@ -75,6 +56,8 @@
 - 非 ASCII の添付ファイル名は RFC 2231 で送るので、それを読まない古い MUA では化ける（#119）。
 - 送信の直前に差出人の行が消えていれば送る（アドレスの削除はメッセージごと消える前提）（#67）。To が無く Cc / Bcc だけの送信は受けない（#80）。
 - 送信に失敗した行は `failed` として残る（#90）。
+- ドメインの送信の無効化（`POST /admin/domains/:id/sending {enabled:false}`）は tsubame の中で止めるだけで、Cloudflare の Email Sending と DNS はそのまま（#144）。
+  送信 API は 409、無効化の前に積まれた分は `failed` になる。署名は画面のログインからだけ変えられ、API キーでは 403（#143）。
 - `sent` は Cloudflare Email Sending が受け付けたという意味で、届いたことではない。binding の `send()` は成功を返したが、
   ダッシュボードの Activity log では「スパムとして拒否」や「配信失敗（550 5.1.1 Address does not exist）」になったメールを実機で見た。
   tsubame の画面には `sent` のまま出る。届いたかどうかは Cloudflare の Activity log でしか分からない。
@@ -90,13 +73,16 @@
 - **受信 HTML の DOMParser を使う経路に自動テストが無い**（workerd に `DOMParser` が無く、vitest は正規表現の代用経路だけを見る）。mXSS 対策の収束ループ（#17）は
   Chrome の実機で確かめただけ。インライン SVG は表示されず、`<plaintext>` を含む本文は常に空。
 - ゴミ箱のメッセージの添付と生 MIME は `?includeTrash=true` を付けたときだけ読める（#116）。本体と同じく、付ければ読めるのは意図どおり。
+- 本文のリンクは新しいタブで開く（#141）。iframe の sandbox に `allow-popups allow-popups-to-escape-sandbox` を足し、`MessageHtml.tsx` `rewriteLinks` が
+  http(s) / mailto 以外の `href` を落として `target="_blank" rel="noopener noreferrer"` を付ける。開いた先は普通のタブなので、リンク先そのものの危険はブラウザ任せ。
+  この書き換えは DOMParser の経路にしか無く、vitest は `safeLinkHref` だけを見る（上の「自動テストが無い」と同じ）。
 - CSP に `sandbox` は付けていない（添付のダウンロードを止めるブラウザがあるため）（#6）。
 - 本文のリンクを押した瞬間（pointerdown）に、Chrome はリンク先の DNS 解決と TCP 接続を始める。押したまま外へずらしてクリックを取り消しても接続は起きる。
   表示しただけ・ホバーしただけでは起きない（Chrome 152 で確認）。漏れるのは IP と「押しかけた」ことで、画像の表示を許可したときより狭い。
 
 ### 認証・キー
 
-- キーで発行したキーは `api_keys.parent_key_id` に親を持ち、親の失効・差し替え・持ち主の削除で子孫も失効する（#25）。`0007` より前に発行された子キーは親を持たないので連鎖しない。
+- キーで発行したキーは `api_keys.parent_key_id` に親を持ち、親の失効・差し替え・持ち主の削除・パスワード変更・無効化で、他の利用者向けの子孫も失効する（#25 / #142）。無効化では本人のキーは残す（再有効化で戻る）。`0007` より前に発行された子キーは親を持たないので連鎖しない。
 - ログインのレート制限: `email` 単独の鍵は、他人のアドレスを 1 分に 20 回叩けばその人のログインを止められる。`ip` 単独の鍵は NAT 配下の全員で分け合う。
   成功したログインもバケットを消費する（#52）。
 - Fetch Metadata の検査は、`Sec-Fetch-Site` も `Origin` も無い要求（非ブラウザ・古いブラウザ）を通す（#76）。
@@ -116,7 +102,7 @@
 
 ### Webhook
 
-- `pending` のまま止まった配信（手動再送の claim の後に無効化した #69、キューのメッセージを失った #42）は、再試行の予定（無ければ作成）から 30 分経てば手動で再送できる。30 分は処理中の配信との二重 POST を避けるための待ちで、止まったことの判定ではない。
+- `pending` のまま止まった配信（手動再送の claim の後に無効化した #69、キューのメッセージを失った #42）は、再試行の予定（無ければ作成）から 30 分経てば手動で再送できる。同じ試行番号の POST は `runDelivery` が試行番号を先に取った 1 回だけ。30 分は処理中の配信を止まったと誤って扱わないための待ち。
 - DNS リバインディングは Workers から防げない（#12）。
 
 ### ドメイン・Cloudflare

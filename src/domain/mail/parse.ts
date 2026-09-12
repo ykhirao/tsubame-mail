@@ -37,11 +37,12 @@ export type ParsedMessage = {
 	cfSpamScore: number | null;
 };
 
-// X-CF-SpamH-Score の尺度は確定していない（#128）。実運用でスコアを集めてから決めるまでは、
-// 仮に 5 以上を suspicious、それ未満を clean とし、spam は出さない。
+// X-CF-SpamH-Score は 0 から始まる小さな整数で、実機では普通のメールが 0〜1、GTUBE が 2、
+// スパム語や IP 直書きの実行ファイルへのリンクが 3〜4 だった（#140）。5 以上は Worker まで届かない。
+// 1 通ずつの観測なので spam は出さず、3 以上を suspicious に留める。
 export function spamVerdictFromScore(score: number | null): "clean" | "suspicious" | null {
 	if (score === null) return null;
-	return score >= 5 ? "suspicious" : "clean";
+	return score >= 3 ? "suspicious" : "clean";
 }
 
 // Cloudflare は判定ヘッダをまとめた「CF ブロック」をメールの一番上に足す。1 本目の Received が

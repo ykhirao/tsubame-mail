@@ -5,7 +5,7 @@ import { getDb } from "@/db/client";
 import { addresses, attachments, messages, outboundJobs } from "@/db/schema";
 import type { OutboundSendMessage } from "@/services/queue";
 import { dispatchMessageEvent } from "@/services/webhooks";
-import { bytesToBase64, parseMailboxes, sendRawEmail } from "@/services/sender";
+import { bytesToBase64, isSendingDisabled, parseMailboxes, SENDING_DISABLED_MESSAGE, sendRawEmail } from "@/services/sender";
 import { normalizeAddress } from "./address";
 import { composeMime, generateMessageId, type ComposeAttachment } from "./compose";
 
@@ -40,8 +40,9 @@ async function failOutbound(
 		.update(outboundJobs)
 		.set({ status: "failed", lastError })
 		.where(eq(outboundJobs.id, jobId));
-	await dispatchMessageEvent(env, "message.failed", messageId);
+	// dispatch はキューに積めないと例外になる。再試行では job の claim に失敗して戻るので、通知を先に積む。
 	await env.OUTBOUND_QUEUE.send({ kind: "notify", event: "send_failed", messageId });
+	await dispatchMessageEvent(env, "message.failed", messageId);
 }
 
 export async function processOutboundSend(
@@ -110,7 +111,7 @@ export async function processOutboundSend(
 	const fromNorm = normalizeAddress(message.fromAddr);
 	const sender = fromNorm
 		? await db
-				.select({ kind: addresses.kind, archivedAt: addresses.archivedAt })
+				.select({ kind: addresses.kind, archivedAt: addresses.archivedAt, domainId: addresses.domainId })
 				.from(addresses)
 				.where(eq(addresses.address, fromNorm))
 				.get()
@@ -121,6 +122,10 @@ export async function processOutboundSend(
 	}
 	if (sender?.kind === "alias") {
 		await failOutbound(db, env, job.id, message.id, "差出人アドレスがエイリアス化されています");
+		return;
+	}
+	if (sender && (await isSendingDisabled(db, sender.domainId))) {
+		await failOutbound(db, env, job.id, message.id, SENDING_DISABLED_MESSAGE);
 		return;
 	}
 

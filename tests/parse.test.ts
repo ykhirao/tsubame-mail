@@ -204,10 +204,12 @@ describe("Cloudflare 判定ブロック（#127 / #128）", () => {
 });
 
 describe("spamVerdictFromScore", () => {
-	it("スコアが無ければ null、5 以上なら suspicious、それ未満は clean（spam は出さない）", () => {
+	it("スコアが無ければ null、3 以上なら suspicious、それ未満は clean（spam は出さない。#140）", () => {
 		expect(spamVerdictFromScore(null)).toBeNull();
 		expect(spamVerdictFromScore(0)).toBe("clean");
-		expect(spamVerdictFromScore(4)).toBe("clean");
+		expect(spamVerdictFromScore(2)).toBe("clean");
+		expect(spamVerdictFromScore(3)).toBe("suspicious");
+		expect(spamVerdictFromScore(4)).toBe("suspicious");
 		expect(spamVerdictFromScore(5)).toBe("suspicious");
 		expect(spamVerdictFromScore(9)).toBe("suspicious");
 	});

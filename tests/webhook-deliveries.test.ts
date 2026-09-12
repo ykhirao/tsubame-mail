@@ -18,6 +18,20 @@ function useCleanState() {
 	});
 }
 
+type QueuedRetry = { kind: string; deliveryId: string; webhookId: string; attempt: number };
+
+// dispatchMessageEvent は初回の POST をキューに積むだけなので、積まれた初回をその場で流す。
+async function dispatchAndDeliver(event: "message.received" | "message.sent", messageId: string) {
+	const queued: QueuedRetry[] = [];
+	const sendSpy = vi.spyOn(env.OUTBOUND_QUEUE, "send").mockImplementation(async (body: unknown) => {
+		queued.push(body as QueuedRetry);
+		return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+	});
+	await dispatchMessageEvent(env, event, messageId);
+	for (const m of queued.filter((q) => q.attempt === 1)) await runDelivery(env, m.deliveryId, 1);
+	return { queued, sendSpy };
+}
+
 async function seedBase() {
 	const db = getDb(env);
 	const domainId = "dom_test";
@@ -108,7 +122,7 @@ describe("通知ペイロードから bcc を落とす（#43）", () => {
 		const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await dispatchMessageEvent(env, "message.sent", messageId);
+		await dispatchAndDeliver("message.sent", messageId);
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		const body = fetchMock.mock.calls[0]![1]!.body as string;
@@ -142,7 +156,7 @@ describe("dispatchMessageEvent の宛先・イベント絞り込み", () => {
 			vi.fn(async () => new Response("{}", { status: 200 })),
 		);
 
-		await dispatchMessageEvent(env, "message.received", messageId);
+		await dispatchAndDeliver("message.received", messageId);
 
 		const rows = await deliveries();
 		expect(rows).toHaveLength(1);
@@ -184,10 +198,6 @@ describe("dispatchMessageEvent の部分失敗", () => {
 			events: ["message.received"],
 		});
 
-		const sendSpy = vi
-			.spyOn(env.OUTBOUND_QUEUE, "send")
-			.mockResolvedValue({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } });
-
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (url: string) => {
@@ -198,7 +208,7 @@ describe("dispatchMessageEvent の部分失敗", () => {
 			}),
 		);
 
-		await dispatchMessageEvent(env, "message.received", messageId);
+		const { queued } = await dispatchAndDeliver("message.received", messageId);
 
 		const rows = await deliveries();
 		expect(rows).toHaveLength(2);
@@ -212,10 +222,9 @@ describe("dispatchMessageEvent の部分失敗", () => {
 		expect(ok.status).toBe("success");
 		expect(ok.httpStatus).toBe(200);
 
-		expect(sendSpy).toHaveBeenCalledTimes(1);
-		const msg = sendSpy.mock.calls[0]![0] as { kind: string; attempt: number };
-		expect(msg.kind).toBe("webhook.retry");
-		expect(msg.attempt).toBe(2);
+		const retries = queued.filter((q) => q.attempt === 2);
+		expect(retries).toHaveLength(1);
+		expect(retries[0]!.deliveryId).toBe(failed.id);
 	});
 });
 
@@ -458,5 +467,89 @@ describe("キュー再配達で受け手への POST を増幅しない（#86）"
 		expect(sendSpy).toHaveBeenCalledTimes(4);
 		expect(row!.status).toBe("pending");
 		expect(row!.attempt).toBe(1);
+	});
+});
+
+describe("dispatchMessageEvent は受け手への POST を待たない", () => {
+	useCleanState();
+
+	it("初回の POST はキューに積むだけで、コンシューマの中では fetch しない", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("slow", "https://slow.example/hook", { events: ["message.received"] });
+		const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const sendSpy = vi
+			.spyOn(env.OUTBOUND_QUEUE, "send")
+			.mockResolvedValue({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } });
+
+		await dispatchMessageEvent(env, "message.received", messageId);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		const [row] = await deliveries();
+		expect(row!.status).toBe("pending");
+		expect(row!.attempt).toBe(0);
+		expect(sendSpy).toHaveBeenCalledWith({ kind: "webhook.retry", deliveryId: row!.id, webhookId: "whk_slow", attempt: 1 });
+	});
+
+	it("積むのに失敗して再配達されたら、まだ送っていない行を積み直す（行は増やさない）", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("again", "https://again.example/hook", { events: ["message.received"] });
+		const sendSpy = vi.spyOn(env.OUTBOUND_QUEUE, "send").mockRejectedValueOnce(new Error("queue down"));
+
+		await expect(dispatchMessageEvent(env, "message.received", messageId)).rejects.toThrow("queue down");
+		sendSpy.mockResolvedValue({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } });
+		await dispatchMessageEvent(env, "message.received", messageId);
+
+		const rows = await deliveries();
+		expect(rows).toHaveLength(1);
+		expect(sendSpy).toHaveBeenLastCalledWith({ kind: "webhook.retry", deliveryId: rows[0]!.id, webhookId: "whk_again", attempt: 1 });
+	});
+});
+
+describe("同じ試行番号で同時に走っても POST は 1 回", () => {
+	useCleanState();
+
+	it("手動再送と遅れて届いたキューが同じ attempt で重なっても、受け手には 1 回しか届かない", async () => {
+		const { addressId } = await seedBase();
+		const messageId = await seedMessage(addressId);
+		await seedWebhook("dup", "https://dup.example/hook", { events: ["message.received"] });
+		const db = getDb(env);
+		const deliveryId = "dlv_dup";
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId: "whk_dup",
+			event: "message.received",
+			messageId,
+			status: "pending",
+			attempt: 1,
+		});
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const fetchMock = vi.fn(async () => {
+			await gate;
+			return new Response("{}", { status: 200 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const queued: { deliveryId: string; attempt: number }[] = [];
+		vi.spyOn(env.OUTBOUND_QUEUE, "send").mockImplementation(async (body: unknown) => {
+			queued.push(body as { deliveryId: string; attempt: number });
+			return { metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } };
+		});
+
+		const a = runDelivery(env, deliveryId, 2);
+		const b = runDelivery(env, deliveryId, 2);
+		await new Promise((r) => setTimeout(r, 20));
+		release();
+		await Promise.all([a, b]);
+		// 負けた方が「POST 済み」と見て次の試行を積んでも、成功した配信にはもう送らない。
+		for (const q of queued) await runDelivery(env, q.deliveryId, q.attempt);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [row] = await db.select().from(webhookDeliveries).where(eq(webhookDeliveries.id, deliveryId));
+		expect(row!.status).toBe("success");
+		expect(row!.attempt).toBe(2);
 	});
 });

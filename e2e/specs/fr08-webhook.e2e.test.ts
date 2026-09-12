@@ -108,8 +108,12 @@ describe("FR-8 Webhook", () => {
 		expect(v1).toBe(expected);
 	});
 
-	async function processOne(h: Harness) {
-		const item = h.pending.shift()!;
+	const isWebhookRetry = (body: unknown) => (body as { kind?: string }).kind === "webhook.retry";
+
+	async function processOne(h: Harness, pick?: (body: unknown) => boolean) {
+		const index = pick ? h.pending.findIndex((p) => pick(p.body)) : 0;
+		const [item] = h.pending.splice(index, 1);
+		if (!item) throw new Error("流すキューメッセージがありません");
 		const batch = {
 			queue: item.queue === "inbound" ? "tsubame-inbound" : "tsubame-outbound",
 			messages: [
@@ -141,10 +145,11 @@ describe("FR-8 Webhook", () => {
 			to: "ai@mail.tsubame.test",
 			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
 		});
-		// 受信メッセージだけを処理する（drainQueues は再試行まで全部流してしまうので使わない）。
+		// 受信メッセージと初回の配信だけを処理する（drainQueues は再試行まで全部流してしまうので使わない）。
 		await processOne(h);
+		await processOne(h, isWebhookRetry);
 
-		const retryMsg = h.pending.find((p) => p.queue === "outbound");
+		const retryMsg = h.pending.find((p) => p.queue === "outbound" && isWebhookRetry(p.body));
 		expect(retryMsg).toBeTruthy();
 		expect((retryMsg!.body as { kind: string }).kind).toBe("webhook.retry");
 
@@ -157,7 +162,7 @@ describe("FR-8 Webhook", () => {
 		expect(first[0]!.attempt).toBe(1);
 		expect(first[0]!.nextRetryAt).not.toBeNull();
 
-		await processOne(h);
+		await processOne(h, isWebhookRetry);
 		const second = await db.select().from(webhookDeliveries).all();
 		expect(second[0]!.attempt).toBe(2);
 		expect(second[0]!.nextRetryAt!.getTime()).toBeGreaterThan(first[0]!.nextRetryAt!.getTime());
@@ -191,6 +196,7 @@ describe("FR-8 Webhook", () => {
 			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
 		});
 		await processOne(h);
+		await processOne(h, isWebhookRetry);
 
 		expect(inits).toHaveLength(1);
 		expect(inits[0]!.redirect).toBe("manual");

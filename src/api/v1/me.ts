@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
@@ -125,10 +125,12 @@ app.patch("/", async (c) => {
 			.select({ n: sql<number>`count(*)` })
 			.from(schema.apiKeys)
 			.where(and(eq(schema.apiKeys.userId, user.id), isNull(schema.apiKeys.revokedAt)));
+		const now = new Date();
 		await db
 			.update(schema.apiKeys)
-			.set({ revokedAt: new Date() })
+			.set({ revokedAt: now })
 			.where(and(eq(schema.apiKeys.userId, user.id), isNull(schema.apiKeys.revokedAt)));
+		await revokeKeysIssuedBy(db, user.id, now);
 		passwordChanged = true;
 		revokedApiKeys = Number(before?.n ?? 0);
 	}
@@ -253,6 +255,34 @@ export async function revokeKeyTree(db: Db, id: string, revokedAt: Date): Promis
 		.update(schema.apiKeys)
 		.set({ revokedAt })
 		.where(and(jsonIdsIn(schema.apiKeys.id, ids), isNull(schema.apiKeys.revokedAt)))
+		.returning({ id: schema.apiKeys.id });
+	return revoked.map((r) => r.id);
+}
+
+/**
+ * その利用者のキーから（孫以降も含めて）他の利用者向けに発行したキーを失効する。
+ * 本人のキーの失効は呼び出し側が決める（無効化では再有効化で戻すので残す）。#142
+ */
+export async function revokeKeysIssuedBy(db: Db, userId: string, revokedAt: Date): Promise<string[]> {
+	const rows = await db.all<{ id: string }>(sql`
+		with recursive tree(id) as (
+			select id from api_keys where parent_key_id in (select id from api_keys where user_id = ${userId})
+			union
+			select k.id from api_keys k join tree t on k.parent_key_id = t.id
+		)
+		select id from tree`);
+	const ids = rows.map((r) => r.id);
+	if (ids.length === 0) return [];
+	const revoked = await db
+		.update(schema.apiKeys)
+		.set({ revokedAt })
+		.where(
+			and(
+				jsonIdsIn(schema.apiKeys.id, ids),
+				ne(schema.apiKeys.userId, userId),
+				isNull(schema.apiKeys.revokedAt),
+			),
+		)
 		.returning({ id: schema.apiKeys.id });
 	return revoked.map((r) => r.id);
 }

@@ -5,11 +5,11 @@ import { getDb } from "@/db/client";
 import { addresses, attachments, messages, outboundJobs, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
 import type { AppEnv } from "@/api/types";
-import { ApiError, forbidden, invalidRequest, notFound } from "@/shared/errors";
+import { ApiError, conflict, forbidden, invalidRequest, notFound } from "@/shared/errors";
 import { baseAddressOf, normalizeAddress, parseAddressList, formatAddressList } from "@/domain/mail/address";
 import { addressListToCsv } from "@/domain/mail/compose";
 import { canRead, requireScope } from "@/domain/access/policy";
-import { canSendFrom } from "@/services/sender";
+import { canSendFrom, isSendingDisabled, SENDING_DISABLED_MESSAGE } from "@/services/sender";
 import { putAttachment } from "@/services/r2";
 import { buildReplyQuote, referencesFor, replySubject } from "@/domain/mail/quote";
 import { readJson } from "@/lib/validate";
@@ -40,11 +40,16 @@ router.use(
 async function resolveOwnAddress(
 	db: ReturnType<typeof getDb>,
 	fromRaw: string,
-): Promise<{ id: string; kind: string; archivedAt: Date | null } | null> {
+): Promise<{ id: string; kind: string; archivedAt: Date | null; domainId: string } | null> {
 	const normalized = normalizeAddress(fromRaw);
 	if (!normalized) return null;
 	const row = await db
-		.select({ id: addresses.id, kind: addresses.kind, archivedAt: addresses.archivedAt })
+		.select({
+			id: addresses.id,
+			kind: addresses.kind,
+			archivedAt: addresses.archivedAt,
+			domainId: addresses.domainId,
+		})
 		.from(addresses)
 		.where(eq(addresses.address, normalized))
 		.get();
@@ -64,6 +69,7 @@ async function assertCanSend(
 	if (!canSendFrom(principal.writableAddressIds, row.id)) {
 		throw forbidden("このアドレスから送信する権限がありません");
 	}
+	if (await isSendingDisabled(db, row.domainId)) throw conflict(SENDING_DISABLED_MESSAGE);
 	return row.id;
 }
 
@@ -291,6 +297,7 @@ router.post("/:id/reply", async (c) => {
 	if (!canSendFrom(principal.writableAddressIds, mailbox.id)) {
 		throw forbidden("このアドレスから送信する権限がありません");
 	}
+	if (await isSendingDisabled(db, mailbox.domainId)) throw conflict(SENDING_DISABLED_MESSAGE);
 	const decoded = decodeAttachments(input.attachments);
 
 	// 宛先: replyAll なら To+Cc から自分のアドレスを除く + 元の From。そうでなければ元の From。
