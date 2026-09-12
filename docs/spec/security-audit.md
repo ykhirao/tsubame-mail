@@ -14,12 +14,13 @@
 
 | # | 深刻度 | 内容 | 場所 |
 | --- | --- | --- | --- |
-| 140 | 低 | `spam_verdict` の `suspicious` が実機では出ない。しきい値 5 以上のスコアのメールは Worker まで届かない（実証済み） | `domain/mail/parse.ts` `spamVerdictFromScore` |
+| 140 | 低 | `spam_verdict` のしきい値 5 が高すぎる。明らかなスパムの内容でも 3〜4 で、`clean` になる（実証済み） | `domain/mail/parse.ts` `spamVerdictFromScore` |
 
 - **#140** 2026-09-12 に test ドメインへ送って `X-CF-SpamH-Score` を集めた。Gmail から 0、Cloudflare Email Sending 経由の普通のメールは内容によらず 1、
-  GTUBE の文字列が 2、スパム語を並べた平文が 3、IP 直書きの `.exe` へのリンクが 4。スパム語・トラッキング画像・`.exe` リンクを全部入れた HTML は
-  2 回送って 2 回とも Worker に届かなかった（Email Sending の送信は成功を返す）。尺度は 0 から始まる小さな整数で、5 以上は Cloudflare の手前で落ちるらしい。
-  直し方: しきい値を 3 以上に下げる（3 と 4 を `suspicious`、2 以下を `clean`）。1 通ずつの観測なので、実運用で値が集まったら見直す。
+  GTUBE の文字列が 2、スパム語を並べた平文が 3、IP 直書きの `.exe` へのリンクが 4。尺度は 0 から始まる小さな整数。
+  スパム語・トラッキング画像・`.exe` リンクを全部入れた HTML は、Email Sending が送信の時点で「スパムとして拒否」した（ダッシュボードの Activity log で確認）ので、
+  受信側で 5 以上が付くかは見られていない。直し方: しきい値を 3 以上に下げる（3 と 4 を `suspicious`、2 以下を `clean`）。
+  1 通ずつの観測なので、外部から届く実際のメールで値が集まったら見直す。
 
 ### 設計判断が要るもの
 
@@ -59,7 +60,7 @@
 - 受信の接ぎ木は、Cloudflare が一番上に足したヘッダのまとまり（CF ブロック）の認証結果で DMARC pass か From のドメインの DKIM pass を要求する（#127）。
   DMARC も DKIM も無い小さなドメインの正規の返信は新しいスレッドになる（受け入れた副作用）。Cloudflare が ARC も Authentication-Results も付けなかったメールは未認証扱い。
 - `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 5 以上で `suspicious`、未満で `clean`、無ければ null（#128）。`spam` は出さない。
-  実機で見えた値は 0〜4 で、5 以上は届かない（#140 で直す）。
+  実機で見えた値は 0〜4 で、明らかなスパムでも 3〜4 だった（#140 で直す）。
 - CF ブロックの並びは、実機の 10 通（Cloudflare Email Sending 経由と Gmail から）で必ず `Received` → `ARC-Seal` → `ARC-Message-Signature` →
   `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` だった。
 - 受け取りの Worker が例外を投げると、Email Routing は一時失敗を返し、送信側が再送する（#24。実機で確認）。Cloudflare Email Sending は
@@ -74,10 +75,15 @@
 - 非 ASCII の添付ファイル名は RFC 2231 で送るので、それを読まない古い MUA では化ける（#119）。
 - 送信の直前に差出人の行が消えていれば送る（アドレスの削除はメッセージごと消える前提）（#67）。To が無く Cc / Bcc だけの送信は受けない（#80）。
 - 送信に失敗した行は `failed` として残る（#90）。
-- `sent` は Cloudflare Email Sending が受け付けたという意味で、届いたことではない。スパムと判定されたメールや、ルーティングのルールが反映される前の宛先へのメールは、
-  `sent` のまま黙って届かないことを実機で見た（#140 の検証中）。
+- `sent` は Cloudflare Email Sending が受け付けたという意味で、届いたことではない。binding の `send()` は成功を返したが、
+  ダッシュボードの Activity log では「スパムとして拒否」や「配信失敗（550 5.1.1 Address does not exist）」になったメールを実機で見た。
+  tsubame の画面には `sent` のまま出る。届いたかどうかは Cloudflare の Activity log でしか分からない。
+- **スパムとして拒否されたメールやバウンスは、送信ドメインの評判（Bounce rate / Spam rejection rate）に数えられる。** 悪化すると
+  Cloudflare が送信を止めうる。2026-09-12 の検証でスパムの見本と存在しない宛先に送ったら、test ドメインが「At Risk」になった。
+  検証でスパムの見本を送るときや、存在しない宛先に送るときは、本番の送信ドメインを使わない。
 - Cloudflare Email Sending も Email Routing も、998 文字を超えるヘッダ行（5,014 文字まで試した）を拒否も折り返しもせずそのまま通す（#34 / #66）。
-  送信側は 998 以内に収めているので実害は無いが、Cloudflare に上限を任せることはできない。
+  外の中継では、998 を超える行を「550 maximum allowed line length is 998 octets」や「Maximum line length exceeded (see RFC 5322 2.1.1)」で拒否する実例が公開されている。
+  Gmail は Subject を 998 文字、ほかのヘッダを値 32KB までとしていて、超えると 552-5.3.4 で拒否する。送信側は 998 以内に収めているので、今は当たらない。
 
 ### 表示
 
@@ -117,7 +123,8 @@
 
 - subdomain モードの切断は、名前の完全一致と DKIM のホスト名だけを消す。従来消していた `*.<name>` のメール用レコードは残る（消さない側に倒した）（#60）。
 - `verifyDomain` / `previewDomain` のページ上限（最大 41 往復）はそのまま（#93）。Cloudflare API の上限は利用者ごとに 5 分で 1,200 回で、
-  応答の `ratelimit` / `ratelimit-policy` ヘッダで確かめた（1 回の検証で最大 3% ほど使う）。
+  応答の `ratelimit` / `ratelimit-policy` ヘッダで確かめた（1 回の検証で最大 3% ほど使う）。上限はダッシュボード・API キー・トークンを合わせて数えられ、
+  超えると以後 5 分間は全部の呼び出しが 429 になり、`Retry-After` が付く（Cloudflare の文書）。`cloudflare-api.ts` は 429 を特別扱いせず、ふつうの失敗として返す。
 - `CF_ACCOUNT_ID` が未設定だとドメイン接続が動かない（必須として文書化）（#94）。
 - 監査ログは 400 日で消える（#95。`docs/ops/audit-log.md`）。それより長く残すには書き出して別に保管する。
 
@@ -148,10 +155,8 @@
 
 ## 5. 未確認（実機でしか確かめられないもの）
 
-2026-09-12 に実機で確かめた分は消した（結果は「3.」と #140 / #141、問題が無かったものはそのコミットメッセージ）。残りは次のとおり。
+2026-09-12 に実機と公開情報で確かめた分は消した（結果は「3.」と #140 / #141、問題が無かったものはそのコミットメッセージ）。残りは次のとおり。
 
-- Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127。#6740）。Gmail から直接送ったメールと Cloudflare Email Sending 経由のメールには
-  必ず付いていた。#6740 は Gmail の自動転送の例で、確かめるには Gmail 側に転送の設定が要る。
-- Cloudflare API の 429 の挙動（#93）。上限の値はヘッダで分かったが、429 を踏むと利用者の API 全体（ダッシュボードを含む）が最大 5 分止まるので踏んでいない。
-- 998 文字を超えるヘッダ行を、Cloudflare の外の中継 MTA（Gmail など）がどう扱うか（#34 / #66。Cloudflare の中は素通しと確認済み）。
-- スコア 5 以上のメールが落ちるのが Email Sending 側か Email Routing 側か（#140。どちらでも Worker には届かない）。
+- Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127）。Gmail から直接送ったメールと Cloudflare Email Sending 経由のメールには
+  必ず付いていた。公開されている報告は Gmail の自動転送の例（workerd の issue #6740）だけで、Cloudflare からの回答は無く、未解決のまま。
+  確かめるには Gmail 側に転送の設定が要る。欠けても CF ブロックの認証結果が無いので未認証扱いになり、安全側に倒れる。
