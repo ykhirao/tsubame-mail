@@ -37,22 +37,22 @@ describe("openapi", () => {
 	});
 
 	it("閲覧ページと描画スクリプトを配る", async () => {
-		expect((await app.request("/docs")).status).toBe(200);
-		const js = await app.request("/docs.js");
+		expect((await app.request("/openapi")).status).toBe(200);
+		const js = await app.request("/openapi.js");
 		expect(js.status).toBe(200);
 		expect(js.headers.get("content-type")).toContain("javascript");
 	});
 
 	it("キーが無くても読める", async () => {
 		const mounted = createApp();
-		for (const path of ["/api/v1/openapi.json", "/api/v1/docs", "/api/v1/docs.js"]) {
+		for (const path of ["/api/v1/openapi.json", "/api/v1/openapi", "/api/v1/openapi.js"]) {
 			expect((await mounted.request(path, {}, env)).status, path).toBe(200);
 		}
 	});
 
 	// /api/* の既定は default-src 'none' で、そのままだと自分の script も fetch も通らない。
 	it("閲覧ページは自分の script と fetch を通す CSP で返る", async () => {
-		const res = await createApp().request("/api/v1/docs", {}, env);
+		const res = await createApp().request("/api/v1/openapi", {}, env);
 		const csp = res.headers.get("content-security-policy") ?? "";
 		expect(csp).toContain("script-src 'self'");
 		expect(csp).toContain("connect-src 'self'");

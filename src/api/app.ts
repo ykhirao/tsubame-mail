@@ -60,7 +60,7 @@ export function createApp() {
 	// （ブラウザによっては Content-Disposition: attachment のダウンロードまで止まる）。
 	// 仕様書の閲覧ページだけは自分の script と fetch が要る。中身はこちらが書いた
 	// 固定の HTML で、利用者の入力を出さないので、ここだけ緩めても添付の防御は変わらない。
-	const docsCsp = secureHeaders({
+	const openapiCsp = secureHeaders({
 		contentSecurityPolicy: {
 			defaultSrc: ["'none'"],
 			scriptSrc: ["'self'"],
@@ -84,7 +84,7 @@ export function createApp() {
 		strictTransportSecurity: "max-age=15552000",
 	});
 	app.use("*", (c, next) =>
-		(c.req.path === "/api/v1/docs" ? docsCsp : strictCsp)(c, next),
+		(c.req.path === "/api/v1/openapi" ? openapiCsp : strictCsp)(c, next),
 	);
 
 	app.use("*", async (c, next) => {

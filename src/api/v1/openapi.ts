@@ -558,7 +558,7 @@ const spec = {
 app.get("/openapi.json", (c) => c.json(spec));
 
 // CDN のビューアは CSP で読み込めないので、仕様を fetch して素の DOM で組み立てる。
-app.get("/docs", (c) => {
+app.get("/openapi", (c) => {
 	return c.html(`<!doctype html>
 <html lang="ja">
 <head>
@@ -598,13 +598,13 @@ a{color:var(--accent)}
 </head>
 <body>
 <div class="wrap" id="root"><p class="err">読み込み中…</p></div>
-<script src="/api/v1/docs.js"></script>
+<script src="/api/v1/openapi.js"></script>
 </body>
 </html>`);
 });
 
 // インラインの <script> は CSP に阻まれるので、描画は別ファイルとして配る。
-app.get("/docs.js", (c) => {
+app.get("/openapi.js", (c) => {
 	c.header("Content-Type", "text/javascript; charset=utf-8");
 	return c.body(String.raw`
 const esc = (s) => String(s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[m]);
