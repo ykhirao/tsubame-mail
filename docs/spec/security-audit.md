@@ -42,7 +42,8 @@
 - 受信の接ぎ木は、Cloudflare が一番上に足したヘッダのまとまり（CF ブロック）の認証結果で DMARC pass か From のドメインの DKIM pass を要求する（#127）。
   DMARC も DKIM も無い小さなドメインの正規の返信は新しいスレッドになる（受け入れた副作用）。Cloudflare が ARC も Authentication-Results も付けなかったメールは未認証扱い。
 - `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 3 以上で `suspicious`、未満で `clean`、無ければ null（#128 / #140）。`spam` は出さない。
-  実機で見えた値は普通のメールが 0〜1、GTUBE が 2、スパム語や IP 直書きの `.exe` リンクが 3〜4 で、5 以上は Worker まで届かない。1 通ずつの観測なので、実運用で値が集まったら `parse.ts` `spamVerdictFromScore` を見直す。
+  実機で見えた値は普通のメールが 0〜1、GTUBE が 2、スパム語や IP 直書きの `.exe` リンクが 3〜4。
+  それより露骨な見本は Cloudflare Email Sending が送信の時点で「スパムとして拒否」したので、外から届くメールに 5 以上が付くかは見ていない。1 通ずつの観測なので、実運用で値が集まったら `parse.ts` `spamVerdictFromScore` を見直す。
 - CF ブロックの並びは、実機の 10 通（Cloudflare Email Sending 経由と Gmail から）で必ず `Received` → `ARC-Seal` → `ARC-Message-Signature` →
   `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` だった。
 - 受け取りの Worker が例外を投げると、Email Routing は一時失敗を返し、送信側が再送する（#24。実機で確認）。Cloudflare Email Sending は
@@ -142,7 +143,7 @@
 
 ## 5. 未確認（実機でしか確かめられないもの）
 
-2026-09-12 に実機と公開情報で確かめた分は消した（結果は「3.」と #140 / #141、問題が無かったものはそのコミットメッセージ）。残りは次のとおり。
+2026-09-12 に実機と公開情報で確かめた分は消した（結果は「3.」、問題が無かったものはそのコミットメッセージ）。残りは次のとおり。
 
 - Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127）。Gmail から直接送ったメールと Cloudflare Email Sending 経由のメールには
   必ず付いていた。公開されている報告は Gmail の自動転送の例（workerd の issue #6740）だけで、Cloudflare からの回答は無く、未解決のまま。
