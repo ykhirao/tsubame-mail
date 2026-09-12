@@ -82,6 +82,11 @@ export const adminAddress = z.object({
 });
 export type AdminAddress = z.infer<typeof adminAddress>;
 
+export const updateMySignatureInput = z.object({
+	signature: z.string().max(2000).nullable(),
+});
+export type UpdateMySignatureInput = z.infer<typeof updateMySignatureInput>;
+
 export const myAddress = z.object({
 	id: z.string(),
 	address: z.string(),

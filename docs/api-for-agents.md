@@ -170,6 +170,11 @@ curl -X POST https://<host>/api/v1/messages/msg_.../reply \
 
 件名・宛先に**改行は入れられない**（MIME ヘッダに入るため弾かれる）。
 
+### 署名
+
+書き込みできるメールボックスの署名は `PATCH /v1/addresses/{id}/signature` に `{"signature": "..."}`（2000 文字まで。空文字か null で消す）で変えられる。
+`send` スコープが要り、read だけのメールボックスは 403。変更は監査ログに残る。今の署名は `GET /v1/addresses` の `signature`。
+
 ## 5. 既読・スター・ゴミ箱
 
 ```bash

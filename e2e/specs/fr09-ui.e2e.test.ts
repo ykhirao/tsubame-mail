@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
 import {
+	createClient,
 	deliverEmail,
 	drainQueues,
 	freshHarness,
@@ -176,5 +177,54 @@ describe("FR-9 UI", () => {
 			expect(meKeys).toContain(k);
 			expect(listKeys).toContain(k);
 		}
+	});
+
+	scenario("FR-9", "書き込みできるメールボックスの署名を自分で変えられ、送信画面が読む情報に反映される", async () => {
+		const seeded = await seedDomain(h, { addresses: ["info", "hisho"] });
+		const infoId = seeded.addressIds.info!;
+		const hishoId = seeded.addressIds.hisho!;
+
+		const created = await owner.post("/api/v1/admin/users", {
+			email: "m@tsubame.test",
+			name: "メンバー",
+			role: "member",
+		});
+		expect(created.status).toBe(201);
+		await owner.put(`/api/v1/admin/users/${created.body.id}/grants`, {
+			grants: [
+				{ addressId: infoId, level: "write" },
+				{ addressId: hishoId, level: "read" },
+			],
+		});
+
+		const member = createClient(h);
+		await member.post("/api/v1/auth/login", {
+			email: "m@tsubame.test",
+			password: created.body.temporaryPassword,
+		});
+		await member.patch("/api/v1/me", {
+			currentPassword: created.body.temporaryPassword,
+			newPassword: "member-own-password",
+		});
+		await member.post("/api/v1/auth/login", {
+			email: "m@tsubame.test",
+			password: "member-own-password",
+		});
+
+		const res = await member.patch(`/api/v1/addresses/${infoId}/signature`, {
+			signature: "よろしくお願いします",
+		});
+		expect(res.status).toBe(200);
+		expect(res.body.data.signature).toBe("よろしくお願いします");
+
+		const me = await member.get("/api/v1/me");
+		const mine = me.body.addresses.find((a: { id: string }) => a.id === infoId);
+		expect(mine.signature).toBe("よろしくお願いします");
+		expect(mine.level).toBe("write");
+
+		const denied = await member.patch(`/api/v1/addresses/${hishoId}/signature`, {
+			signature: "x",
+		});
+		expect(denied.status).toBe(403);
 	});
 });

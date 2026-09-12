@@ -107,6 +107,15 @@ export function ApiKeyDetailPage() {
 							<DetailItem label="有効期限">{key.expiresAt ? formatDateTime(key.expiresAt) : "無期限"}</DetailItem>
 							<DetailItem label="最終使用">{formatDateTime(key.lastUsedAt)}</DetailItem>
 							<DetailItem label="作成">{formatDateTime(key.createdAt)}</DetailItem>
+							<DetailItem label="発行に使ったキー">
+								{key.parentKeyId ? (
+									<Link to={`/admin/api-keys/${key.parentKeyId}`} className="text-[var(--accent-text)] hover:underline">
+										{key.parentKeyId}
+									</Link>
+								) : (
+									"—（画面から発行）"
+								)}
+							</DetailItem>
 							<DetailItem label="失効日時">{formatDateTime(key.revokedAt)}</DetailItem>
 							<DetailItem label="状態">
 								{revoked ? (

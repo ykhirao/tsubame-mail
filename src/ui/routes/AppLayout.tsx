@@ -9,6 +9,7 @@ import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { useLayoutPref } from "@/ui/lib/viewPrefs";
+import { useServiceWorkerNavigate } from "@/ui/lib/useServiceWorkerNavigate";
 import { Inbox } from "@/ui/routes/Inbox";
 import { ThreadDetail } from "@/ui/routes/ThreadDetail";
 
@@ -244,6 +245,7 @@ export function MailShell() {
 export function AppLayout() {
 	const { me, logout } = useAuth();
 	const navigate = useNavigate();
+	useServiceWorkerNavigate();
 	const location = useLocation();
 	const [params, setParams] = useSearchParams();
 	const [loggingOut, setLoggingOut] = useState(false);

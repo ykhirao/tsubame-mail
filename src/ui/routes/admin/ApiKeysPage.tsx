@@ -344,7 +344,7 @@ export function useKeyActions(onSuccess: () => void): KeyActions {
 							) : (
 								<>
 									{" "}
-									発行できたら<strong>元のキーは失効します</strong>。
+									発行できたら<strong>元のキーは失効します</strong>（元のキーを使って発行したキーも失効します）。
 									古いキーを使っている連携は、新しいキーに入れ替えるまで動かなくなります。
 								</>
 							)}
@@ -366,7 +366,7 @@ export function useKeyActions(onSuccess: () => void): KeyActions {
 					<div className="space-y-4">
 						<Notice tone="danger">
 							<strong>{revokeTarget.name}</strong>（{revokeTarget.prefix}…）を失効します。
-							このキーを使っている連携はすぐに動かなくなります。
+							このキーを使っている連携と、このキーを使って発行したキーはすぐに動かなくなります。
 							<strong>失効は取り消せません。</strong>使い続けるなら新しいキーを発行してください。
 						</Notice>
 						<div className="flex justify-end gap-2">

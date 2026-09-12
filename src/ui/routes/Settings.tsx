@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { useAuth } from "@/ui/lib/auth";
 import { MyApiKeys } from "@/ui/components/MyApiKeys";
-import { MeApi } from "@/ui/lib/api";
+import { AddressesApi, MeApi } from "@/ui/lib/api";
+import type { MyAddress } from "@/shared/contracts/addresses";
 
 const inputCls =
 	"w-full min-h-11 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none sm:min-h-0";
@@ -21,6 +22,33 @@ export function Settings() {
 	const [savingPw, setSavingPw] = useState(false);
 	const [pwMsg, setPwMsg] = useState<string | null>(null);
 	const [pwError, setPwError] = useState<string | null>(null);
+
+	const [sigs, setSigs] = useState<Record<string, string>>({});
+	const [mailboxes, setMailboxes] = useState<MyAddress[]>([]);
+	const [savingSigId, setSavingSigId] = useState<string | null>(null);
+	const [sigMsg, setSigMsg] = useState<string | null>(null);
+
+	useEffect(() => {
+		AddressesApi.list()
+			.then((res) => {
+				setMailboxes(res.data);
+				setSigs(Object.fromEntries(res.data.map((a) => [a.id, a.signature ?? ""])));
+			})
+			.catch(() => {});
+	}, []);
+
+	const saveSignature = async (id: string) => {
+		setSavingSigId(id);
+		setSigMsg(null);
+		try {
+			await AddressesApi.updateSignature(id, sigs[id] ?? "");
+			setSigMsg("署名を更新しました");
+		} catch (err) {
+			setSigMsg(err instanceof Error ? err.message : "更新に失敗しました");
+		} finally {
+			setSavingSigId(null);
+		}
+	};
 
 	const saveName = async (e: FormEvent) => {
 		e.preventDefault();
@@ -132,6 +160,43 @@ export function Settings() {
 					</button>
 				</div>
 			</form>
+
+			<section className="card flex flex-col gap-3 p-5">
+				<h2 className="text-sm font-semibold text-[var(--text)]">メールボックスの署名</h2>
+				<p className="text-xs text-[var(--text-muted)]">
+					送信するメールの末尾に足されます。書き込みできるメールボックスだけ変更できます。
+				</p>
+				{sigMsg && <div className="text-sm text-[var(--text-muted)]">{sigMsg}</div>}
+				{mailboxes.filter((a) => a.level === "write" && !a.archived).length === 0 && (
+					<p className="text-sm text-[var(--text-muted)]">
+						書き込みできるメールボックスがありません。
+					</p>
+				)}
+				{mailboxes
+					.filter((a) => a.level === "write" && !a.archived)
+					.map((a) => (
+						<div key={a.id} className="flex flex-col gap-2">
+							<label className="text-sm text-[var(--text)]">{a.address}</label>
+							<textarea
+								value={sigs[a.id] ?? ""}
+								onChange={(e) => setSigs((prev) => ({ ...prev, [a.id]: e.target.value }))}
+								maxLength={2000}
+								rows={3}
+								className={inputCls}
+							/>
+							<div className="flex justify-end">
+								<button
+									type="button"
+									onClick={() => void saveSignature(a.id)}
+									disabled={savingSigId === a.id}
+									className={saveBtnCls}
+								>
+									{savingSigId === a.id ? "保存中…" : "保存"}
+								</button>
+							</div>
+						</div>
+					))}
+			</section>
 
 			<Link
 				to="/settings/notifications"

@@ -1,16 +1,29 @@
 import type { ReactNode } from "react";
 import { Button } from "@/ui/components/Button";
 
-function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
+function Step({
+	n,
+	title,
+	children,
+	img,
+}: {
+	n: number;
+	title: string;
+	children: ReactNode;
+	img?: string;
+}) {
 	return (
 		<li className="flex gap-3">
 			<span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-sm font-bold text-white">
 				{n}
 			</span>
-			<p className="text-sm text-[var(--text)]">
-				<strong className="mr-1">{title}</strong>
-				{children}
-			</p>
+			<div className="flex flex-1 items-center gap-3">
+				{img && <img src={img} alt="" className="h-11 w-11 shrink-0" />}
+				<p className="text-sm text-[var(--text)]">
+					<strong className="mr-1">{title}</strong>
+					{children}
+				</p>
+			</div>
 		</li>
 	);
 }
@@ -36,10 +49,10 @@ export function IosInstallSheet({
 					ホーム画面に追加して新着を受け取る
 				</h2>
 				<ol className="mb-4 space-y-4">
-					<Step n={1} title="「…」を押して「共有」を選ぶ">
+					<Step n={1} title="「…」を押して「共有」を選ぶ" img="/icons/ios-share.svg">
 						共有ボタンがツールバーに見えていれば、それを押してもよい。
 					</Step>
-					<Step n={2} title="「ホーム画面に追加」を選ぶ">
+					<Step n={2} title="「ホーム画面に追加」を選ぶ" img="/icons/ios-add-home.svg">
 						見当たらなければ、共有メニューを下へスクロールする。
 					</Step>
 					<Step n={3} title="「Web アプリとして開く」がオンのまま「追加」">

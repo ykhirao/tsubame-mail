@@ -164,6 +164,11 @@ async function listAllAddresses(): Promise<AddressListPage> {
 
 export const AddressesApi = {
 	list: listAllAddresses,
+	updateSignature: (id: string, signature: string | null) =>
+		request<{ data: { id: string; signature: string | null } }>(`/addresses/${id}/signature`, {
+			method: "PATCH",
+			body: { signature },
+		}),
 };
 
 export const ThreadsApi = {
@@ -212,6 +217,7 @@ export type MyApiKey = {
 	expiresAt: number | null;
 	revokedAt: number | null;
 	lastUsedAt: number | null;
+	parentKeyId: string | null;
 	createdAt: number | null;
 };
 

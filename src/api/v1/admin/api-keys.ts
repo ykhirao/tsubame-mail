@@ -18,6 +18,7 @@ import {
 	clampAddressIds,
 	clampExpiresAt,
 	clampScopes,
+	revokeKeyTree,
 	serializeKey,
 } from "../me";
 import type { AppEnv } from "../../types";
@@ -104,6 +105,7 @@ app.post("/", async (c) => {
 		scopes,
 		addressIds,
 		expiresAt,
+		parentKeyId: principal.apiKeyId ?? null,
 	});
 
 	await recordAudit(db, {
@@ -137,14 +139,14 @@ app.delete("/:id", async (c) => {
 
 	// 行は消さない。誰がいつ何を失効させたかを追えるようにしておく。
 	const revokedAt = key.revokedAt ?? new Date();
-	await db.update(schema.apiKeys).set({ revokedAt }).where(eq(schema.apiKeys.id, id));
+	const descendants = await revokeKeyTree(db, id, revokedAt);
 
 	await recordAudit(db, {
 		actorId: principal.userId,
 		action: "api_key.revoke",
 		targetType: "api_key",
 		targetId: id,
-		meta: { userId: key.userId, name: key.name },
+		meta: { userId: key.userId, name: key.name, descendants },
 		ip: clientIp(c),
 	});
 

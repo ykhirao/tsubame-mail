@@ -188,6 +188,7 @@ app.post("/api-keys", async (c) => {
 		scopes,
 		addressIds,
 		expiresAt,
+		parentKeyId: principal.apiKeyId ?? null,
 	});
 
 	await recordAudit(db, {
@@ -219,19 +220,42 @@ app.delete("/api-keys/:id", async (c) => {
 	if (!key) throw notFound("キーが見つかりません");
 
 	const revokedAt = key.revokedAt ?? new Date();
-	await db.update(schema.apiKeys).set({ revokedAt }).where(eq(schema.apiKeys.id, id));
+	const descendants = await revokeKeyTree(db, id, revokedAt);
 
 	await recordAudit(db, {
 		actorId: principal.userId,
 		action: "api_key.revoke",
 		targetType: "api_key",
 		targetId: id,
-		meta: { apiKeyId: principal.apiKeyId ?? null },
+		meta: { apiKeyId: principal.apiKeyId ?? null, descendants },
 		ip: clientIp(c),
 	});
 
 	return c.json({ ...serializeKey(key), revokedAt: unixSeconds(revokedAt) });
 });
+
+/** キーと、そのキーから（孫以降も含めて）発行したキーを失効する。新しく失効した子孫の id を返す。 */
+export async function revokeKeyTree(db: Db, id: string, revokedAt: Date): Promise<string[]> {
+	await db
+		.update(schema.apiKeys)
+		.set({ revokedAt })
+		.where(and(eq(schema.apiKeys.id, id), isNull(schema.apiKeys.revokedAt)));
+	const rows = await db.all<{ id: string }>(sql`
+		with recursive tree(id) as (
+			select id from api_keys where parent_key_id = ${id}
+			union
+			select k.id from api_keys k join tree t on k.parent_key_id = t.id
+		)
+		select id from tree`);
+	const ids = rows.map((r) => r.id).filter((d) => d !== id);
+	if (ids.length === 0) return [];
+	const revoked = await db
+		.update(schema.apiKeys)
+		.set({ revokedAt })
+		.where(and(jsonIdsIn(schema.apiKeys.id, ids), isNull(schema.apiKeys.revokedAt)))
+		.returning({ id: schema.apiKeys.id });
+	return revoked.map((r) => r.id);
+}
 
 export function serializeKey(row: typeof schema.apiKeys.$inferSelect) {
 	return {
@@ -244,6 +268,7 @@ export function serializeKey(row: typeof schema.apiKeys.$inferSelect) {
 		expiresAt: unixSeconds(row.expiresAt),
 		revokedAt: unixSeconds(row.revokedAt),
 		lastUsedAt: unixSeconds(row.lastUsedAt),
+		parentKeyId: row.parentKeyId ?? null,
 		createdAt: unixSeconds(row.createdAt),
 	};
 }

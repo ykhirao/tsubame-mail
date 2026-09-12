@@ -69,42 +69,52 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const pullRef = useRef(0);
 	const restoreRef = useRef(false);
+	const restoreTargetRef = useRef(0);
 	const idsRef = useRef<string[]>([]);
 	const scrollerRef = useRef<HTMLElement | null>(null);
 
 	// 未選択のときは絞らず、触れる全メールボックスを出す。切り替えは上部バーが持つ。
 
 	const fetchThreads = useCallback(async (cursor?: string) => {
-		if (!cursor) {
-			if (!restoreRef.current) resetList(query);
-			setLoading(true);
-			setThreads([]);
-			setNextCursor(null);
-		} else {
+		const queryParams = {
+			...(selected ? { address: selected } : {}),
+			...(view !== "inbox" ? { view: view as "starred" | "sent" | "trash" } : {}),
+		};
+		if (cursor) {
 			setLoadingMore(true);
-		}
-		try {
-			const res = await ThreadsApi.list({
-				...(selected ? { address: selected } : {}),
-				...(view !== "inbox"
-					? { view: view as "starred" | "sent" | "trash" }
-					: {}),
-				limit: PAGE,
-				cursor,
-			});
-			if (!cursor) {
-				setThreads(res.data);
-				setNextCursor(res.next_cursor);
-				setList(query, res.data.map((t) => t.id));
-			} else {
+			try {
+				const res = await ThreadsApi.list({ ...queryParams, limit: PAGE, cursor });
 				const ids = [...idsRef.current, ...res.data.map((t) => t.id)];
 				setThreads((prev) => [...prev, ...res.data]);
 				setNextCursor(res.next_cursor);
 				setList(query, ids);
+			} finally {
+				setLoadingMore(false);
 			}
+			return;
+		}
+
+		if (!restoreRef.current) resetList(query);
+		setLoading(true);
+		setThreads([]);
+		setNextCursor(null);
+		try {
+			// 復元時は保存した件数まで読み返す。1 ページ目だけ取って ids を
+			// 上書きすると「もっと読む」で進んだ位置に戻れない。
+			const all: ThreadListItem[] = [];
+			let c: string | undefined;
+			const target = restoreTargetRef.current;
+			for (;;) {
+				const res = await ThreadsApi.list({ ...queryParams, limit: PAGE, cursor: c });
+				all.push(...res.data);
+				setThreads([...all]);
+				setNextCursor(res.next_cursor);
+				if (!res.next_cursor || all.length >= target) break;
+				c = res.next_cursor;
+			}
+			setList(query, all.map((t) => t.id));
 		} finally {
 			setLoading(false);
-			setLoadingMore(false);
 		}
 	}, [selected, view]);
 
@@ -120,7 +130,9 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 	// 一覧を開いたとき、同じ絞り込みの状態が残っていれば、会話から戻った扱いで
 	// 位置を復元する。絞り込みが違えば白紙から取り直す。
 	useEffect(() => {
-		restoreRef.current = store.loaded && listKey(store.query) === queryKey;
+		const restoring = store.loaded && listKey(store.query) === queryKey;
+		restoreRef.current = restoring;
+		restoreTargetRef.current = restoring ? store.ids.length : 0;
 		void fetchThreads();
 	}, [fetchThreads]);
 

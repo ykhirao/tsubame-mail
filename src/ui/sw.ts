@@ -60,7 +60,7 @@ type SwScope = {
 		matchAll(opts: {
 			type: string;
 			includeUncontrolled: boolean;
-		}): Promise<Array<{ focus(): Promise<unknown>; navigate(url: string): Promise<unknown> }>>;
+		}): Promise<Array<{ focus(): Promise<unknown>; navigate(url: string): Promise<unknown>; postMessage(message: unknown, transfer: Transferable[]): void }>>;
 		openWindow(url: string): Promise<unknown>;
 	};
 	registration: {
@@ -250,6 +250,21 @@ async function patchMessage(messageId: string, action: "read" | "trash"): Promis
 	}).catch(() => {});
 }
 
+function askClientToNavigate(
+	client: { postMessage(message: unknown, transfer: Transferable[]): void },
+	url: string,
+): Promise<boolean> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		const timer = setTimeout(() => resolve(false), 1000);
+		channel.port1.onmessage = () => {
+			clearTimeout(timer);
+			resolve(true);
+		};
+		client.postMessage({ type: "navigate", url }, [channel.port2]);
+	});
+}
+
 async function handleClick(event: SwClickEvent): Promise<void> {
 	const messageId = event.notification.data?.messageId;
 
@@ -263,7 +278,9 @@ async function handleClick(event: SwClickEvent): Promise<void> {
 	const open = clients[0];
 	if (open) {
 		await open.focus();
-		await open.navigate(target).catch(() => {});
+		// client.navigate はページごと読み直すので一覧の位置が消える。遷移は画面側の
+		// react-router に任せ、受け取りの返事が無い（デプロイ前の古い画面）ときだけ読み直す。
+		if (!(await askClientToNavigate(open, target))) await open.navigate(target).catch(() => {});
 	} else {
 		await sw.clients.openWindow(target);
 	}

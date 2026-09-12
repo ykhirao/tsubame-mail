@@ -235,6 +235,7 @@ export interface ApiKeySummary {
 	expiresAt: number | null;
 	revokedAt: number | null;
 	lastUsedAt: number | null;
+	parentKeyId: string | null;
 	createdAt: number;
 }
 

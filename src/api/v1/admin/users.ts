@@ -16,6 +16,7 @@ import type { GrantInput } from "@/shared/contracts/users";
 import { conflict, invalidRequest, notFound } from "@/shared/errors";
 import { clientIp, getPrincipal, requireOwner, requireSession } from "../../middleware/auth";
 import type { AppEnv } from "../../types";
+import { revokeKeyTree } from "../me";
 
 const app = new Hono<AppEnv>();
 
@@ -209,6 +210,10 @@ app.delete("/:id", requireSession, async (c) => {
 	const db = c.get("db");
 
 	const user = await loadUser(db, id);
+	const ownKeys = await db
+		.select({ id: schema.apiKeys.id })
+		.from(schema.apiKeys)
+		.where(eq(schema.apiKeys.userId, id));
 
 	// 「今 owner か」と「他に有効な owner が居るか」を DELETE の WHERE 句で直接見るので、
 	// 確認と削除の間に別リクエストが割り込む隙間が無い（#54）。
@@ -221,12 +226,17 @@ app.delete("/:id", requireSession, async (c) => {
 		throw conflict("最後のオーナーを削除することはできません");
 	}
 
+	// 利用者のキーは cascade で消えるが、そのキーから他の利用者向けに発行したキーは残るので失効させる（#25）。
+	const now = new Date();
+	const descendants: string[] = [];
+	for (const k of ownKeys) descendants.push(...(await revokeKeyTree(db, k.id, now)));
+
 	await recordAudit(db, {
 		actorId: principal.userId,
 		action: "user.delete",
 		targetType: "user",
 		targetId: id,
-		meta: { email: user.email, role: user.role },
+		meta: { email: user.email, role: user.role, revokedDescendantKeys: descendants },
 		ip: clientIp(c),
 	});
 

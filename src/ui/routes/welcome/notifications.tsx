@@ -23,6 +23,7 @@ export function NotificationWelcome() {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [done, setDone] = useState(false);
+	const [subscribed, setSubscribed] = useState(false);
 	const [status, setStatus] = useState<DeviceStatus>(getDeviceStatus());
 
 	// iOS は購読をジェスチャ直後に呼ぶ必要があるため、鍵は画面を開いた時点で先に取っておく。
@@ -32,6 +33,31 @@ export function NotificationWelcome() {
 
 	if (status === "ios_not_standalone") {
 		return <StandaloneRequired />;
+	}
+
+	if (status === "unsupported") {
+		return <Unsupported />;
+	}
+
+	if (subscribed) {
+		return (
+			<Center>
+				<h1 className="text-lg font-bold text-[var(--text)]">通知を許可しました</h1>
+				<p className="mt-2 text-sm text-[var(--text-muted)]">
+					{guessDeviceName()} に新着メールの通知を届けます。細かい設定はあとで変えられます。
+				</p>
+				<button
+					type="button"
+					onClick={() => {
+						markNotificationWelcomeSeen();
+						setDone(true);
+					}}
+					className="mt-6 inline-flex h-12 min-w-44 items-center justify-center rounded-full bg-[var(--accent)] px-6 text-sm font-medium text-white hover:opacity-90"
+				>
+					これで終わり
+				</button>
+			</Center>
+		);
 	}
 
 	if (done) {
@@ -64,8 +90,7 @@ export function NotificationWelcome() {
 					const st = await subscribeDevice();
 					setStatus(st);
 					if (st === "notifying") {
-						markNotificationWelcomeSeen();
-						setDone(true);
+						setSubscribed(true);
 					}
 					setBusy(false);
 				}}
@@ -111,8 +136,7 @@ export function NotificationWelcome() {
 						setStatus(st);
 						if (st === "notifying") {
 							await NotificationsApi.patch({ preset }).catch(() => {});
-							markNotificationWelcomeSeen();
-							setDone(true);
+							setSubscribed(true);
 						}
 					} catch (e) {
 						setError(e instanceof Error ? e.message : "登録に失敗しました");
@@ -142,6 +166,23 @@ function Center({ children }: { children: React.ReactNode }) {
 		<div className="mx-auto flex w-full max-w-md flex-col px-4 py-10">
 			{children}
 		</div>
+	);
+}
+
+function Unsupported() {
+	return (
+		<Center>
+			<h1 className="text-lg font-bold text-[var(--text)]">このブラウザでは通知に対応していません</h1>
+			<p className="mt-2 text-sm text-[var(--text-muted)]">
+				お使いの環境ではプッシュ通知を利用できないため、この端末には新着をお知らせできません。最新のブラウザから開いてください。
+			</p>
+			<Link
+				to="/"
+				className="mt-6 inline-flex h-12 items-center justify-center rounded-full px-6 text-sm text-[var(--accent)] hover:bg-[var(--surface-hover)]"
+			>
+				受信箱へ戻る
+			</Link>
+		</Center>
 	);
 }
 

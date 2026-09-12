@@ -50,6 +50,13 @@
       "when": 1789188768079,
       "tag": "0006_add_retry_state",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1789194356295,
+      "tag": "0007_add_api_key_parent",
+      "breakpoints": true
     }
   ]
 }

@@ -4,9 +4,12 @@ import { defaultColorFor } from "@/shared/colors";
 import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
 import { addresses, domains, messages } from "@/db/schema";
 import type { AppEnv } from "@/api/types";
-import { jsonIdsIn } from "@/domain/access/policy";
-import { ApiError, forbidden, invalidRequest, unauthorized } from "@/shared/errors";
+import { canRead, canWrite, jsonIdsIn, recordAudit } from "@/domain/access/policy";
+import { conflict, forbidden, invalidRequest, notFound, unauthorized, ApiError } from "@/shared/errors";
 import { afterCursor, toPage } from "@/lib/paging";
+import { clientIp } from "@/api/middleware/auth";
+import { readJson } from "@/lib/validate";
+import { updateMySignatureInput } from "@/shared/contracts/addresses";
 
 const app = new Hono<AppEnv>();
 
@@ -91,6 +94,7 @@ app.get("/", async (c) => {
 		isCatchAll: r.address.isCatchAll,
 		// 色が未設定の古い行でも一覧が壊れないよう、既定色にして返す。
 		color: r.address.color ?? defaultColorFor(index),
+		signature: r.address.signature,
 		unreadCount: Number(r.unreadCount),
 		archived: r.address.archivedAt !== null,
 	}));
@@ -101,6 +105,48 @@ app.get("/", async (c) => {
 	data.sort((a, b) => a.address.localeCompare(b.address));
 
 	return c.json({ data, next_cursor: page.next_cursor });
+});
+
+// 署名は共有メールボックスの属性なので、変更を誰がいつしたか残す。
+app.patch("/:id/signature", async (c) => {
+	const principal = c.get("principal");
+	if (!principal) throw unauthorized();
+	// 署名の変更は送信と同じく、そのメールボックスの書き込み権が要る。
+	if (principal.via === "api_key" && !principal.scopes.includes("send")) {
+		throw forbidden("この API キーには send スコープがありません");
+	}
+	const db = c.get("db");
+	const id = c.req.param("id");
+
+	const addr = await db.query.addresses.findFirst({ where: eq(addresses.id, id) });
+	if (!addr || !canRead(principal, id)) throw notFound("アドレスが見つかりません");
+	if (!canWrite(principal, id)) {
+		throw forbidden("このメールボックスの署名を変える権限がありません");
+	}
+	if (addr.archivedAt) throw conflict("アーカイブ済みのメールボックスの署名は変更できません");
+
+	const { signature } = await readJson(c.req, updateMySignatureInput);
+	// 空文字は「署名なし」と同じ。
+	const next = signature === "" ? null : signature;
+	const before = addr.signature?.length ?? 0;
+
+	await db.update(addresses).set({ signature: next }).where(eq(addresses.id, id));
+
+	await recordAudit(db, {
+		actorId: principal.userId,
+		action: "address.signature",
+		targetType: "address",
+		targetId: id,
+		meta: {
+			address: addr.address,
+			before,
+			after: next?.length ?? 0,
+			apiKeyId: principal.apiKeyId ?? null,
+		},
+		ip: clientIp(c),
+	});
+
+	return c.json({ data: { id, signature: next } });
 });
 
 export default app;

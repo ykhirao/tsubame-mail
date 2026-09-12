@@ -35,6 +35,7 @@ export const apiKeySummary = z.object({
 	expiresAt: z.number().nullable(),
 	revokedAt: z.number().nullable(),
 	lastUsedAt: z.number().nullable(),
+	parentKeyId: z.string().nullable(),
 	createdAt: z.number(),
 });
 export type ApiKeySummary = z.infer<typeof apiKeySummary>;

@@ -12,6 +12,7 @@ import {
 export function InstallBanner() {
 	const [visible, setVisible] = useState(false);
 	const [iosOpen, setIosOpen] = useState(false);
+	const [noPrompt, setNoPrompt] = useState(false);
 
 	useEffect(() => {
 		setVisible(shouldShowInstallBanner());
@@ -21,8 +22,14 @@ export function InstallBanner() {
 
 	const add = async () => {
 		// iOS は beforeinstallprompt が無く、共有メニューから手で追加する。
-		if (isIos() || !hasInstallPrompt()) {
+		if (isIos()) {
 			setIosOpen(true);
+			return;
+		}
+		// beforeinstallprompt がまだ来ていない Android / PC は呼べないので、
+		// iOS の手順ではなくブラウザのメニューを使う案内だけ出す。
+		if (!hasInstallPrompt()) {
+			setNoPrompt(true);
 			return;
 		}
 		if ((await promptInstall()) === "accepted") setVisible(false);
@@ -45,6 +52,11 @@ export function InstallBanner() {
 						今はしない
 					</Button>
 				</div>
+				{noPrompt && (
+					<p className="mt-3 text-sm text-[var(--text-muted)]">
+						お使いのブラウザではダイアログを出せません。ブラウザのメニューから「ホーム画面に追加」で追加してください。
+					</p>
+				)}
 			</div>
 			<IosInstallSheet open={iosOpen} onClose={() => setIosOpen(false)} />
 		</>

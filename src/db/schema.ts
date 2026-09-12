@@ -60,9 +60,15 @@ export const apiKeys = sqliteTable(
 		expiresAt: integer("expires_at", { mode: "timestamp" }),
 		revokedAt: integer("revoked_at", { mode: "timestamp" }),
 		lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+		/** API キーで発行したキーは、発行に使ったキーを親に持つ。親を失効すると子孫も失効する（#25）。 */
+		parentKeyId: text("parent_key_id"),
 		createdAt: createdAt(),
 	},
-	(t) => [uniqueIndex("api_keys_hash_idx").on(t.keyHash), index("api_keys_user_idx").on(t.userId)],
+	(t) => [
+		uniqueIndex("api_keys_hash_idx").on(t.keyHash),
+		index("api_keys_user_idx").on(t.userId),
+		index("api_keys_parent_idx").on(t.parentKeyId),
+	],
 );
 
 export const domains = sqliteTable(

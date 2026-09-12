@@ -28,6 +28,7 @@
 | `domain.verify` | 確認の再実行 | `name`, `zoneId`, `routingStatus`, `sendingStatus` |
 | `address.create` | アドレス作成 | `address`, `localPart`, `domainId`, `kind`, `aliasTargetId`, `isCatchAll` |
 | `address.update` | アドレス変更 | `address`, `kind`, `aliasTargetId`, `isCatchAll`, `archived` |
+| `address.signature` | 署名の変更（write 権限の利用者が設定画面・API から） | `address`, `before` / `after`（文字数。本文は残さない）, `apiKeyId` |
 | `address.delete` | アドレス削除 | `address`, `domainId`, `kind` |
 | `rule.create` | ルール作成 | `name`, `scope`, `domainId` / `addressId`, `action`, `target` |
 | `rule.update` | ルール更新 | `name`, `scope`, `action`, `target` |
@@ -40,10 +41,10 @@
 | `device.delete` | 端末の削除 | `name` |
 | `user.create` | 利用者・エージェント作成 | `email`, `role` |
 | `user.update` | 利用者・エージェント変更 | `name`, `role`, `status`, `passwordChanged` |
-| `user.delete` | 利用者・エージェント削除 | `email`, `role` |
+| `user.delete` | 利用者・エージェント削除 | `email`, `role`, `revokedDescendantKeys`（その人のキーから発行され、連鎖で失効したキー） |
 | `user.grants.replace` | アドレス権限の一括差し替え | `grants` |
 | `api_key.create` | 利用者自身の API キー発行 | `name`, `scopes`, `addressIds`, `apiKeyId` |
-| `api_key.revoke` | 利用者自身の API キー失効 | `apiKeyId` |
+| `api_key.revoke` | API キー失効（利用者自身・管理画面） | `apiKeyId`（自分で失効）/ `userId`, `name`（管理画面）、`descendants`（連鎖で失効した子孫のキー） |
 | `auth.bootstrap` | オーナー作成（初回セットアップ） | `email` |
 
 `target_type` は `user` / `api_key` も持ち、`user.*` と `auth.bootstrap` は `user`、`api_key.*` は `api_key` を指す。
