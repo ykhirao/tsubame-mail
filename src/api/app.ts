@@ -58,18 +58,33 @@ export function createApp() {
 	// 添付と生 MIME は送信者が書いた中身をこのオリジンから返すので、HTML として
 	// 開かれても何も読み込ませず、どこにも埋め込ませない。`sandbox` は付けない
 	// （ブラウザによっては Content-Disposition: attachment のダウンロードまで止まる）。
-	app.use(
-		"*",
-		secureHeaders({
-			contentSecurityPolicy: {
-				defaultSrc: ["'none'"],
-				baseUri: ["'none'"],
-				formAction: ["'none'"],
-				frameAncestors: ["'none'"],
-			},
-			xFrameOptions: "DENY",
-			strictTransportSecurity: "max-age=15552000",
-		}),
+	// 仕様書の閲覧ページだけは自分の script と fetch が要る。中身はこちらが書いた
+	// 固定の HTML で、利用者の入力を出さないので、ここだけ緩めても添付の防御は変わらない。
+	const docsCsp = secureHeaders({
+		contentSecurityPolicy: {
+			defaultSrc: ["'none'"],
+			scriptSrc: ["'self'"],
+			styleSrc: ["'unsafe-inline'"],
+			connectSrc: ["'self'"],
+			baseUri: ["'none'"],
+			formAction: ["'none'"],
+			frameAncestors: ["'none'"],
+		},
+		xFrameOptions: "DENY",
+		strictTransportSecurity: "max-age=15552000",
+	});
+	const strictCsp = secureHeaders({
+		contentSecurityPolicy: {
+			defaultSrc: ["'none'"],
+			baseUri: ["'none'"],
+			formAction: ["'none'"],
+			frameAncestors: ["'none'"],
+		},
+		xFrameOptions: "DENY",
+		strictTransportSecurity: "max-age=15552000",
+	});
+	app.use("*", (c, next) =>
+		(c.req.path === "/api/v1/docs" ? docsCsp : strictCsp)(c, next),
 	);
 
 	app.use("*", async (c, next) => {

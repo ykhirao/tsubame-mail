@@ -49,4 +49,21 @@ describe("openapi", () => {
 			expect((await mounted.request(path, {}, env)).status, path).toBe(200);
 		}
 	});
+
+	// /api/* の既定は default-src 'none' で、そのままだと自分の script も fetch も通らない。
+	it("閲覧ページは自分の script と fetch を通す CSP で返る", async () => {
+		const res = await createApp().request("/api/v1/docs", {}, env);
+		const csp = res.headers.get("content-security-policy") ?? "";
+		expect(csp).toContain("script-src 'self'");
+		expect(csp).toContain("connect-src 'self'");
+	});
+
+	// 緩めるのは閲覧ページだけ。添付と生 MIME は送信者の書いた中身を返すので、
+	// ここに script-src が漏れると保存された HTML がこのオリジンで動く。
+	it("閲覧ページ以外の CSP は緩めない", async () => {
+		const res = await createApp().request("/api/v1/openapi.json", {}, env);
+		const csp = res.headers.get("content-security-policy") ?? "";
+		expect(csp).toContain("default-src 'none'");
+		expect(csp).not.toContain("script-src");
+	});
 });
