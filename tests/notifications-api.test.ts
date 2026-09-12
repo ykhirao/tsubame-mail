@@ -486,6 +486,28 @@ describe("dry-run と通知欄 feed", () => {
 		expect(body.data.map((e) => e.id)).toEqual(["ntf_1", "ntf_2", "ntf_3"]);
 	});
 
+	// 束は一時停止やおやすみ時間の長さだけ積み上がる。上限が無いと 1 リクエストで
+	// 全部返ってしまうので、ほかの一覧と同じく limit で区切って next_cursor を返す。
+	it("feed?hold_group= は limit で区切り、cursor で続きを読める", async () => {
+		const { owner } = await seedOwnerWithAddresses(1);
+		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
+		await seedLog(owner, 4);
+
+		const first = (await (
+			await app.request("/api/v1/me/notifications/feed?hold_group=h1&limit=2")
+		).json()) as { data: { id: string }[]; next_cursor: string | null };
+		expect(first.data.map((e) => e.id)).toEqual(["ntf_1", "ntf_2"]);
+		expect(first.next_cursor).not.toBeNull();
+
+		const second = (await (
+			await app.request(
+				`/api/v1/me/notifications/feed?hold_group=h1&limit=2&cursor=${encodeURIComponent(first.next_cursor!)}`,
+			)
+		).json()) as { data: { id: string }[]; next_cursor: string | null };
+		expect(second.data.map((e) => e.id)).toEqual(["ntf_3"]);
+		expect(second.next_cursor).toBeNull();
+	});
+
 	it("feed/seen は feed_seen_at を更新し、GET の unseen_count を 0 にする", async () => {
 		const member = await createUser({ role: "member" });
 		await seedLog(member, 3);

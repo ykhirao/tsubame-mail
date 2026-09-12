@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import type { Webhook, WebhookDelivery } from "./api";
-import { api, ApiClientError, getAllPages } from "./api";
+import { api, ApiClientError, getAllPages, type Page as ApiPage } from "./api";
 import { AdminGate } from "./gate";
 import {
 	Badge,
@@ -19,6 +19,8 @@ import {
 import { AuditLogCard, DetailItem, DetailList } from "./detail";
 import { DeleteWebhookDialog, eventLabels, WebhookModal } from "./WebhooksPage";
 
+const DELIVERY_PAGE = 50;
+
 function canRetry(d: WebhookDelivery): boolean {
 	if (d.status === "failed") return true;
 	if (d.status !== "pending") return false;
@@ -32,6 +34,7 @@ export function WebhookDetailPage() {
 	const [webhook, setWebhook] = useState<Webhook | null>(null);
 	const [addresses, setAddresses] = useState<{ id: string; address: string }[]>([]);
 	const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+	const [hasMoreDeliveries, setHasMoreDeliveries] = useState(false);
 	const [error, setError] = useState("");
 	const [edit, setEdit] = useState(false);
 	const [del, setDel] = useState(false);
@@ -40,14 +43,17 @@ export function WebhookDetailPage() {
 	const load = useCallback(async () => {
 		if (!id) return;
 		try {
+			// 配信履歴は受信のたびに増え、間引きも無い。全件辿ると活発な Webhook で
+			// 何百往復にもなるので、直近だけを出す。
 			const [hook, addressList, dlvs] = await Promise.all([
 				api.get<Webhook>(`/api/v1/webhooks/${id}`),
 				getAllPages<{ id: string; address: string }>("/api/v1/admin/addresses"),
-				getAllPages<WebhookDelivery>(`/api/v1/webhooks/${id}/deliveries`),
+				api.get<ApiPage<WebhookDelivery>>(`/api/v1/webhooks/${id}/deliveries?limit=${DELIVERY_PAGE}`),
 			]);
 			setWebhook(hook);
 			setAddresses(addressList);
-			setDeliveries(dlvs);
+			setDeliveries(dlvs.data);
+			setHasMoreDeliveries(dlvs.next_cursor !== null);
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "Webhook の読み込みに失敗しました");
 		}
@@ -121,7 +127,10 @@ export function WebhookDetailPage() {
 						</Card>
 
 						<Card className="mt-4">
-							<CardHeader title="配信履歴" description="この Webhook が送った / 送ろうとした POST の記録（全件）" />
+							<CardHeader
+								title="配信履歴"
+								description={`この Webhook が送った / 送ろうとした POST の記録（直近 ${DELIVERY_PAGE} 件）`}
+							/>
 							{deliveries.length === 0 ? (
 								<EmptyState message="配信履歴はまだありません。" />
 							) : (
@@ -173,6 +182,11 @@ export function WebhookDetailPage() {
 											))}
 										</tbody>
 									</table>
+									{hasMoreDeliveries && (
+										<p className="mt-3 text-center text-xs text-[var(--text-muted)]">
+											これより古い配信は出していません。
+										</p>
+									)}
 								</div>
 							)}
 						</Card>

@@ -488,7 +488,9 @@ app.get("/feed", async (c) => {
 	if (!q.success) throw invalidRequest("クエリが不正です", q.error.issues);
 	const { limit, cursor, include_dropped, hold_group } = q.data;
 
-	// 束の残り: holdGroup に属する全部を平坦に返す。
+	// 束の残り: holdGroup に属するものを古い順に平坦に返す。おやすみ時間や一時停止を
+	// 長く取れば 1 つの束に何千件でも入りうるので、ほかの一覧と同じくページに区切る
+	// （UI は next_cursor を辿って読む）。
 	if (hold_group) {
 		const rows = await db
 			.select()
@@ -497,11 +499,14 @@ app.get("/feed", async (c) => {
 				eq(schema.notificationLog.userId, principal.userId),
 				eq(schema.notificationLog.holdGroup, hold_group),
 				include_dropped ? undefined : inArray(schema.notificationLog.decision, ["sent", "held", "digest"]),
+				afterCursor(schema.notificationLog, cursor, "asc"),
 			))
-			.orderBy(asc(schema.notificationLog.createdAt), asc(schema.notificationLog.id));
-		const entries = rows.map(toFeedEntry);
+			.orderBy(asc(schema.notificationLog.createdAt), asc(schema.notificationLog.id))
+			.limit(limit + 1);
+		const paged = toPage(rows, limit);
+		const entries = paged.rows.map(toFeedEntry);
 		await attachFeedDetails(db, principal, entries);
-		return c.json({ data: entries, next_cursor: null });
+		return c.json({ data: entries, next_cursor: paged.next_cursor });
 	}
 
 	const scope = and(

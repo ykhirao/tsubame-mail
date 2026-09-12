@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { AuditLogEntry } from "@/shared/contracts/audit-logs";
-import { ApiClientError, getAllPages } from "./api";
+import { api, ApiClientError, type Page } from "./api";
 import { Card, CardHeader, EmptyState, ErrorBanner, formatDateTime, TableRow, tdCls, thCls } from "./components";
 
 export function DetailList({ children }: { children: ReactNode }) {
@@ -18,22 +18,55 @@ export function DetailItem({ label, children }: { label: string; children: React
 
 type AuditFilter = { targetType?: string; targetId?: string; actorId?: string };
 
+const AUDIT_PAGE = 50;
+
 export function AuditLogCard({ title = "操作の記録", filter }: { title?: string; filter: AuditFilter }) {
 	const [entries, setEntries] = useState<AuditLogEntry[] | null>(null);
+	const [nextCursor, setNextCursor] = useState<string | null>(null);
+	const [loadingMore, setLoadingMore] = useState(false);
 	const [error, setError] = useState("");
 	const query = new URLSearchParams(
 		Object.entries(filter).filter((e): e is [string, string] => typeof e[1] === "string"),
 	).toString();
 
+	// 監査ログは 400 日残り、間引きも無い。活発な owner や自動化のエージェントでは
+	// 万の単位になるので、全件を辿らず 1 ページずつ出す。
+	const load = (cursor?: string) => {
+		const url = `/api/v1/admin/audit-logs?${query}&limit=${AUDIT_PAGE}${
+			cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+		}`;
+		return api.get<Page<AuditLogEntry>>(url);
+	};
+
 	useEffect(() => {
 		let alive = true;
-		getAllPages<AuditLogEntry>(`/api/v1/admin/audit-logs?${query}`)
-			.then((rows) => alive && setEntries(rows))
+		setEntries(null);
+		setNextCursor(null);
+		load()
+			.then((page) => {
+				if (!alive) return;
+				setEntries(page.data);
+				setNextCursor(page.next_cursor);
+			})
 			.catch((e) => alive && setError(e instanceof ApiClientError ? e.message : "操作の記録を読めませんでした"));
 		return () => {
 			alive = false;
 		};
 	}, [query]);
+
+	const loadMore = async () => {
+		if (!nextCursor) return;
+		setLoadingMore(true);
+		try {
+			const page = await load(nextCursor);
+			setEntries((prev) => [...(prev ?? []), ...page.data]);
+			setNextCursor(page.next_cursor);
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "操作の記録を読めませんでした");
+		} finally {
+			setLoadingMore(false);
+		}
+	};
 
 	return (
 		<Card className="mt-4">
@@ -67,6 +100,18 @@ export function AuditLogCard({ title = "操作の記録", filter }: { title?: st
 							))}
 						</tbody>
 					</table>
+					{nextCursor && (
+						<div className="mt-3 text-center">
+							<button
+								type="button"
+								onClick={() => void loadMore()}
+								disabled={loadingMore}
+								className="rounded-full px-4 py-1.5 text-sm text-[var(--accent)] hover:bg-[var(--surface-hover)] disabled:text-[var(--text-muted)]"
+							>
+								{loadingMore ? "読み込み中…" : "もっと読む"}
+							</button>
+						</div>
+					)}
 				</div>
 			)}
 		</Card>
