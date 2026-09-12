@@ -291,6 +291,8 @@ export type ThreadRow = {
 	addressColor: string | null;
 	lastFromAddr: string | null;
 	lastFromName: string | null;
+	/** 最新のメールの向き。一覧で受信と送信控えを見分けるために出す（B-34）。 */
+	lastDirection: MessageDirection | null;
 	snippet: string | null;
 	hasAttachments: boolean;
 	isStarred: boolean;
@@ -381,7 +383,14 @@ async function withLastMessage(
 	db: Db,
 	page: Omit<
 		ThreadRow,
-		"address" | "addressColor" | "lastFromAddr" | "lastFromName" | "snippet" | "hasAttachments" | "isStarred"
+		| "address"
+		| "addressColor"
+		| "lastFromAddr"
+		| "lastFromName"
+		| "lastDirection"
+		| "snippet"
+		| "hasAttachments"
+		| "isStarred"
 	>[],
 	excludeTrash: boolean,
 ): Promise<ThreadRow[]> {
@@ -395,6 +404,7 @@ async function withLastMessage(
 			threadId: messages.threadId,
 			fromAddr: messages.fromAddr,
 			fromName: messages.fromName,
+			direction: messages.direction,
 			snippet: messages.snippet,
 			hasAttachments: messages.hasAttachments,
 			isStarred: messages.isStarred,
@@ -431,6 +441,7 @@ async function withLastMessage(
 			addressColor: addressById.get(t.addressId)?.color ?? null,
 			lastFromAddr: m?.fromAddr ?? null,
 			lastFromName: m?.fromName ?? null,
+			lastDirection: m?.direction ?? null,
 			snippet: m?.snippet ?? null,
 			hasAttachments: attached.has(t.id),
 			isStarred: starred.has(t.id),

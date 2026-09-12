@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import addressRoutes from "@/api/v1/addresses";
+import messageRoutes from "@/api/v1/messages";
 import { addresses, auditLogs, domains, messages, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
 import type { Principal } from "@/shared/contracts/common";
@@ -157,6 +158,112 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 
 		const row = res.json.data.find((a: { id: string }) => a.id === addressId);
 		expect(row.unreadCount).toBe(0);
+	});
+
+	// 未読のままゴミ箱へ動かすと、その会話は受信箱から消えるのにカウンタ列だけ 1 のまま残り、
+	// バッジ（ゴミ箱を除いて数える）と一覧の濃淡（カウンタ列）が食い違う。
+	// 既読化の PATCH は減算するのに status の PATCH は減算しない、という非対称だった（B-33）。
+	it("未読のままゴミ箱へ移すと会話の未読数も減る", async () => {
+		const db = getTestDb();
+		const domainId = newId("domain");
+		await db.insert(domains).values({
+			id: domainId,
+			name: "trashunread.test",
+			zoneId: "zone4",
+			zoneName: "trashunread.test",
+			mode: "subdomain",
+		});
+		const addressId = newId("address");
+		await db.insert(addresses).values({
+			id: addressId,
+			domainId,
+			localPart: "inbox",
+			address: "inbox@trashunread.test",
+		});
+		const threadId = newId("thread");
+		await db.insert(threads).values({
+			id: threadId,
+			addressId,
+			subject: "s",
+			lastMessageAt: new Date(),
+			messageCount: 1,
+			unreadCount: 1,
+		});
+		const messageId = newId("message");
+		await db.insert(messages).values({
+			id: messageId,
+			addressId,
+			threadId,
+			direction: "inbound",
+			status: "received",
+			isRead: false,
+			fromAddr: "a@b.test",
+			toAddr: "inbox@trashunread.test",
+			subject: "s",
+			receivedAt: new Date(),
+		});
+
+		const app = mountRouter("/", messageRoutes, ownerPrincipal);
+		const res = await callJson(app, `/${messageId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ status: "trash" }),
+		});
+		expect(res.status).toBe(200);
+
+		const thread = await db.query.threads.findFirst({ where: eq(threads.id, threadId) });
+		expect(thread?.unreadCount).toBe(0);
+	});
+
+	// 戻したら濃淡も戻る。減らしっぱなしだと、ゴミ箱から出した未読が薄いまま埋もれる。
+	it("ゴミ箱から未読のまま戻すと会話の未読数も戻る", async () => {
+		const db = getTestDb();
+		const domainId = newId("domain");
+		await db.insert(domains).values({
+			id: domainId,
+			name: "untrash.test",
+			zoneId: "zone5",
+			zoneName: "untrash.test",
+			mode: "subdomain",
+		});
+		const addressId = newId("address");
+		await db.insert(addresses).values({
+			id: addressId,
+			domainId,
+			localPart: "inbox",
+			address: "inbox@untrash.test",
+		});
+		const threadId = newId("thread");
+		await db.insert(threads).values({
+			id: threadId,
+			addressId,
+			subject: "s",
+			lastMessageAt: new Date(),
+			messageCount: 1,
+			unreadCount: 0,
+		});
+		const messageId = newId("message");
+		await db.insert(messages).values({
+			id: messageId,
+			addressId,
+			threadId,
+			direction: "inbound",
+			status: "trash",
+			isRead: false,
+			fromAddr: "a@b.test",
+			toAddr: "inbox@untrash.test",
+			subject: "s",
+			receivedAt: new Date(),
+		});
+
+		const app = mountRouter("/", messageRoutes, ownerPrincipal);
+		const res = await callJson(app, `/${messageId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ status: "received" }),
+		});
+		expect(res.status).toBe(200);
+
+		const thread = await db.query.threads.findFirst({ where: eq(threads.id, threadId) });
+		expect(thread?.unreadCount).toBe(1);
 	});
 
 	describe("PATCH /:id/signature", () => {

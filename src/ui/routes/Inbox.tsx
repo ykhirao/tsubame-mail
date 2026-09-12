@@ -5,6 +5,7 @@ import { MessagesApi, ThreadsApi, AddressesApi, useIncludeHidden } from "@/ui/li
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
 import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
+import { SentMark } from "@/ui/components/SentMark";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
 import { InstallBanner } from "@/ui/components/InstallBanner";
 import {
@@ -396,8 +397,11 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 												</button>
 												<div className="min-w-0 flex-1">
 													<div className="flex items-baseline justify-between gap-3">
-														<span className={`min-w-0 truncate text-sm ${unread ? "font-bold" : ""}`}>
-															{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+														<span className="flex min-w-0 items-baseline gap-1.5">
+															{t.lastDirection === "outbound" && <SentMark />}
+															<span className={`min-w-0 truncate text-sm ${unread ? "font-bold" : ""}`}>
+																{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+															</span>
 														</span>
 														<span className="shrink-0 text-xs opacity-70">
 															{formatListDate(t.lastMessageAt)}
@@ -466,8 +470,11 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 												</button>
 												<div className="min-w-0 flex-1">
 													<div className="flex items-baseline justify-between gap-2">
-														<span className={`min-w-0 truncate text-sm ${unread ? "font-medium" : ""}`}>
-															{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+														<span className="flex min-w-0 items-baseline gap-1.5">
+															{t.lastDirection === "outbound" && <SentMark />}
+															<span className={`min-w-0 truncate text-sm ${unread ? "font-medium" : ""}`}>
+																{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+															</span>
 														</span>
 														<span className="shrink-0 text-xs opacity-70">
 															{formatListDate(t.lastMessageAt)}
@@ -534,8 +541,11 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 												</svg>
 											</button>
 											<span className="w-44 shrink-0 leading-tight">
-												<span className="block truncate text-sm" title={t.lastFromAddr ?? undefined}>
-													{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+												<span className="flex items-baseline gap-1.5">
+													{t.lastDirection === "outbound" && <SentMark />}
+													<span className="truncate text-sm" title={t.lastFromAddr ?? undefined}>
+														{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+													</span>
 												</span>
 												{!selected && t.address && (
 													<span

@@ -97,6 +97,7 @@ routes.get("/", async (c) => {
 			addressColor: t.addressColor,
 			lastFromAddr: t.lastFromAddr,
 			lastFromName: t.lastFromName,
+			lastDirection: t.lastDirection,
 			snippet: t.snippet,
 			hasAttachments: t.hasAttachments,
 			isStarred: t.isStarred,

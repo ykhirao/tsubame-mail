@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router";
 import type { MessageListItem } from "@/shared/contracts/messages";
+import { SentMark } from "@/ui/components/SentMark";
 import { MessagesApi, useIncludeHidden } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
@@ -138,8 +139,11 @@ export function Search() {
 									>
 										<span className="min-w-0 flex-1">
 											<div className="flex items-baseline justify-between gap-3">
-												<span className={`min-w-0 truncate text-sm ${m.isRead ? "" : "font-bold"}`}>
-													{m.fromName?.trim() || m.fromAddr || "（差出人不明）"}
+												<span className="flex min-w-0 items-baseline gap-1.5">
+													{m.direction === "outbound" && <SentMark />}
+													<span className={`min-w-0 truncate text-sm ${m.isRead ? "" : "font-bold"}`}>
+														{m.fromName?.trim() || m.fromAddr || "（差出人不明）"}
+													</span>
 												</span>
 												<span className="shrink-0 text-xs opacity-70">
 													{formatDate(m.receivedAt)}
@@ -170,9 +174,12 @@ export function Search() {
 											<span className="block truncate text-sm">
 												{m.subject?.trim() || "（件名なし）"}
 											</span>
-											<span className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">
-												{m.fromName || m.fromAddr}
-												{m.hasAttachments ? "  📎" : ""}
+											<span className="mt-0.5 flex items-baseline gap-1.5 text-xs text-[var(--text-muted)]">
+												{m.direction === "outbound" && <SentMark />}
+												<span className="truncate">
+													{m.fromName || m.fromAddr}
+													{m.hasAttachments ? "  📎" : ""}
+												</span>
 											</span>
 										</span>
 										<span className="shrink-0 text-right text-xs text-[var(--text-muted)]">

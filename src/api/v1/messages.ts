@@ -214,13 +214,21 @@ routes.patch("/:id", async (c) => {
 
 	await db.update(messages).set(update).where(eq(messages.id, id)).run();
 
-	if (p.isRead !== undefined && p.isRead !== cur.isRead && cur.threadId) {
-		const delta = p.isRead ? -1 : 1;
-		await db
-			.update(threads)
-			.set({ unreadCount: sql`max(0, unread_count + ${delta})` })
-			.where(eq(threads.id, cur.threadId))
-			.run();
+	// 会話の未読数に入るのは「未読かつゴミ箱でない」メールだけ。バッジ（`addresses.ts` が
+	// ゴミ箱の会話を除いて数える）と一覧の濃淡（このカウンタ列）を一致させるため、
+	// 既読化とゴミ箱への移動の両方で数え直す。片方だけ減らすと必ずドリフトする（B-33）。
+	if (cur.threadId) {
+		const counted = (isRead: boolean, status: MessageStatus) => !isRead && status !== "trash";
+		const before = counted(cur.isRead, cur.status);
+		const after = counted(update.isRead ?? cur.isRead, update.status ?? cur.status);
+		if (before !== after) {
+			const delta = after ? 1 : -1;
+			await db
+				.update(threads)
+				.set({ unreadCount: sql`max(0, unread_count + ${delta})` })
+				.where(eq(threads.id, cur.threadId))
+				.run();
+		}
 	}
 
 	const updated = await getMessage(db, principal, id, { withBody: true, includeTrash: true });
