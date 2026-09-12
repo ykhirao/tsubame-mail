@@ -351,7 +351,7 @@ describe("カーソルページング", () => {
 });
 
 describe("queryThreadMessages", () => {
-	it("同じ From への接ぎ木で無限に伸ばせないよう上限を付ける（#35）", async () => {
+	it("同じ From への接ぎ木で無限に伸ばせないよう最新 200 件を古い順に返す（#35）", async () => {
 		const total = MAX_THREAD_MESSAGES + 5;
 		for (let i = 0; i < total; i++) {
 			await insertMessage({
@@ -362,8 +362,38 @@ describe("queryThreadMessages", () => {
 				threadId: "thr_a",
 			});
 		}
-		const rows = await queryThreadMessages(db, principal("all", "owner"), "thr_a");
-		expect(rows.length).toBeLessThanOrEqual(MAX_THREAD_MESSAGES);
+		const first = await queryThreadMessages(db, principal("all", "owner"), "thr_a");
+		expect(first.messages.length).toBe(MAX_THREAD_MESSAGES);
+		expect(first.hasOlder).toBe(true);
+		expect(first.olderCount).toBe(5);
+		expect(first.olderCursor).toBeTruthy();
+		// 最新 200 件を古い順に返す。古い 5 件（msg_thr_0..4）は含まれない（#35 の再発防止）。
+		expect(first.messages[0]!.id).toBe("msg_thr_5");
+		expect(first.messages.at(-1)!.id).toBe(`msg_thr_${total - 1}`);
+
+		const rest = await queryThreadMessages(db, principal("all", "owner"), "thr_a", {
+			before: first.olderCursor!,
+		});
+		expect(rest.messages.map((m) => m.id)).toEqual(Array.from({ length: 5 }, (_, i) => `msg_thr_${i}`));
+		expect(rest.hasOlder).toBe(false);
+		expect(rest.olderCount).toBe(0);
+	});
+
+	it("上限に満たないスレッドは hasOlder=false で全件古い順に返る", async () => {
+		for (let i = 0; i < 3; i++) {
+			await insertMessage({
+				id: `msg_few_${i}`,
+				addressId: "adr_a",
+				subject: `少 ${i}`,
+				receivedAt: new Date(1_770_004_000_000 + i * 1000),
+				threadId: "thr_a",
+			});
+		}
+		const r = await queryThreadMessages(db, principal("all", "owner"), "thr_a");
+		expect(r.hasOlder).toBe(false);
+		expect(r.olderCursor).toBeNull();
+		expect(r.olderCount).toBe(0);
+		expect(r.messages.map((m) => m.id)).toEqual(["msg_few_0", "msg_few_1", "msg_few_2"]);
 	});
 });
 
@@ -411,9 +441,11 @@ describe("スレッド一覧・詳細は既定でゴミ箱を除外する（#92�
 		expect(withTrash.rows.map((t) => t.id)).toContain(thrId);
 
 		const msgs = await queryThreadMessages(db, principal("all", "owner"), thrId);
-		expect(msgs).toHaveLength(0);
-		const allMsgs = await queryThreadMessages(db, principal("all", "owner"), thrId, true);
-		expect(allMsgs.map((m) => m.id)).toContain("msg_trash");
+		expect(msgs.messages).toHaveLength(0);
+		const allMsgs = await queryThreadMessages(db, principal("all", "owner"), thrId, {
+			includeTrash: true,
+		});
+		expect(allMsgs.messages.map((m) => m.id)).toContain("msg_trash");
 	});
 });
 

@@ -165,6 +165,7 @@ export async function listAccessibleAddresses(db: Db, principal: Principal) {
 			address: schema.addresses.address,
 			displayName: schema.addresses.displayName,
 			color: schema.addresses.color,
+			signature: schema.addresses.signature,
 			archivedAt: schema.addresses.archivedAt,
 		})
 		.from(schema.addresses)
@@ -178,6 +179,7 @@ export async function listAccessibleAddresses(db: Db, principal: Principal) {
 		address: row.address,
 		displayName: row.displayName,
 		color: row.color ?? defaultColorFor(index),
+		signature: row.signature,
 		archived: row.archivedAt !== null,
 		level: canWrite(principal, row.id) ? ("write" as const) : ("read" as const),
 		canWrite: canWrite(principal, row.id),

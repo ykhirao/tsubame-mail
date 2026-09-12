@@ -85,7 +85,7 @@ export function SwitchRow({
 }
 
 export const actionLabels: Record<NotificationAction, string> = {
-	always: "必ず通知",
+	always: "必ず通知（おやすみ時間も）",
 	normal: "通知",
 	silent: "音なし",
 	never: "通知しない",

@@ -21,7 +21,14 @@ export type WebhookRetryMessage = {
 
 /** 通知は受信処理と別のメッセージにする。push サービスの遅延で受信の再試行を起こさないため。 */
 export type NotifyMessage =
-	| { kind: "notify"; event: "received"; messageId: string; userId?: string }
+	| {
+			kind: "notify";
+			event: "received";
+			messageId: string;
+			userId?: string;
+			/** アドレスルールが既読にした。messages.is_read は後で利用者が読んでも立つので、受信時の判定を運ぶ。 */
+			ruleRead?: boolean;
+	  }
 	| { kind: "notify"; event: "send_failed"; messageId: string; userId?: string }
 	| { kind: "notify"; event: "test"; deviceId: string; userId: string };
 

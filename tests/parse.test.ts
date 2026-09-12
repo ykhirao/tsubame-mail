@@ -1,6 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parseRawMime } from "@/domain/mail/parse";
+import { parseRawMime, spamVerdictFromScore } from "@/domain/mail/parse";
 import { sampleMime } from "./helpers";
+
+// 実機のヘッダの並び（security-audit.md #127/#128）を写す。A / B の署名などは伏せる。
+function cfMime(opts: {
+	arcAuth?: string;
+	authResults?: string;
+	spamScore?: string;
+	senderHeaders?: string[];
+}): string {
+	const lines = [
+		"Received: from mail.sender.example by mx.cloudflare.net with ESMTPS id X",
+		"ARC-Seal: i=1; a=rsa-sha256; s=x; d=mx.cloudflare.net; t=1",
+		"ARC-Message-Signature: i=1; a=rsa-sha256; d=mx.cloudflare.net",
+		...(opts.arcAuth !== undefined ? [`ARC-Authentication-Results: i=1; mx.cloudflare.net; ${opts.arcAuth}`] : []),
+		"Received-SPF: pass (receiver=mx.cloudflare.net) client-ip=x",
+		...(opts.authResults !== undefined ? [`Authentication-Results: mx.cloudflare.net; ${opts.authResults}`] : []),
+		...(opts.spamScore !== undefined ? [`X-CF-SpamH-Score: ${opts.spamScore}`] : []),
+		...(opts.senderHeaders ?? []),
+		"From: taro@example.com",
+		"To: a@example.com",
+		"Subject: test",
+		"Message-ID: <abc@x.example>",
+		"Date: Mon, 14 Sep 2026 03:00:00 +0000",
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+	].join("\r\n");
+	return lines;
+}
 
 describe("parseRawMime", () => {
 	it("基本フィールドを正規化する（山括弧を外す）", async () => {
@@ -106,5 +134,81 @@ describe("parseRawMime", () => {
 		const p = await parseRawMime(raw);
 		expect(p.to).not.toContain("\r");
 		expect(p.to).not.toContain("\n");
+	});
+});
+
+describe("Cloudflare 判定ブロック（#127 / #128）", () => {
+	it("A 型: CF ブロックとスコアを読み、dmarc=pass と dkim ドメインを抽出する", async () => {
+		const p = await parseRawMime(
+			cfMime({
+				arcAuth: "i=1; mx.cloudflare.net; dkim=pass header.d=m.example.com; dmarc=pass policy.dmarc=reject; spf=pass",
+				authResults: "dkim=pass header.d=m.example.com; dmarc=pass policy.dmarc=reject; spf=pass",
+				spamScore: "1",
+			}),
+		);
+		expect(p.inboundAuth?.dmarc).toBe("pass");
+		expect(p.inboundAuth?.dkimPassDomains).toContain("m.example.com");
+		expect(p.cfSpamScore).toBe(1);
+	});
+
+	it("B 型: スコアが無く、下に別の Received が来る（Google の ARC 一式）とブロックを終える", async () => {
+		const p = await parseRawMime(
+			cfMime({
+				arcAuth: "i=1; mx.cloudflare.net; dkim=pass header.d=gmail.com; dmarc=pass policy.dmarc=none; spf=pass",
+				authResults: "dkim=pass header.d=gmail.com; dmarc=pass policy.dmarc=none; spf=pass",
+				senderHeaders: [
+					"Received: from mail.google.com by mail-google.example with ESMTPS",
+				"ARC-Seal: i=2; a=rsa-sha256; d=google.com",
+				"ARC-Message-Signature: i=2; a=rsa-sha256; d=google.com",
+				"ARC-Authentication-Results: i=2; mx.google.com; dkim=pass",
+			],
+			}),
+		);
+		expect(p.cfSpamScore).toBeNull();
+		expect(p.inboundAuth?.dmarc).toBe("pass");
+		expect(p.inboundAuth?.dkimPassDomains).toContain("gmail.com");
+	});
+
+	it("#6740 の形: 本物の Authentication-Results が無く、送信者が偽の dmarc=pass を置いても ARC の判定で使われない", async () => {
+		const p = await parseRawMime(
+			cfMime({
+				arcAuth: "i=1; mx.cloudflare.net; spf=pass",
+				senderHeaders: ["Authentication-Results: mx.cloudflare.net; dmarc=pass", "From: attacker@evil.jp"],
+			}),
+		);
+		expect(p.inboundAuth).toBeNull();
+	});
+
+	it("ARC にも判定が無ければ未認証（inboundAuth は null）", async () => {
+		const p = await parseRawMime(
+			cfMime({ arcAuth: "i=1; mx.cloudflare.net; spf=pass", authResults: "spf=pass" }),
+		);
+		expect(p.inboundAuth).toBeNull();
+	});
+
+	it("CF ブロックが無いメールは判定もスコアも null", async () => {
+		const p = await parseRawMime(
+			[
+				"From: taro@example.com",
+				"To: a@example.com",
+				"Subject: test",
+				"MIME-Version: 1.0",
+				"Content-Type: text/plain; charset=utf-8",
+				"",
+				"hi",
+			].join("\r\n"),
+		);
+		expect(p.inboundAuth).toBeNull();
+		expect(p.cfSpamScore).toBeNull();
+	});
+});
+
+describe("spamVerdictFromScore", () => {
+	it("スコアが無ければ null、5 以上なら suspicious、それ未満は clean（spam は出さない）", () => {
+		expect(spamVerdictFromScore(null)).toBeNull();
+		expect(spamVerdictFromScore(0)).toBe("clean");
+		expect(spamVerdictFromScore(4)).toBe("clean");
+		expect(spamVerdictFromScore(5)).toBe("suspicious");
+		expect(spamVerdictFromScore(9)).toBe("suspicious");
 	});
 });

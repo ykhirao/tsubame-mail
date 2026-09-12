@@ -720,4 +720,102 @@ describe("管理 API の監査（#95）", () => {
 		const rows = await db.select().from(auditLogs).all();
 		expect(rows.map((r) => r.action)).toContain("rule.create");
 	});
+
+	it("webhook の更新が webhook.update として記録される", async () => {
+		const token = await ownerToken();
+		const created = (await (
+			await call("/api/v1/webhooks", token, { method: "POST", body: validPayload })
+		).json()) as { id: string };
+
+		await call(`/api/v1/webhooks/${created.id}`, token, {
+			method: "PATCH",
+			body: { name: "改名", enabled: false },
+		});
+
+		const rows = await getDb(env).select().from(auditLogs).all();
+		const updated = rows.find((r) => r.targetId === created.id && r.action === "webhook.update");
+		expect(updated).toBeTruthy();
+		expect(JSON.stringify(updated!.meta)).not.toContain("secret");
+	});
+
+	it("webhook の削除が webhook.delete として記録される", async () => {
+		const token = await ownerToken();
+		const created = (await (
+			await call("/api/v1/webhooks", token, { method: "POST", body: validPayload })
+		).json()) as { id: string };
+
+		expect((await call(`/api/v1/webhooks/${created.id}`, token, { method: "DELETE" })).status).toBe(204);
+
+		const rows = await getDb(env).select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === created.id && r.action === "webhook.delete")).toBeTruthy();
+	});
+
+	it("手動再送が webhook.retry として記録される", async () => {
+		const db = getDb(env);
+		const webhookId = newId("webhook");
+		await db.insert(webhooks).values({
+			id: webhookId,
+			name: "h",
+			url: "https://ok.example/h",
+			secret: "s",
+			events: ["message.received"],
+			addressIds: null,
+		});
+		const deliveryId = newId("delivery");
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId,
+			event: "message.received",
+			status: "failed",
+			httpStatus: 500,
+			error: "HTTP 500",
+			attempt: 3,
+		});
+		const token = await ownerToken();
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("ok", { status: 200 })),
+		);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(200);
+
+		const rows = await db.select().from(auditLogs).all();
+		expect(rows.find((r) => r.action === "webhook.retry" && r.targetId === webhookId)).toBeTruthy();
+	});
+
+	it("ルールの更新と削除が rule.update / rule.delete として記録される", async () => {
+		const db = getDb(env);
+		const domainId = newId("domain");
+		await db.insert(domains).values({
+			id: domainId,
+			name: "mail.audit.example.com",
+			zoneId: "zone1",
+			zoneName: "example.com",
+			mode: "subdomain",
+		});
+		const token = await ownerToken();
+		const created = (await (
+			await call("/api/v1/admin/rules", token, {
+				method: "POST",
+				body: { scope: "domain", domainId, name: "監査用", action: "drop", matcher: {} },
+			})
+		).json()) as { id: string };
+
+		expect(
+			(
+				await call(`/api/v1/admin/rules/${created.id}`, token, {
+					method: "PATCH",
+					body: { name: "改名後", enabled: false },
+				})
+			).status,
+		).toBe(200);
+
+		let rows = await db.select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === created.id && r.action === "rule.update")).toBeTruthy();
+
+		expect((await call(`/api/v1/admin/rules/${created.id}`, token, { method: "DELETE" })).status).toBe(204);
+		rows = await db.select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === created.id && r.action === "rule.delete")).toBeTruthy();
+	});
 });

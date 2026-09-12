@@ -37,8 +37,13 @@ function assertSw(): Plugin {
 			outDir = path.resolve(config.build.outDir);
 		},
 		closeBundle() {
-			if (!fs.existsSync(path.join(outDir, "sw.js"))) {
+			const swPath = path.join(outDir, "sw.js");
+			if (!fs.existsSync(swPath)) {
 				this.error("dist/client/sw.js がありません。Service Worker のビルドに失敗しています。");
+			}
+			// SW はクラシックスクリプトとして登録するので、共通チャンクへの import が混ざると登録ごと失敗する。
+			if (/\bimport\s*[\s{("'`*]|\bexport\s*[{*]/.test(fs.readFileSync(swPath, "utf8"))) {
+				this.error("dist/client/sw.js に import / export が残っています。SW から画面と共有するモジュールを import しないでください。");
 			}
 		},
 	};

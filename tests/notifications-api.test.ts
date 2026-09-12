@@ -3,7 +3,7 @@ import { env } from "cloudflare:test";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
-import notificationsRoutes, { threadNotificationRouter } from "@/api/v1/notifications";
+import notificationsRoutes, { serializeDevice, threadNotificationRouter } from "@/api/v1/notifications";
 import { ApiError } from "@/shared/errors";
 import type { AppEnv } from "@/api/types";
 import type { Principal } from "@/shared/contracts/common";
@@ -155,6 +155,17 @@ describe("GET /me/notifications（既定値とメールボックス一覧）", (
 		const body = (await res.json()) as { mailboxes: { isCatchAll: boolean; level: string }[] };
 		expect(body.mailboxes.find((m) => m.isCatchAll)!.level).toBe("off");
 	});
+
+	it("quiet.tz が不正なら 400（#132）", async () => {
+		const member = await createUser({ role: "member" });
+		const app = buildApp(sessionPrincipal(member.id, "member", []));
+		const res = await app.request("/api/v1/me/notifications", {
+			method: "PATCH",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ quiet: { tz: "Not/AZone", mode: "drop", ranges: [] } }),
+		});
+		expect(res.status).toBe(400);
+	});
 });
 
 describe("PATCH /me/notifications（プリセット）", () => {
@@ -280,6 +291,63 @@ describe("通知ルール CRUD と並べ替え", () => {
 		};
 		expect(afterDel.data.map((r) => r.id)).toEqual([second.id]);
 	});
+
+	it("通知ルールは 50 件までで、51 件目は 400（#133）", async () => {
+		const member = await createUser({ role: "member" });
+		const app = buildApp(sessionPrincipal(member.id, "member", []));
+		for (let i = 0; i < 50; i++) {
+			const res = await app.request("/api/v1/me/notifications/rules", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name: `rule${i}`, matcher: { subject: `s${i}` }, action: "always" }),
+			});
+			expect(res.status).toBe(201);
+		}
+		const res = await app.request("/api/v1/me/notifications/rules", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ name: "overflow", matcher: { subject: "x" }, action: "always" }),
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it("reorder は 100 件超で 400・重複を除いて並べ替える（#133）", async () => {
+		const member = await createUser({ role: "member" });
+		const app = buildApp(sessionPrincipal(member.id, "member", []));
+		const created = (await (
+			await app.request("/api/v1/me/notifications/rules", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name: "a", matcher: { subject: "a" }, action: "always" }),
+			})
+		).json()) as { id: string };
+		const second = (await (
+			await app.request("/api/v1/me/notifications/rules", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name: "b", matcher: { subject: "b" }, action: "always" }),
+			})
+		).json()) as { id: string };
+
+		const tooMany = Array.from({ length: 101 }, (_, i) => `nrl_${i}`);
+		const res = await app.request("/api/v1/me/notifications/rules/reorder", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ ids: tooMany }),
+		});
+		expect(res.status).toBe(400);
+
+		await app.request("/api/v1/me/notifications/rules/reorder", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ ids: [second.id, created.id, second.id] }),
+		});
+		const list = (await (await app.request("/api/v1/me/notifications/rules")).json()) as {
+			data: { id: string; priority: number }[];
+		};
+		expect(list.data.map((r) => r.id)).toEqual([second.id, created.id]);
+		expect(list.data.map((r) => r.priority)).toEqual([0, 1]);
+	});
 });
 
 describe("dry-run と通知欄 feed", () => {
@@ -309,6 +377,26 @@ describe("dry-run と通知欄 feed", () => {
 		expect(res.status).toBe(200);
 	});
 
+	it("端末の直列化は push 鍵（p256dh / auth）を含まない（#134）", () => {
+		const row = {
+			id: "dev_1",
+			name: "iPhone",
+			platform: "ios",
+			enabled: true,
+			endpoint: "https://fcm.googleapis.com/x",
+			p256dh: "SECRET_P256DH",
+			auth: "SECRET_AUTH",
+			addressIds: ["adr_1"],
+			lastSeenAt: new Date(0),
+			lastSuccessAt: null,
+			failureCount: 0,
+			createdAt: new Date(0),
+		} as typeof schema.pushDevices.$inferSelect;
+		const out = serializeDevice(row) as Record<string, unknown>;
+		expect(out).not.toHaveProperty("p256dh");
+		expect(out).not.toHaveProperty("auth");
+	});
+
 	it("feed は束にまとめる（held 同 hold_group）+ include_dropped", async () => {
 		const member = await createUser({ role: "member" });
 		await seedLog(member, 5);
@@ -336,6 +424,18 @@ describe("dry-run と通知欄 feed", () => {
 			await app.request("/api/v1/me/notifications/feed?include_dropped=1")
 		).json()) as { data: ({ reason?: string }[]) };
 		expect(withDropped.data.some((d) => d.reason === "thread_muted")).toBe(true);
+	});
+
+	it("feed?hold_group= は束の残りを平坦に全部返す", async () => {
+		const { owner } = await seedOwnerWithAddresses(1);
+		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
+		await seedLog(owner, 4);
+		const res = await app.request("/api/v1/me/notifications/feed?hold_group=h1");
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { data: { id: string }[]; next_cursor: null };
+		// holdGroup=h1 の rows（i=1..3）だけを束にせず平坦に返す
+		expect(body.next_cursor).toBeNull();
+		expect(body.data.map((e) => e.id)).toEqual(["ntf_1", "ntf_2", "ntf_3"]);
 	});
 
 	it("feed/seen は feed_seen_at を更新し、GET の unseen_count を 0 にする", async () => {

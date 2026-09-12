@@ -201,7 +201,7 @@ describe("sendWebPush", () => {
 		expect(headers[0]).toBe(headers[1]);
 	});
 
-	it("fetch が失敗すると error を返す", async () => {
+	it("fetch のネットワーク断・タイムアウトは一過性として retry を返す", async () => {
 		const keys = await generateVapidKeys();
 		const res = await sendWebPush(await testSubscription(), new TextEncoder().encode("hi"), {
 			vapid: keys.privateKey,
@@ -210,7 +210,26 @@ describe("sendWebPush", () => {
 				throw new Error("network down");
 			},
 		});
-		expect(res.outcome).toBe("error");
+		expect(res.outcome).toBe("retry");
 		expect(res.status).toBe(0);
+	});
+
+	it("redirect は追わず manual で渡し、3xx を失敗として扱う", async () => {
+		const keys = await generateVapidKeys();
+		const sub = await testSubscription();
+		let init: RequestInit | undefined;
+		const res = await sendWebPush(sub, new TextEncoder().encode("hi"), {
+			vapid: keys.privateKey,
+			subject: "mailto:push@tsubame.example",
+			fetch: async (_url, req) => {
+				init = req as RequestInit;
+				return new Response(null, { status: 302 });
+			},
+		});
+		expect(init!.redirect).toBe("manual");
+		expect(init!.signal).toBeInstanceOf(AbortSignal);
+		// 3xx はリダイレクト先へ再送されない（"error" になり恒久失敗として扱われる）。
+		expect(res.outcome).toBe("error");
+		expect(res.status).toBe(302);
 	});
 });

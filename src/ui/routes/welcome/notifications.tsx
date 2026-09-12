@@ -14,13 +14,14 @@ type Preset = "all" | "important" | "later";
 
 const PRESETS: { value: Preset; label: string; desc: string }[] = [
 	{ value: "all", label: "すべて", desc: "割り当てられたメールボックスの新着をすべて" },
-	{ value: "important", label: "重要なものだけ", desc: "To に入っているものと返信だけ" },
+	{ value: "important", label: "重要なものだけ", desc: "To に自分のメールボックスが入っているものと、自分たちが送った会話への返信だけ" },
 	{ value: "later", label: "あとで決める", desc: "まずは登録だけして、設定はあとで" },
 ];
 
 export function NotificationWelcome() {
 	const [preset, setPreset] = useState<Preset>("all");
 	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
 	const [done, setDone] = useState(false);
 	const [status, setStatus] = useState<DeviceStatus>(getDeviceStatus());
 
@@ -75,7 +76,7 @@ export function NotificationWelcome() {
 	return (
 		<Center>
 			<h1 className="text-lg font-bold text-[var(--text)]">
-				新着メールをこの端末に通知しますか？
+				新着メールをこの端末に通知しますか
 			</h1>
 			<p className="mt-2 text-sm text-[var(--text-muted)]">
 				端末名は {guessDeviceName()} で登録します。後から変えられます。
@@ -104,20 +105,34 @@ export function NotificationWelcome() {
 				disabled={busy}
 				onClick={async () => {
 					setBusy(true);
-					const st = await subscribeDevice();
-					setStatus(st);
-					if (st === "notifying") {
-						await NotificationsApi.patch({ preset }).catch(() => {});
-						markNotificationWelcomeSeen();
-						setDone(true);
+					setError(null);
+					try {
+						const st = await subscribeDevice();
+						setStatus(st);
+						if (st === "notifying") {
+							await NotificationsApi.patch({ preset }).catch(() => {});
+							markNotificationWelcomeSeen();
+							setDone(true);
+						}
+					} catch (e) {
+						setError(e instanceof Error ? e.message : "登録に失敗しました");
+					} finally {
+						setBusy(false);
 					}
-					setBusy(false);
 				}}
 				className="mt-6 inline-flex h-12 min-w-44 items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-6 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
 			>
 				{busy ? "通信中…" : "通知を許可する"}
 			</button>
 			<p className="mt-3 text-xs text-[var(--text-muted)]">ボタンを押すと OS の許可ダイアログが出ます。</p>
+			{error && <p className="mt-3 text-sm text-[var(--danger)]">{error}</p>}
+			<Link
+				to="/"
+				onClick={() => markNotificationWelcomeSeen()}
+				className="mt-6 inline-flex h-11 items-center text-sm text-[var(--text-muted)] hover:underline"
+			>
+				今はしない（設定からいつでも始められます）
+			</Link>
 		</Center>
 	);
 }
@@ -158,13 +173,10 @@ function Blocked({ onRecheck }: { onRecheck: () => Promise<void> }) {
 			<div className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-4 text-sm text-[var(--text)]">
 				<ul className="list-inside list-disc space-y-1 text-xs text-[var(--text-muted)]">
 					<li>
-						<strong className="text-[var(--text)]">iPhone:</strong> 設定 → 通知 → Tsubame
+						<strong className="text-[var(--text)]">iOS:</strong> 設定 → 通知 → Tsubame
 					</li>
 					<li>
 						<strong className="text-[var(--text)]">Android:</strong> アイコンを長押し → アプリ情報 → 通知
-					</li>
-					<li>
-						<strong className="text-[var(--text)]">PC:</strong> ブラウザのサイト設定 → 通知
 					</li>
 				</ul>
 			</div>

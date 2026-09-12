@@ -1,6 +1,8 @@
-const SHELL_CACHE = "tsubame-shell-v1";
-// start_url は /?source=pwa なので、オフラインの戻り先として /index.html を使う。
-const SHELL_ROOTS = ["/", "/index.html", "/manifest.webmanifest"];
+import { isSafePath, sameOriginHref, validMessageId } from "./lib/pushPayload";
+
+const SHELL_CACHE = "tsubame-shell-v2";
+// /index.html は本番で / への 307 になり、addAll が失敗して SW が入らなくなる。殻は / で持つ。
+const SHELL_ROOTS = ["/", "/manifest.webmanifest"];
 
 type PushNotificationData = {
 	threadId?: string;
@@ -113,6 +115,8 @@ sw.addEventListener("install", (event) => {
 		caches
 			.open(SHELL_CACHE)
 			.then((cache) => cache.addAll(SHELL_ROOTS))
+			// 殻を取れなくても SW は入れる。入らないと通知の購読が永遠に待ちになる。
+			.catch(() => {})
 			.then(() => sw.skipWaiting()),
 	);
 });
@@ -134,7 +138,10 @@ async function cacheFirst(request: Request): Promise<Response> {
 	const cached = await caches.match(request);
 	if (cached) return cached;
 	const res = await fetch(request);
-	if (res.ok) {
+	// 無いファイルにも SPA のフォールバックで index.html が 200 で返る。JS の URL で HTML を
+	// 覚えると、そのチャンクはキャッシュを消すまで壊れたままになる。
+	const isHtml = (res.headers.get("content-type") ?? "").includes("text/html");
+	if (res.ok && !isHtml) {
 		const clone = res.clone();
 		void caches.open(SHELL_CACHE).then((cache) => cache.put(request, clone));
 	}
@@ -152,9 +159,9 @@ async function networkFirst(request: Request): Promise<Response> {
 }
 
 async function shellHtml(): Promise<Response> {
-	const cached = (await caches.match("/index.html")) ?? (await caches.match("/"));
+	const cached = await caches.match("/");
 	if (cached) return cached;
-	return fetch("/index.html");
+	return fetch("/");
 }
 
 sw.addEventListener("fetch", (event) => {
@@ -196,21 +203,21 @@ async function handlePush(event: SwPushEvent): Promise<void> {
 	}
 
 	const n = payload.notification;
-	const url = n.navigate ?? n.data?.url ?? "/";
+	const url = [n.navigate, n.data?.url].find(isSafePath) ?? "/";
 	const options: SwOptions = {
 		body: n.body,
 		tag: n.tag,
-		icon: n.icon,
-		badge: n.badge,
+		icon: sameOriginHref(n.icon, sw.location.origin),
+		badge: sameOriginHref(n.badge, sw.location.origin),
 		dir: n.dir,
 		lang: n.lang,
 		renotify: n.renotify,
 		requireInteraction: n.requireInteraction,
 		vibrate: n.vibrate,
-		image: n.image,
+		image: sameOriginHref(n.image, sw.location.origin),
 		silent: n.silent,
 		actions: n.actions,
-		data: { ...n.data, url },
+		data: { ...n.data, url, messageId: validMessageId(n.data?.messageId) },
 	};
 
 	if (typeof n.app_badge === "number") await applyBadge(n.app_badge);

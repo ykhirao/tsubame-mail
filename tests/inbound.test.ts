@@ -127,6 +127,29 @@ function payload(rawKey: string): InboundQueueMessage {
 	};
 }
 
+function cfMail(opts: { score?: string; senderHeaders?: string[]; inReplyTo?: string }): string {
+	return [
+		"Received: from mail by mx.cloudflare.net with ESMTPS id X",
+		"ARC-Seal: i=1; a=rsa-sha256; d=mx.cloudflare.net",
+		"ARC-Message-Signature: i=1; a=rsa-sha256; d=mx.cloudflare.net",
+		"ARC-Authentication-Results: i=1; mx.cloudflare.net; dmarc=pass; spf=pass",
+		"Received-SPF: pass (receiver=mx.cloudflare.net) client-ip=x",
+		"Authentication-Results: mx.cloudflare.net; dmarc=pass; spf=pass",
+		...(opts.score !== undefined ? [`X-CF-SpamH-Score: ${opts.score}`] : []),
+		...(opts.senderHeaders ?? []),
+		"From: taro@example.com",
+		"To: a@example.com",
+		"Subject: test",
+		"Message-ID: <abc@x.example>",
+		...(opts.inReplyTo !== undefined ? [`In-Reply-To: ${opts.inReplyTo}`] : []),
+		"Date: Mon, 14 Sep 2026 03:00:00 +0000",
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"hi",
+	].join("\r\n");
+}
+
 describe("processInbound", () => {
 	beforeEach(resetDb);
 
@@ -184,7 +207,7 @@ describe("processInbound", () => {
 			receivedAt: new Date(1),
 		});
 
-		const key = await storeRaw();
+		const key = await storeRaw(cfMail({ inReplyTo: "<prev-1@x.example>" }));
 		await processInbound(payload(key), env, fakeCtx);
 
 		const rows = await db.select().from(messages).where(eq(messages.rawR2Key, key)).all();
@@ -885,6 +908,72 @@ describe("processInbound", () => {
 			fakeCtx,
 		);
 		expect((await storedRow(key)).isRead).toBe(true);
+	});
+
+	it("X-CF-SpamH-Score が 5 以上なら spam_verdict を suspicious にして保存する（#128）", async () => {
+		await seed();
+		const key = await storeRaw(cfMail({ score: "8" }));
+		await processInbound(payload(key), env, fakeCtx);
+		expect((await storedRow(key)).spamVerdict).toBe("suspicious");
+	});
+
+	it("X-CF-SpamH-Score が低ければ clean、無ければ null（#128）", async () => {
+		await seed();
+		const cleanKey = await storeRaw(cfMail({ score: "0" }));
+		await processInbound(payload(cleanKey), env, fakeCtx);
+		expect((await storedRow(cleanKey)).spamVerdict).toBe("clean");
+
+		const noneKey = await storeRaw(cfMail({}));
+		await processInbound(payload(noneKey), env, fakeCtx);
+		expect((await storedRow(noneKey)).spamVerdict).toBeNull();
+	});
+
+	it("送信者が偽の X-CF-SpamH-Score: 0 を付いても suspicious 以上（スパム判定）にならない（#128）", async () => {
+		await seed();
+		const key = await storeRaw(cfMail({ senderHeaders: ["X-CF-SpamH-Score: 0"] }));
+		await processInbound(payload(key), env, fakeCtx);
+		const verdict = (await storedRow(key)).spamVerdict;
+		expect(["clean", null]).toContain(verdict);
+		expect(verdict).not.toBe("suspicious");
+		expect(verdict).not.toBe("spam");
+	});
+
+	it("placeholder（解析不能）は判定もスコアも無いので spam_verdict が null（#128）", async () => {
+		await seed();
+		const key = await storeRaw(deeplyNestedMime(260));
+		await processInbound(payload(key), env, fakeCtx);
+		expect((await storedRow(key)).spamVerdict).toBeNull();
+	});
+
+	it("placeholder は認証不明として扱い、接ぎ木しない（#127）", async () => {
+		await seed();
+		const db = getDb(env);
+		const threadId = newId("thread");
+		await db.insert(threads).values({
+			id: threadId,
+			addressId: ADR,
+			lastMessageAt: new Date(1),
+			messageCount: 1,
+			unreadCount: 1,
+		});
+		// 既知の Message-ID を In-Reply-To に入れた解析不能メール。placeholder は Message-ID を持たないので
+		// そもそもアンカーに刺さらないが、inboundAuth を null にして渡せていることも確認する。
+		await db.insert(messages).values({
+			id: newId("message"),
+			threadId,
+			addressId: ADR,
+			direction: "inbound",
+			status: "received",
+			fromAddr: "partner@trusted.example",
+			toAddr: ADR,
+			rfcMessageId: "known-1@trusted.example",
+			receivedAt: new Date(1),
+		});
+
+		const key = await storeRaw(deeplyNestedMime(260));
+		await processInbound(payload(key), env, fakeCtx);
+		const row = await storedRow(key);
+		expect(row.threadId).not.toBe(threadId);
 	});
 });
 

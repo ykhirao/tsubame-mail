@@ -135,7 +135,8 @@ export function NotificationsQuiet() {
 
 					<SwitchRow checked={on} onChange={setOn} label="おやすみ時間">
 						<span className="block text-xs text-[var(--text-muted)]">
-							この時間帯に届いたメールは通知しません
+							この時間帯に届いたメールは
+							{mode === "digest" ? "終わったときにまとめて通知します" : "通知しません"}
 						</span>
 					</SwitchRow>
 

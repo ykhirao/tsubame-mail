@@ -41,8 +41,8 @@ src/
   api/
     app.ts               [W1] Hono ルータ組み立て
     middleware/           [W1] 認証・エラー・ロギング
-    auth.ts              [W4] ログイン/ログアウト/セッション
     v1/
+      auth.ts            [W4] ログイン/ログアウト/セッション/オーナー作成（bootstrap）
       messages.ts        [W6 が GET, W3 が POST/PATCH]
       threads.ts         [W6]
       addresses.ts       [W5]
@@ -60,30 +60,41 @@ src/
         rules.ts         [W2]
   domain/                副作用を持たない、または最小限に閉じたロジック
     mail/
-      parse.ts           [W2] 生MIME → 正規化済みメッセージ
       address.ts         [W1] アドレス文字列のパース/整形（共有ユーティリティ）
+      parse.ts           [W2] 生MIME → 正規化済みメッセージ
+      inbound.ts         [W2] 受信キューのコンシューマ（保存・FTS・Webhook・NOTIFY を積む）
       thread.ts          [W2] スレッド解決
-      compose.ts         [W3] 送信メッセージの組み立て
+      outbound.ts        [W3] 送信キューのコンシューマ（組み立て・送信・バックオフ）
+      compose.ts         [W3] 送信用 MIME の組み立て
       quote.ts           [W3] 返信引用の生成
     notify/
       decide.ts          [W11] 通知判定（副作用なし）
       schedule.ts        [W11] おやすみ時間の計算
     routing/
+      incoming.ts        [W2] email ハンドラ（拒否/転送・R2 保存・INBOUND_QUEUE へ）
       resolve.ts         [W2] 受信アドレス解決（拒否→実在→エイリアス→catch-all）
       rules.ts           [W2] ルール評価
     access/
       policy.ts          [W4] 誰がどのアドレスに何をできるか
+    domains/
+      provision.ts       [W5] ドメイン接続と DNS 後始末
+      dns-check.ts        [W5] 既存 MX / Email Sending の DNS 検査
+      cleanup.ts          [W5] 切断時の後始末
     search/
-      query.ts           [W6] 検索クエリのパースと SQL 生成
+      query.ts           [W6] 検索クエリのパース
+      sql.ts             [W6] 検索 SQL の組み立て（trigram + LIKE）
   services/              バインディング越しの副作用
     r2.ts                [W2]
     queue.ts             [W1] 型付き enqueue
+    consumer.ts          [W1] キューのバッチを種類ごとに振り分け
     webpush.ts           [W11] VAPID・RFC 8291 暗号化・送信
     notify.ts            [W11] 通知キューのコンシューマ・cron
-    notify/              [W11] deliver(配信)/load(読み込み)/render(描画)/token-cache
+    notify/              [W11] deliver(配信)/load(読み込み)/prefs(設定・未読数)/render(描画)/token-cache
     cloudflare-api.ts    [W5]
     sender.ts            [W3] EMAIL バインディング
     webhooks.ts          [W9]
+  lib/                   id 採番・ページング・パスワード・トークン・検証などの共有ユーティリティ
+    id.ts, paging.ts, password.ts, tokens.ts, validate.ts
   db/
     schema.ts            [W1] 単一ファイル。他ワークストリームは追記のみ相談の上
     client.ts            [W1]
@@ -96,7 +107,7 @@ src/
     main.tsx             [W7]
     sw.ts                [W7] Service Worker（キャッシュ・push 表示）
     lib/                 [W7] API クライアント（contracts から型を取る）
-    routes/mail/         [W7]
+    routes/*.tsx         [W7] メールの画面（受信箱・会話・作成・検索・設定）。サブディレクトリは切っていない
     routes/admin/        [W8]
     routes/settings/notifications/  [W7]
     routes/welcome/notifications.tsx [W7]
@@ -112,7 +123,7 @@ docs/                    [W10]
 ## 3. データモデル（D1）
 
 `src/db/schema.ts` の一枚もの。ID は `nanoid` ベースの接頭辞付き文字列
-（`usr_`, `dom_`, `adr_`, `msg_`, `thr_`, `att_`, `key_`, `whk_`, `job_`, `rul_`）。
+（`usr_`, `ses_`, `dom_`, `adr_`, `msg_`, `thr_`, `att_`, `key_`, `whk_`, `job_`, `rul_`, `dlv_`, `aud_`, `dev_`, `nrl_`, `ntf_`, `dig_`）。
 時刻は Unix 秒の integer。
 
 | テーブル | 目的 | 要点 |
@@ -130,7 +141,7 @@ docs/                    [W10]
 | `outbound_jobs` | 送信ジョブ | `message_id`, `status`, `attempts`, `last_error`, `next_attempt_at` |
 | `webhooks` | 通知先 | `url`, `secret`, `events[]`, `address_ids[]`, `enabled` |
 | `webhook_deliveries` | 配信履歴 | `status`, `http_status`, `error`, `duration_ms`, `attempt`, `next_retry_at` |
-| `audit_logs` | 監査 | owner の管理操作のみ記録。`actor_id`, `action`, `target`, `meta` |
+| `audit_logs` | 監査 | owner の管理操作のみ記録。`actor_id`, `action`, `target_type`, `target_id`, `meta`, `ip` |
 | `push_devices` | 購読端末 | `user_id`, `session_id`, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`, `last_seen_at`, `last_success_at`, `failure_count` |
 | `notification_prefs` | 利用者の通知設定（1 行） | `enabled`, `paused_until`, `display`, `badge`, `group_by_thread`, `burst_window_sec`, `suppress_when_active`, `spam_suspicious`, `quiet`(JSON), `notify_send_failure`, `notify_catch_all`, `feed_seen_at` |
 | `notification_mailbox_prefs` | メールボックスごとの通知レベル | `(user_id, address_id)` 主キー, `level: all \| new_thread \| direct \| off` |
@@ -166,16 +177,15 @@ D1（SQLite）の **FTS5 を `tokenize='trigram'` で使う**。trigram なら�
 
 ```sql
 CREATE VIRTUAL TABLE messages_fts USING fts5(
-  subject, body, addrs,
+  subject, text_body, from_addr, to_addr, cc_addr,
   content='messages', content_rowid='rowid',
   tokenize='trigram'
 );
 ```
 
 `messages` への INSERT / UPDATE / DELETE トリガで同期する。
-**W6 の最初のタスクは、D1 の実機で trigram tokenizer が使えるかを検証すること。**
-使えない場合のフォールバックは `LIKE '%…%'` + 前方一致インデックスの併用に切り替える
-（この判断は W6 が実測して ADR に記録する）。
+trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は `LIKE` に落として検索する
+（フォールバックの判断は [検索方式の決定](adr-search.md)）。
 
 ## 4. API 契約
 
@@ -195,8 +205,10 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 
 | メソッド | パス | スコープ | 担当 |
 | --- | --- | --- | --- |
-| GET/PATCH | `/v1/me`、`/v1/me/api-keys` | スコープ検査無し（Cookie セッションか本人の API キーであること自体が条件。自分の情報のみ） | W4 |
-| POST | `/v1/auth/login` `/v1/auth/logout` | — | W4 |
+| GET/PATCH | `/v1/me` | スコープ検査無し。自分の情報のみ | W4 |
+| GET/POST/DELETE | `/v1/me/api-keys` | 本人のキー。発行は本人の権限の範囲内のみ | W4 |
+| POST | `/v1/auth/login` `/v1/auth/logout` `/v1/auth/bootstrap` | — | W4 |
+| GET | `/v1/auth/session` `/v1/auth/setup-state` | セッション確認 / セットアップ要否 | W4 |
 | GET | `/v1/addresses` | read | W5 |
 | GET | `/v1/messages` | read | W6 |
 | GET | `/v1/messages/{id}` | read | W6 |
@@ -206,9 +218,9 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 | POST | `/v1/messages/{id}/reply` | read かつ send（読めない相手には返信もできないよう、両方を要求する） | W3 |
 | GET | `/v1/threads` `/v1/threads/{id}` | read | W6 |
 | GET | `/v1/attachments/{id}` | read | W2 |
-| GET/POST/PATCH/DELETE | `/v1/webhooks` | admin | W9 |
-| CRUD | `/v1/admin/users` `/v1/admin/api-keys` | admin | W4 |
-| CRUD | `/v1/admin/domains` `/v1/admin/addresses` | admin | W5 |
+| GET/POST/PATCH/DELETE | `/v1/webhooks`（+ `/:id/deliveries`、手動再送 `/deliveries/:id/retry`） | admin | W9 |
+| CRUD | `/v1/admin/users`（+ `/:id/grants`） `/v1/admin/api-keys` | admin | W4 |
+| CRUD | `/v1/admin/domains`（+ `/available` `/preview` `/:id/verify` `/:id/catch-all`） `/v1/admin/addresses` | admin | W5 |
 | CRUD | `/v1/admin/rules` | admin | W2 |
 | GET | `/v1/openapi.json` | — | W9（未実装。呼ぶと 404） |
 
@@ -309,6 +321,9 @@ type Principal = {
   via: "session" | "api_key"
   scopes: Scope[]          // api_key のとき
   addressIds: string[] | "all"   // 解決済みの許可アドレス
+  writableAddressIds: string[] | "all"  // addressIds の部分集合（書き込み可）
+  apiKeyId?: string
+  sessionId?: string        // セッションで入ったときだけ。ログアウトで購読を消す
 }
 ```
 
@@ -340,7 +355,8 @@ type Principal = {
 2. `messages` に `status=queued` で挿入し、`outbound_jobs` を作る。
 3. `OUTBOUND_QUEUE` に積む。コンシューマが `compose.ts` で MIME を組み立て、
    `EMAIL` バインディングで送る。
-4. 成功で `status=sent` + Cloudflare が返した Message-ID を `rfc_message_id` に記録。
+4. 成功で `status=sent`。Message-ID（`rfc_message_id`）は**送信前に自前採番**して DB に残す
+   （返信がスレッドに刺さるため。Cloudflare が採番するのを待たない）。
    失敗は `attempts++` して指数バックオフで再投入。上限超過で `status=failed`。
 
 ## 8. ドメイン接続（W5）
@@ -357,8 +373,8 @@ type Principal = {
 
 ## 9. 運用制約（必ず守る）
 
-- Worker 名は `tsubame`。`wrangler.jsonc` の `name`、service binding の `service`、
-  Email Routing ルールの宛先の 3 箇所が一致していること。
+- Worker 名は `tsubame`。`wrangler.jsonc` の `name`、`vars.EMAIL_WORKER_NAME`、
+  Email Routing ルールの宛先の 3 箇所が一致していること（service binding は無い）。
 - `wrangler.jsonc` にアカウント固有の ID を書かない（`database_id` 等は
   `wrangler.jsonc` をローカルで上書きするか、CI のシークレットから注入する）。
 - 旧 `mailflare` Worker と D1 には触らない。新規リソースを別名で作る。
@@ -402,7 +418,7 @@ type Principal = {
 **VAPID と暗号化（RFC 8291）は自前実装**（`services/webpush.ts`）。
 `web-push` パッケージは MPL-2.0 のため使わない。VAPID JWT は Apple の制約（1 時間に 1 回）を
 守るため origin ごとに D1 の `settings` へ有効期限つきで置いて使い回す（`notify/token-cache.ts`）。
-鍵は `VAPID_PRIVATE_KEY`（Secret、JWK の JSON）と `VAPID_SUBJECT`（vars）。
+鍵は `VAPID_PRIVATE_KEY`（Secret、JWK の JSON）と `VAPID_SUBJECT`（Secret、`mailto:`）。
 
 `handleScheduled`（cron `*/5 * * * *`、`wrangler.jsonc`）: 期限の来た digest を 1 通にまとめて送り、
 `notification_log`（30 日）と未使用端末（90 日）を掃除する。

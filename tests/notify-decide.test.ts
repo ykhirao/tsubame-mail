@@ -36,7 +36,7 @@ const thread: Thread = {
 	lastNotifiedAt: null,
 };
 
-const mailbox: Mailbox = { id: "adr_1", address: "info@example.com", isCatchAll: false };
+const mailbox: Mailbox = { id: "adr_1", address: "info@example.com", name: "info@example.com", isCatchAll: false };
 
 const user: User = { id: "usr_1", role: "member", status: "active", deviceCount: 1, assigned: true };
 
@@ -82,6 +82,15 @@ describe("decide 表 1・2: 対象外", () => {
 			"privilege_only",
 		);
 		expect(d.decision).toBe("excluded");
+	});
+	it("owner で割り当て無しでも、メールボックスの通知レベルを明示すればそれに従う", () => {
+		const optIn = (level: "all" | "off") =>
+			args({
+				user: { ...user, role: "owner", assigned: false },
+				prefs: { ...defaultPrefs, mailboxLevels: { [mailbox.id]: level } },
+			});
+		expect(decide(optIn("all")).decision).toBe("sent");
+		expect(decide(optIn("off")).decision).not.toBe("sent");
 	});
 	it("owner で割り当て無し・キャッチオールは候補に残り通知される", () => {
 		const d = expectReason(

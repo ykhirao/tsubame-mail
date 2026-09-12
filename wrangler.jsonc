@@ -20,8 +20,7 @@
 
 	"vars": {
 		"APP_NAME": "tsubame",
-		"EMAIL_WORKER_NAME": "tsubame",
-		"VAPID_SUBJECT": "mailto:postmaster@example.com"
+		"EMAIL_WORKER_NAME": "tsubame"
 	},
 
 	"d1_databases": [

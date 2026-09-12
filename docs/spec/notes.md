@@ -34,7 +34,7 @@
 ### 受信（S-3）
 
 - `精査 #19` **受信の `Date` ヘッダをそのまま `received_at` に使う。** 成立。1970 年以前でカーソルが 400 になる経路も見つかった。
-- `却下` **`spam_verdict` を書く側が無い。** 事実として書く側は無い（精査の S-3 問題なし欄に記録）。要件が「読むだけ」でよいかは要件側で決める。
+- `解決` **`spam_verdict` を書く側が無い。** 精査 #128 で `inbound.ts` が `X-CF-SpamH-Score` を `spamVerdictFromScore` で `spam_verdict` に写すようになった。
 - `精査 #24` **キュー投入の失敗が観測されない。** コードで成立（実行はしていない）。
 
 ### 送信（S-5）
@@ -51,9 +51,10 @@
 ### シークレット・監査（S-8）
 
 - `精査 #41` **`AUTH_SECRET` がコードで使われていない。** 成立。
-- `未確認` **監査ログの対象外が多い。** webhooks・rules・domains（接続・切断・catch-all）・addresses に記録が無い。
-  場所: `grep -rn recordAudit src/api`（users / grants / api-keys / bootstrap のみ）。事実は精査で確認済み。
-  確かめ方: 要件として何を監査すべきか決めてから足す。DNS を触る切断が無記録なのは優先度が高い（精査 #18 と合わせて）。
+- `対応済` **監査ログの対象外が多い。** webhooks（作成・更新・削除・手動再送）、rules（作成・更新・削除）、
+  domains（接続・切断・catch-all 変更）、addresses（作成・更新・削除・アーカイブ）、devices（登録・削除）に
+  recordAudit を揃えて入れた。DNS を触る切断（domain.disconnect）も記録する。アーカイブは address.update の
+  meta の `archived` に含む。各 action が記録されることを e2e で確かめる。
 
 ### 可用性（S-9）
 

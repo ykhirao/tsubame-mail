@@ -10,7 +10,7 @@ function snippet80(body: string | null | undefined): string {
 
 export function buildReceivedBody(ctx: MessageContext, prefs: NotificationPrefs): string {
 	if (prefs.display === "minimal") {
-		return ctx.mailbox.isCatchAll ? "キャッチオール" : `新着メール · ${ctx.mailbox.address}`;
+		return ctx.mailbox.isCatchAll ? "キャッチオール" : `新着メール · ${ctx.mailbox.name}`;
 	}
 	const subject = ctx.message.subject ?? "";
 	const base =
@@ -41,19 +41,38 @@ export function buildReceived(
 	let body = buildReceivedBody(ctx, prefs);
 	if (opts.shrink) body = body.slice(0, 60) || "新着メール";
 
+	const data: Record<string, unknown> = { messageId: ctx.message.id };
 	const notification: Record<string, unknown> = {
 		title,
 		body,
 		navigate: `/threads/${threadId}`,
-		tag: threadId,
-		data: { threadId, messageId: ctx.message.id },
+		data,
 		actions: [
 			{ action: "read", title: "既読にする" },
 			{ action: "trash", title: "ゴミ箱へ" },
 		],
 	};
+	// 「同じ会話は 1 件にまとめる」がオフなら、tag と data.threadId を入れない。
+	// sw は data.threadId で既存通知を閉じるので、入れなければまとまらない。
+	if (prefs.groupByThread) {
+		notification.tag = threadId;
+		data.threadId = threadId;
+	}
 	if (opts.appBadge !== undefined) notification.app_badge = opts.appBadge;
 	if (opts.silent) notification.silent = true;
+	return JSON.stringify({ web_push: 8030, notification });
+}
+
+/** 短時間に続いた分を 1 通に置き換えた通知（PN-4-14）。 */
+export function buildCoalesced(threadId: string, count: number, opts: { appBadge?: number } = {}): string {
+	const notification: Record<string, unknown> = {
+		title: APP_NAME,
+		body: `新着 ${count} 件`,
+		navigate: `/threads/${threadId}`,
+		tag: threadId,
+		data: { threadId },
+	};
+	if (opts.appBadge !== undefined) notification.app_badge = opts.appBadge;
 	return JSON.stringify({ web_push: 8030, notification });
 }
 

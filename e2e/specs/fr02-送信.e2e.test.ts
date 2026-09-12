@@ -207,6 +207,80 @@ describe("FR-2 送信", () => {
 		expect(threadIds.size).toBe(1);
 	});
 
+	scenario("FR-2", "POST /messages の inReplyTo でも References と既存スレッドを引き継ぐ", async () => {
+		await seedDomain(h, { addresses: ["ai"] });
+		const aiAddr = "ai@mail.tsubame.test";
+
+		await deliverEmail(h, {
+			from: "torihiki@ext.example.jp",
+			to: aiAddr,
+			raw: mime({
+				from: "取引先 <torihiki@ext.example.jp>",
+				to: aiAddr,
+				subject: "見積の続き",
+				messageId: "t0002",
+			}),
+		});
+		await drainQueues(h);
+
+		const list = await owner.get("/api/v1/messages?limit=10");
+		const original = list.body.data[0];
+		expect(original.subject).toBe("見積の続き");
+
+		const sent = captureEmail();
+		// 受信した `t0002` は mock 環境では `t0002@tsubame.test` として保存される。
+		const originalId = "t0002@tsubame.test";
+		const res = await owner.post("/api/v1/messages", {
+			from: aiAddr,
+			to: "torihiki@ext.example.jp",
+			subject: "承知しました",
+			text: "内容を確認します。",
+			inReplyTo: `<${originalId}>`,
+		});
+		expect(res.status).toBe(202);
+		await drainQueues(h);
+
+		expect(sent).toHaveLength(1);
+		const raw = sent[0]!.raw;
+		// inReplyTo を突っ込んだだけの新規作成でも、参照先と同じスレッドに入り References を継ぐ。
+		expect(raw).toContain(`In-Reply-To: <${originalId}>`);
+		expect(raw).toContain(`References: <${originalId}>`);
+
+		const after = await owner.get("/api/v1/messages?limit=10");
+		expect(after.body.data).toHaveLength(2);
+		const threadIds = new Set(after.body.data.map((m: any) => m.threadId));
+		expect(threadIds.size).toBe(1);
+	});
+
+	scenario("FR-2", "inReplyTo は送信元のアドレスのメールだけを参照し、他のアドレスの会話の References を写さない", async () => {
+		await seedDomain(h, { addresses: ["ai", "hr"] });
+		await deliverEmail(h, {
+			from: "boss@ext.example.jp",
+			to: "hr@mail.tsubame.test",
+			raw: mime({
+				from: "boss@ext.example.jp",
+				to: "hr@mail.tsubame.test",
+				subject: "人事の件",
+				messageId: "hr-only",
+				extraHeaders: { References: "<hr-secret-1@ext.example.jp>" },
+			}),
+		});
+		await drainQueues(h);
+
+		const sent = captureEmail();
+		const res = await owner.post("/api/v1/messages", {
+			from: "ai@mail.tsubame.test",
+			to: "someone@ext.example.jp",
+			subject: "無関係",
+			text: "本文",
+			inReplyTo: "<hr-only@tsubame.test>",
+		});
+		expect(res.status).toBe(202);
+		await drainQueues(h);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.raw).not.toContain("hr-secret-1");
+	});
+
 	scenario("FR-2", "添付ファイルを送れる。", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
@@ -313,5 +387,59 @@ describe("FR-2 送信", () => {
 		expect(
 			h.pending.filter((p) => p.queue === "outbound" && (p.body as { kind: string }).kind !== "notify"),
 		).toHaveLength(0);
+	});
+
+	scenario("FR-2", "600 バイトを超える件名は 400 で拒否し、黙って切らない（#22）", async () => {
+		await seedDomain(h, { addresses: ["ai"] });
+		const res = await owner.post("/api/v1/messages", {
+			from: "ai@mail.tsubame.test",
+			to: "x@ext.example.jp",
+			subject: "あ".repeat(201), // 603 バイト
+			text: "本文",
+		});
+		expect(res.status).toBe(400);
+		expect(h.pending).toHaveLength(0);
+	});
+
+	scenario("FR-2", "返信の引用が本文上限を超えても、末尾を切って送り 400 にならない（#115）", async () => {
+		const { getDb } = await import("@/db/client");
+		const { messages, threads } = await import("@/db/schema");
+		const { newId } = await import("@/lib/id");
+		const db = getDb(h.env);
+
+		const mailbox = (await seedDomain(h, { domain: "mail.tsubame.test", addresses: ["ai"] })).addressIds
+			.ai!;
+		const threadId = newId("thread");
+		await db.insert(threads).values({
+			id: threadId,
+			addressId: mailbox,
+			lastMessageAt: new Date(),
+			messageCount: 1,
+			unreadCount: 1,
+		});
+		const inboundId = newId("message");
+		await db.insert(messages).values({
+			id: inboundId,
+			threadId,
+			addressId: mailbox,
+			direction: "inbound",
+			status: "received",
+			fromAddr: "取引先 <torihiki@ext.example.jp>",
+			toAddr: "ai@mail.tsubame.test",
+			rfcMessageId: "orig@ext.example.jp",
+			receivedAt: new Date(),
+			textBody: "a".repeat(700 * 1024),
+		});
+
+		const sent = captureEmail();
+		const userText = "b".repeat(700 * 1024);
+		const res = await owner.post(`/api/v1/messages/${inboundId}/reply`, { text: userText });
+		expect(res.status).toBe(202);
+		await drainQueues(h);
+		expect(sent).toHaveLength(1);
+
+		const reply = await db.select().from(messages).where(eq(messages.direction, "outbound")).get();
+		expect(reply!.textBody!.startsWith(userText)).toBe(true);
+		expect(reply!.textBody).toContain("（引用が長いため途中までです）");
 	});
 });

@@ -223,7 +223,7 @@ export function NotificationRuleEdit() {
 				<div className="card px-5 py-10 text-center text-sm text-[var(--text-muted)]">
 					ルールが見つかりません
 					<Button variant="ghost" onClick={() => navigate("/settings/notifications/rules")}>
-						rules
+						通知ルール一覧へ戻る
 					</Button>
 				</div>
 			) : !loaded ? (

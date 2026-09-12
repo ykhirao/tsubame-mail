@@ -6,7 +6,7 @@ import { getDb } from "@/db/client";
 import { newId } from "@/lib/id";
 import { getRaw, putAttachment } from "@/services/r2";
 import { MAX_RAW_BYTES } from "@/domain/routing/incoming";
-import { parseRawMime, type ParsedAttachment, type ParsedMessage } from "./parse";
+import { parseRawMime, spamVerdictFromScore, type ParsedAttachment, type ParsedMessage } from "./parse";
 import { escapeHtml } from "./quote";
 import { createThreadStatement, findExistingThreadId, updateThreadStatsStatement } from "./thread";
 import { matchRule, type Matcher } from "@/domain/routing/rules";
@@ -128,6 +128,8 @@ function oversizedPlaceholder(msg: InboundQueueMessage, sizeBytes: number): Pars
 		date: null,
 		snippet: text.slice(0, 200),
 		attachments: [],
+		inboundAuth: null,
+		cfSpamScore: null,
 	};
 }
 
@@ -152,6 +154,8 @@ function parseErrorPlaceholder(msg: InboundQueueMessage, err: unknown): ParsedMe
 		date: null,
 		snippet: text.slice(0, 200),
 		attachments: [],
+		inboundAuth: null,
+		cfSpamScore: null,
 	};
 }
 
@@ -284,6 +288,7 @@ export async function processInbound(
 		inReplyTo: parsed.inReplyTo,
 		references: parsed.references,
 		fromAddr: parsed.from?.address ?? null,
+		inboundAuth: parsed.inboundAuth,
 	});
 	const isNewThread = existingThread === null;
 	// 新規スレッドの行は message の insert と同じ batch で立てる。分けて insert すると
@@ -383,6 +388,7 @@ export async function processInbound(
 		hasAttachments: kept.length > 0,
 		isRead: read,
 		isStarred: starred,
+		spamVerdict: spamVerdictFromScore(parsed.cfSpamScore),
 		receivedAt,
 	});
 	await db.batch([
@@ -395,11 +401,11 @@ export async function processInbound(
 	if (!dropped) {
 		await dispatchMessageEvent(env, "message.received", messageId);
 	}
-	await enqueueNotify(env, messageId);
+	await enqueueNotify(env, messageId, read);
 }
 
 // 破棄・既読にしたメールも積む。送らなかった理由を通知欄に残すため。
 // 再配達でも積み直すので、コンシューマ側が message ごとに冪等にする。
-async function enqueueNotify(env: CloudflareEnv, messageId: string): Promise<void> {
-	await env.OUTBOUND_QUEUE.send({ kind: "notify", event: "received", messageId });
+async function enqueueNotify(env: CloudflareEnv, messageId: string, ruleRead = false): Promise<void> {
+	await env.OUTBOUND_QUEUE.send({ kind: "notify", event: "received", messageId, ruleRead });
 }

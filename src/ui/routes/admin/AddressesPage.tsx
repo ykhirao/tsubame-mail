@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AdminAddress, DomainSummary } from "./api";
+import type { AdminAddress, AddressViewer, DomainSummary } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
 import { ColorPicker } from "./ColorPicker";
@@ -14,6 +14,8 @@ import {
 	ErrorBanner,
 	formatDateTime,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -49,7 +51,8 @@ function AddressTable({
 			{addresses.length === 0 ? (
 				<EmptyState message="メールアドレスはまだありません。「アドレスを作成」から追加してください。" />
 			) : (
-				<div className="overflow-x-auto">
+				<>
+				<div className="hidden overflow-x-auto md:block">
 				<table className="w-full min-w-[720px]">
 					<thead>
 						<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -79,7 +82,7 @@ function AddressTable({
 									<span className="font-medium text-[var(--text)]">{a.address}</span>
 									{a.isCatchAll && (
 										<span className="ml-2">
-											<Badge color="yellow">catch-all</Badge>
+											<Badge color="yellow">キャッチオール</Badge>
 										</span>
 									)}
 									{a.archivedAt && (
@@ -122,6 +125,56 @@ function AddressTable({
 					</tbody>
 				</table>
 				</div>
+				<ul className="md:hidden">
+					{addresses.map((a, i) => (
+						<li key={a.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+							<div className="flex items-center gap-2">
+								<button
+									type="button"
+									onClick={() => setColorTarget(colorTarget === a.id ? null : a.id)}
+									aria-label="色を変える"
+									className="h-11 w-11 shrink-0 rounded-full border border-[var(--line)]"
+									style={{ background: a.color ?? defaultColorFor(i) }}
+								/>
+								<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{a.address}</span>
+								{a.isCatchAll && (
+									<Badge color="yellow">キャッチオール</Badge>
+								)}
+								{a.archivedAt && <Badge color="gray">アーカイブ済み</Badge>}
+							</div>
+							<div className="mt-2 space-y-1">
+								<MobileField label="種類">
+									<Badge color={a.kind === "alias" ? "purple" : "green"}>
+										{a.kind === "alias" ? "エイリアス" : "メールボックス"}
+									</Badge>
+								</MobileField>
+								<MobileField label="表示名">{a.displayName || "—"}</MobileField>
+								<MobileField label="エイリアス先">{a.aliasTargetAddress || "—"}</MobileField>
+								<MobileField label="作成日">{formatDateTime(a.createdAt)}</MobileField>
+							</div>
+							<MobileActions>
+								<Button variant="secondary" onClick={() => onEdit(a)}>
+									編集
+								</Button>
+								<Button variant="danger" onClick={() => onDelete(a)}>
+									削除
+								</Button>
+							</MobileActions>
+							{colorTarget === a.id && (
+								<div className="mt-2 rounded-md bg-[var(--surface-sunken)] p-3">
+									<ColorPicker
+										value={a.color}
+										onChange={(hex: string) => {
+											onColorChange(a, hex);
+											setColorTarget(null);
+										}}
+									/>
+								</div>
+							)}
+						</li>
+					))}
+				</ul>
+				</>
 			)}
 		</Card>
 	);
@@ -239,7 +292,7 @@ function CreateAddressModal({
 						className="mt-0.5"
 					/>
 					<span>
-						このアドレスを catch-all の受け皿にする
+						このアドレスをキャッチオールの受け皿にする
 						{isCatchAll && (
 							<span className="mt-1 block text-xs text-[var(--danger)]">
 								ドメインあたり 1 件まで。このドメイン宛で、どのアドレスにも一致しないメールがここに届きます。
@@ -280,6 +333,20 @@ function EditAddressModal({
 	const [archived, setArchived] = useState(Boolean(address.archivedAt));
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
+	const [viewers, setViewers] = useState<AddressViewer[]>([]);
+
+	useEffect(() => {
+		let alive = true;
+		api
+			.get<{ data: AddressViewer[] }>(`/api/v1/admin/addresses/${address.id}/viewers`)
+			.then((res) => {
+				if (alive) setViewers(res.data);
+			})
+			.catch(() => null);
+		return () => {
+			alive = false;
+		};
+	}, [address.id]);
 
 	// 自分自身とエイリアスは転送先にできない。
 	const mailboxTargets = existing.filter(
@@ -321,6 +388,31 @@ function EditAddressModal({
 					<dd className="text-[var(--text)]">{formatDateTime(address.createdAt)}</dd>
 				</dl>
 
+				{/* 一覧（または詳細）で誰が見られるかを出す。owner は全員、それ以外は grants。 */}
+				<div>
+					<Label>見られる人</Label>
+					{viewers.length === 0 ? (
+						<p className="text-sm text-[var(--text-muted)]">
+							割り当てられた利用者はいません（owner のみ閲覧できます）。
+						</p>
+					) : (
+						<ul className="space-y-1 text-sm text-[var(--text)]">
+							{viewers.map((v) => (
+								<li key={v.userId} className="flex flex-wrap items-center gap-2">
+									<span className="font-medium">{v.name}</span>
+									<span className="text-[var(--text-muted)]">{v.email}</span>
+									<Badge color={v.level === "owner" ? "purple" : v.level === "write" ? "green" : "gray"}>
+										{v.level === "owner" ? "所有者" : v.level === "write" ? "書き込み可" : "読み取り可"}
+									</Badge>
+								</li>
+							))}
+						</ul>
+					)}
+					<p className="mt-1 text-xs text-[var(--text-muted)]">
+						所有者（owner）は全アドレスを見られます。それ以外は割り当て（read / write）に従います。
+					</p>
+				</div>
+
 				<div>
 					<Label>表示名</Label>
 					<TextInput
@@ -337,7 +429,7 @@ function EditAddressModal({
 						onChange={(e) => setSignature(e.target.value)}
 						rows={4}
 						placeholder="送信するメールの末尾に付く文面"
-						className="w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+						className="w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm max-md:text-base max-md:py-2 text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
 					/>
 				</div>
 
@@ -370,7 +462,7 @@ function EditAddressModal({
 						className="mt-0.5"
 					/>
 					<span>
-						このアドレスを catch-all の受け皿にする
+						このアドレスをキャッチオールの受け皿にする
 						{isCatchAll && !address.isCatchAll && (
 							<span className="mt-1 block text-xs text-[var(--danger)]">
 								ドメインあたり 1 件まで。このドメイン宛で、どのアドレスにも一致しないメールがここに届きます。
@@ -464,7 +556,7 @@ export function AddressesPage() {
 				<div className="mb-4">
 					<Notice tone="info">
 						メールボックスは受信して保管します。エイリアスは転送先のメールボックスを選べます。
-						catch-all は、このドメイン宛でどのアドレスにも一致しないメールを受け取る受け皿です（ドメインあたり 1 件）。
+						キャッチオールは、このドメイン宛でどのアドレスにも一致しないメールを受け取る受け皿です（ドメインあたり 1 件）。
 					</Notice>
 				</div>
 				<ErrorBanner message={error} onDismiss={() => setError("")} />

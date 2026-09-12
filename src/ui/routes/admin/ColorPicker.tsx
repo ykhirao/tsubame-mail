@@ -23,7 +23,7 @@ export function ColorPicker({
 							title={c.name}
 							aria-label={c.name}
 							onClick={() => onChange(c.hex)}
-							className={`h-7 w-7 rounded-full transition-transform hover:scale-110 ${
+							className={`max-md:h-11 max-md:w-11 h-7 w-7 rounded-full transition-transform hover:scale-110 ${
 								active ? "ring-2 ring-[var(--text)] ring-offset-2 ring-offset-[var(--surface)]" : ""
 							}`}
 							style={{ background: c.hex }}
@@ -41,7 +41,7 @@ export function ColorPicker({
 						setCustom(e.target.value);
 						onChange(e.target.value);
 					}}
-					className="h-8 w-10 cursor-pointer rounded border border-[var(--line)] bg-transparent p-0.5"
+					className="max-md:h-11 max-md:w-11 h-8 w-10 cursor-pointer rounded border border-[var(--line)] bg-transparent p-0.5"
 					aria-label="色を選ぶ"
 				/>
 				<input
@@ -53,7 +53,7 @@ export function ColorPicker({
 						setCustom(v);
 						if (isHexColor(v)) onChange(v.toLowerCase());
 					}}
-					className="h-8 w-28 rounded border border-[var(--line)] bg-[var(--surface)] px-2 font-mono text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
+					className="max-md:h-11 h-8 w-28 rounded border border-[var(--line)] bg-[var(--surface)] px-2 font-mono text-base md:text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
 				/>
 				{custom && !isHexColor(custom) && (
 					<span className="text-xs text-[var(--danger)]">#rrggbb の形で入力してください</span>

@@ -143,6 +143,29 @@ describe("FR-11 共有メールボックス", () => {
 		expect((await nobody.client.get(`/api/v1/threads/${anyMessage.threadId}`)).status).toBe(404);
 	});
 
+	scenario("FR-11", "オーナーはあるアドレスを誰が見られるかを一覧できる（owner と grants）", async () => {
+		const a = await createMember("viewer-a@tsubame.test", [
+			{ addressId: sharedId, level: "read" },
+		]);
+		const b = await createMember("viewer-b@tsubame.test", [
+			{ addressId: sharedId, level: "write" },
+		]);
+
+		const res = await owner.get(`/api/v1/admin/addresses/${sharedId}/viewers`);
+		expect(res.status).toBe(200);
+		const data = res.body.data as { userId: string; level: string }[];
+		// owner は全アドレスを見られるため常に入っていて、grants は read / write で並ぶ。
+		expect(data.some((v) => v.level === "owner")).toBe(true);
+		expect(data.find((v) => v.userId === a.id)?.level).toBe("read");
+		expect(data.find((v) => v.userId === b.id)?.level).toBe("write");
+
+		// 割り当てていないアドレスには owner しか出ない。
+		const other = await owner.get(`/api/v1/admin/addresses/${otherId}/viewers`);
+		expect(other.body.data).toEqual([
+			expect.objectContaining({ userId: expect.any(String), level: "owner" }),
+		]);
+	});
+
 	scenario("FR-11", "オーナーは誰がそのアドレスを見られるか分かる", async () => {
 		const a = await createMember("x@tsubame.test", [{ addressId: sharedId, level: "read" }]);
 		const b = await createMember("y@tsubame.test", [{ addressId: sharedId, level: "write" }]);

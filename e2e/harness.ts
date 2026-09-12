@@ -348,6 +348,14 @@ export function mime(opts: {
 	extraHeaders?: Record<string, string>;
 }): string {
 	const lines = [
+		// CF ブロック（#127）。受信の接ぎ木は認証（dmarc=pass 等）が要るので、ひな形メールも
+		// 実機と同じく Cloudflare が判定ヘッダを足した形で流す。
+		"Received: from mail by mx.cloudflare.net with ESMTPS id X",
+		"ARC-Seal: i=1; a=rsa-sha256; d=mx.cloudflare.net",
+		"ARC-Message-Signature: i=1; a=rsa-sha256; d=mx.cloudflare.net",
+		"ARC-Authentication-Results: i=1; mx.cloudflare.net; dmarc=pass; spf=pass",
+		"Received-SPF: pass (receiver=mx.cloudflare.net) client-ip=x",
+		"Authentication-Results: mx.cloudflare.net; dmarc=pass; spf=pass",
 		`From: ${opts.from}`,
 		`To: ${opts.to}`,
 		`Subject: ${opts.subject ?? "件名なし"}`,

@@ -20,6 +20,7 @@ const BURSTS = [
 	{ sec: 0, label: "まとめない" },
 	{ sec: 60, label: "1 分" },
 	{ sec: 300, label: "5 分" },
+	{ sec: 900, label: "15 分" },
 ];
 
 export function NotificationDisplaySettings() {
@@ -66,12 +67,14 @@ export function NotificationDisplaySettings() {
 						>
 							<span className="min-w-0 flex-1">
 								<span className="block text-sm font-medium">{d.label}</span>
-								<span className="block truncate text-xs opacity-70">
-									{d.title} ／ {d.body}
-								</span>
 							</span>
 						</button>
 					))}
+				</div>
+				<div className="mt-3 rounded-lg border border-[var(--line-soft)] bg-[var(--surface-hover)] p-3">
+					<div className="text-lg font-semibold text-[var(--text)]">{display.title}</div>
+					<div className="text-sm text-[var(--text-muted)]">{display.body}</div>
+					<div className="mt-1 text-[10px] text-[var(--text-muted)]">ロック画面の見本</div>
 				</div>
 			</div>
 
@@ -135,7 +138,7 @@ export function NotificationDisplaySettings() {
 			<Card>
 				<div className="flex items-start gap-3 px-4 py-3">
 					<div className="min-w-0 flex-1">
-						<div className="text-sm text-[var(--text)]">他の端末で開いている間は送らない</div>
+						<div className="text-sm text-[var(--text)]">他の端末で Tsubame を開いている間は送らない</div>
 						<div className="mt-0.5 text-xs text-[var(--text-muted)]">
 							この端末の利用中は他の端末への通知を止めます（既定オフ）
 						</div>

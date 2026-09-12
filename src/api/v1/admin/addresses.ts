@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
-import { addresses, domains } from "@/db/schema";
+import { addresses, addressGrants, domains, users } from "@/db/schema";
 import {
 	emailWorkerName,
 	ensureAddressRoutingRule,
@@ -10,7 +10,7 @@ import {
 } from "@/domain/domains/provision";
 import { newId } from "@/lib/id";
 import { afterCursor, toPage } from "@/lib/paging";
-import { defaultColorFor } from "@/shared/colors";
+import { defaultColorFor, MAILBOX_COLORS } from "@/shared/colors";
 import { createCloudflareApi } from "@/services/cloudflare-api";
 import { requireOwner, requireUnrestricted } from "@/api/middleware/auth";
 import { clientIp, getPrincipal } from "@/api/middleware/auth";
@@ -22,6 +22,7 @@ import {
 	createAddressInput,
 	listAddressesQuery,
 	updateAddressInput,
+	type AddressViewer,
 } from "@/shared/contracts/addresses";
 import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
 
@@ -143,7 +144,7 @@ app.post("/", requireUnrestricted, async (c) => {
 		});
 		if (existing) {
 			throw conflict(
-				`${domain.name} には既に catch-all の受け皿（${existing.address}）があります。ドメインあたり 1 件までです。`,
+				`${domain.name} には既にキャッチオールの受け皿（${existing.address}）があります。ドメインあたり 1 件までです。`,
 			);
 		}
 	}
@@ -157,7 +158,14 @@ app.post("/", requireUnrestricted, async (c) => {
 	});
 
 	const existingCount = await db.$count(addresses);
-	const color = input.color ?? defaultColorFor(existingCount);
+	// 既定色は作成順に 20 色を割り当てる。count % 20 だと、前に作ったアドレスを削除して count が
+	// 減ると、残っているアドレスと同色の新規アドレスが生まれる。今使われていない色を優先し、
+	// 全部埋まっていたときだけ作成順（count % 20）に戻す。
+	const inUse = new Set(
+		(await db.selectDistinct({ color: addresses.color }).from(addresses)).map((r) => r.color),
+	);
+	const firstFree = MAILBOX_COLORS.find((c) => !inUse.has(c.hex))?.hex;
+	const color = input.color ?? firstFree ?? defaultColorFor(existingCount);
 
 	const id = newId("address");
 	await db.insert(addresses).values({
@@ -216,6 +224,42 @@ app.get("/:id", async (c) => {
 	return c.json({ data: present(row, domain.name, aliasTargetAddress) });
 });
 
+// owner は全アドレスを見られるため「見られる人」に常に含む。それ以外は grants の利用者と level。
+app.get("/:id/viewers", async (c) => {
+	const { row } = await loadAddress(c, c.req.param("id"));
+	const db = c.get("db");
+	const owners = await db
+		.select({ userId: users.id, name: users.name, email: users.email })
+		.from(users)
+		.where(eq(users.role, "owner"))
+		.all();
+	const grantRows = await db
+		.select({
+			userId: users.id,
+			name: users.name,
+			email: users.email,
+			level: addressGrants.level,
+		})
+		.from(addressGrants)
+		.innerJoin(users, eq(users.id, addressGrants.userId))
+		.where(eq(addressGrants.addressId, row.id))
+		.all();
+	const seen = new Set<string>();
+	const data: AddressViewer[] = [];
+	for (const o of owners) {
+		if (seen.has(o.userId)) continue;
+		seen.add(o.userId);
+		data.push({ ...o, level: "owner" });
+	}
+	for (const g of grantRows) {
+		if (seen.has(g.userId)) continue;
+		seen.add(g.userId);
+		data.push({ userId: g.userId, name: g.name, email: g.email, level: g.level });
+	}
+	data.sort((a, b) => a.level.localeCompare(b.level) || a.name.localeCompare(b.name));
+	return c.json({ data });
+});
+
 app.patch("/:id", requireUnrestricted, async (c) => {
 	const { row, domain } = await loadAddress(c, c.req.param("id"));
 	const input = await readJson(c.req, updateAddressInput);
@@ -260,7 +304,7 @@ app.patch("/:id", requireUnrestricted, async (c) => {
 		});
 		if (existing) {
 			throw conflict(
-				`${domain.name} には既に catch-all の受け皿（${existing.address}）があります。ドメインあたり 1 件までです。`,
+				`${domain.name} には既にキャッチオールの受け皿（${existing.address}）があります。ドメインあたり 1 件までです。`,
 			);
 		}
 	}

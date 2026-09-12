@@ -12,11 +12,34 @@ import { useAuth } from "@/ui/lib/auth";
 import { isSelfAddress, looseAddressOf } from "@/ui/lib/looseAddress";
 import { formatAddress, parseAddressList } from "@/domain/mail/address";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
+import { useIsMobile } from "@/ui/lib/useIsMobile";
+import { MAX_SUBJECT_BYTES } from "@/shared/contracts/send";
 
 // 表示専用の簡易パース。実際の重複除去・自分除外はサーバ側（outbound.ts）が行う。
 // 素の .split(",") だと、引用された表示名 "Doe, John" のカンマまでも割ってしまう（精査 #82）。
 function splitAddressCsv(csv: string): string[] {
 	return parseAddressList(csv).map(formatAddress);
+}
+
+// 署名は「-- 」区切りで本文の末尾に付ける。API 側で自動付与すると二重になるため UI だけが足す。
+const signatureBlock = (sig: string) => `-- \n${sig}`;
+
+function composeWithSignature(body: string, sig: string): string {
+	if (!sig) return body;
+	const sep = body ? "\n\n" : "";
+	return `${body}${sep}${signatureBlock(sig)}`;
+}
+
+// 差出人を変えたとき、前の署名だけを本文末尾から剥がして新しい署名に差し替える。
+// 本文を編集済みなら末尾の署名ブロックが一致せずそのまま残る（作り込まない範囲で）。
+function swapSignature(body: string, oldSig: string, newSig: string): string {
+	let b = body;
+	if (oldSig) {
+		const suffix = `\n\n${signatureBlock(oldSig)}`;
+		if (b.endsWith(suffix)) b = b.slice(0, -suffix.length);
+		else if (b === signatureBlock(oldSig)) b = "";
+	}
+	return composeWithSignature(b, newSig);
 }
 
 function readAsBase64(file: File): Promise<string> {
@@ -56,10 +79,28 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 	);
 }
 
+// 件名は 600 バイトまで（日本語で約 200 文字）。超えそうなら入力中に知らせる（#22）。
+function SubjectLength({ value }: { value: string }) {
+	const bytes = new TextEncoder().encode(value).length;
+	const over = bytes > MAX_SUBJECT_BYTES;
+	return (
+		<span
+			className={
+				over ? "text-xs text-[var(--danger)]" : "text-xs text-[var(--text-muted)]"
+			}
+		>
+			{over
+				? `件名が長すぎます（${bytes}/${MAX_SUBJECT_BYTES} バイト）`
+				: `残り ${MAX_SUBJECT_BYTES - bytes} バイト`}
+		</span>
+	);
+}
+
 export function Compose() {
 	const { me } = useAuth();
 	const navigate = useNavigate();
 	const [params] = useSearchParams();
+	const isMobile = useIsMobile();
 
 	const replyMessageId = params.get("reply");
 	const replyAllParam = params.get("all") === "1";
@@ -75,8 +116,14 @@ export function Compose() {
 	const [bcc, setBcc] = useState("");
 	const [showCc, setShowCc] = useState(false);
 	const [showBcc, setShowBcc] = useState(false);
-	const [subject, setSubject] = useState("");
-	const [text, setText] = useState("");
+	// 共有から開いたとき（share_target）は件名と本文がクエリで来る。URL は末尾に追記する。
+	const shareSubject = params.get("subject") ?? params.get("title") ?? "";
+	const shareBody = params.get("body") ?? params.get("text") ?? "";
+	const shareUrl = params.get("url") ?? "";
+	const [subject, setSubject] = useState(shareSubject);
+	const [text, setText] = useState(() =>
+		shareBody && shareUrl ? `${shareBody} ${shareUrl}` : shareBody || shareUrl,
+	);
 	const [pending, setPending] = useState<PendingAttachment[]>([]);
 
 	const [replyAll, setReplyAll] = useState(replyAllParam);
@@ -88,10 +135,14 @@ export function Compose() {
 	);
 	const [replyTo, setReplyTo] = useState("");
 	const [replyCc, setReplyCc] = useState("");
+	const [appliedSig, setAppliedSig] = useState("");
 	// 宛先を手で編集したら、以後は replyAll を切り替えても上書きしない。
 	const [recipientsEdited, setRecipientsEdited] = useState(false);
 
 	const writable = (me?.addresses ?? []).filter((a) => a.level === "write");
+
+	const signatureOf = (address: string): string =>
+		(me?.addresses ?? []).find((a) => a.address === address)?.signature?.trim() || "";
 
 	// from パラメータは address の「id か アドレス文字列」のどちらでも来る。
 	const resolveFrom = useCallback(
@@ -115,6 +166,8 @@ export function Compose() {
 				const mailboxId = m.addressId;
 				const mailbox = (me?.addresses ?? []).find((a) => a.id === mailboxId);
 				if (mailbox) setFrom(mailbox.address);
+				// 引用はサーバが本文の後に足すので、署名はその手前（引用の上）に置く。
+				setReplyText((prev) => composeWithSignature(prev, signatureOf(mailbox?.address ?? "")));
 			})
 			.catch(() => null);
 		return () => {
@@ -152,6 +205,9 @@ export function Compose() {
 			if (writable.some((a) => a.address === v)) chosen = v;
 		}
 		setFrom(chosen);
+		const sig = signatureOf(chosen);
+		setText((prev) => composeWithSignature(prev, sig));
+		setAppliedSig(sig);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [writable, requestedFrom, replyMessageId, from]);
 
@@ -162,6 +218,14 @@ export function Compose() {
 			list.push({ file, base64: await readAsBase64(file) });
 		}
 		setPending((prev) => [...prev, ...list]);
+	};
+
+	const changeFrom = (v: string) => {
+		if (v === from) return;
+		const sig = signatureOf(v);
+		setText((prev) => swapSignature(prev, appliedSig, sig));
+		setAppliedSig(sig);
+		setFrom(v);
 	};
 
 	const submitNew = async (e: FormEvent) => {
@@ -253,6 +317,67 @@ export function Compose() {
 				: `Re: ${originalSubject.trim()}`
 			: "（件名なし）";
 
+		if (isMobile) {
+			return (
+				<MobileComposeFrame
+					title="返信"
+					onClose={() => navigate(-1)}
+					formId="reply-form"
+					busy={replyBusy}
+				>
+					{error && (
+						<div className="mt-2 mb-1 rounded border border-[var(--danger)] bg-[var(--surface-hover)] px-3 py-2 text-sm text-[var(--danger)]">
+							{error}
+						</div>
+					)}
+					<p className="truncate px-4 pt-3 text-sm text-[var(--text-muted)]">{displaySubject}</p>
+					<form id="reply-form" onSubmit={submitReply} className="flex flex-col gap-4 px-4 pt-2">
+						<Field label="宛先">
+							<input
+								value={replyTo}
+								onChange={(e) => {
+									setRecipientsEdited(true);
+									setReplyTo(e.target.value);
+								}}
+								placeholder="カンマ区切りで複数"
+								className={underlineCls}
+							/>
+						</Field>
+						{(replyAll || replyCc.trim() !== "") && (
+							<Field label="Cc">
+								<input
+									value={replyCc}
+									onChange={(e) => {
+										setRecipientsEdited(true);
+										setReplyCc(e.target.value);
+									}}
+									placeholder="カンマ区切りで複数"
+									className={underlineCls}
+								/>
+							</Field>
+						)}
+						<label className="flex items-center gap-1.5 text-sm text-[var(--text-muted)]">
+							<input
+								type="checkbox"
+								checked={replyAll}
+								onChange={(e) => setReplyAll(e.target.checked)}
+								className="accent-[var(--accent)]"
+							/>
+							全員に返信
+						</label>
+						<textarea
+							value={replyText}
+							onChange={(e) => setReplyText(e.target.value)}
+							rows={8}
+							placeholder="返信内容を入力"
+							className="min-h-[220px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
+						/>
+						<AttachRow pending={pending} onFiles={onFiles} />
+					</form>
+				</MobileComposeFrame>
+			);
+		}
+
 		return (
 			<article className="card mx-auto w-full max-w-2xl p-5">
 				<h1 className="mb-1 text-lg font-bold text-[var(--text)]">返信</h1>
@@ -330,6 +455,98 @@ export function Compose() {
 		);
 	}
 
+	if (isMobile) {
+		return (
+			<MobileComposeFrame
+				title="新しいメール"
+				onClose={() => navigate("/")}
+				formId="compose-form"
+				busy={busy}
+			>
+				{error && (
+					<div className="mt-2 mb-1 rounded border border-[var(--danger)] bg-[var(--surface-hover)] px-3 py-2 text-sm text-[var(--danger)]">
+						{error}
+					</div>
+				)}
+				<form id="compose-form" onSubmit={submitNew} className="flex flex-col gap-4 px-4 pt-2">
+					<Field label="差出人">
+						<select
+							value={from}
+							onChange={(e) => changeFrom(e.target.value)}
+							className={underlineCls}
+						>
+							<option value="" disabled>
+								選択してください
+							</option>
+							{writable.map((a: MyAddress) => (
+								<option key={a.id} value={a.address}>
+									{a.displayName ? `${a.displayName} <${a.address}>` : a.address}
+								</option>
+							))}
+						</select>
+					</Field>
+					<Field label="宛先">
+						<input
+							value={to}
+							onChange={(e) => setTo(e.target.value)}
+							placeholder="カンマ区切りで複数"
+							className={underlineCls}
+							required
+						/>
+					</Field>
+					{showCc && (
+						<Field label="Cc">
+							<input
+								value={cc}
+								onChange={(e) => setCc(e.target.value)}
+								placeholder="カンマ区切りで複数"
+								className={underlineCls}
+							/>
+						</Field>
+					)}
+					{showBcc && (
+						<Field label="Bcc">
+							<input
+								value={bcc}
+								onChange={(e) => setBcc(e.target.value)}
+								placeholder="カンマ区切りで複数"
+								className={underlineCls}
+							/>
+						</Field>
+					)}
+					<div className="flex gap-3 text-xs text-[var(--text-muted)]">
+						{!showCc && (
+							<button type="button" onClick={() => setShowCc(true)} className="rounded-full px-2 py-1 text-[var(--accent)]">
+								+ Cc
+							</button>
+						)}
+						{!showBcc && (
+							<button type="button" onClick={() => setShowBcc(true)} className="rounded-full px-2 py-1 text-[var(--accent)]">
+								+ Bcc
+							</button>
+						)}
+					</div>
+					<Field label="件名">
+						<input
+							value={subject}
+							onChange={(e) => setSubject(e.target.value)}
+							className={underlineCls}
+						/>
+						<SubjectLength value={subject} />
+					</Field>
+					<textarea
+						value={text}
+						onChange={(e) => setText(e.target.value)}
+						rows={10}
+						placeholder="本文"
+						className="min-h-[240px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
+					/>
+					<AttachRow pending={pending} onFiles={onFiles} />
+				</form>
+			</MobileComposeFrame>
+		);
+	}
+
 	return (
 		<article className="card mx-auto w-full max-w-2xl p-5">
 			<h1 className="mb-4 text-lg font-bold text-[var(--text)]">新しいメール</h1>
@@ -345,7 +562,7 @@ export function Compose() {
 					<span className={labelCls}>差出人</span>
 					<select
 						value={from}
-						onChange={(e) => setFrom(e.target.value)}
+						onChange={(e) => changeFrom(e.target.value)}
 						className={underlineCls + " flex-1"}
 					>
 						<option value="" disabled>
@@ -439,6 +656,10 @@ export function Compose() {
 					/>
 				</div>
 
+				<div className="flex justify-end">
+					<SubjectLength value={subject} />
+				</div>
+
 				<textarea
 					value={text}
 					onChange={(e) => setText(e.target.value)}
@@ -488,6 +709,51 @@ function AttachRow({
 					))}
 				</ul>
 			)}
+		</div>
+	);
+}
+
+// スマホでは作成画面を全画面で覆う。送信は上部に置いてキーボードに隠れないようにし、
+// safe-area の下端を避ける。button の form 属性で、ヘッダの外にある送信から <form> を submit する。
+function MobileComposeFrame({
+	title,
+	onClose,
+	formId,
+	busy,
+	children,
+}: {
+	title: string;
+	onClose: () => void;
+	formId: string;
+	busy: boolean;
+	children: ReactNode;
+}) {
+	return (
+		<div
+			className="fixed inset-0 z-40 flex h-full flex-col bg-[var(--surface)]"
+			style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}
+		>
+			<header className="flex h-16 shrink-0 items-center justify-between gap-2 border-b border-[var(--line-soft)] px-3">
+				<button
+					type="button"
+					onClick={onClose}
+					className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-sm text-[var(--text-muted)]"
+				>
+					閉じる
+				</button>
+				<h1 className="min-w-0 flex-1 truncate text-center text-base font-bold text-[var(--text)]">
+					{title}
+				</h1>
+				<button
+					type="submit"
+					form={formId}
+					disabled={busy}
+					className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white disabled:opacity-50"
+				>
+					{busy ? "送信中…" : "送信"}
+				</button>
+			</header>
+			<div className="min-h-0 flex-1 overflow-y-auto safe-bottom">{children}</div>
 		</div>
 	);
 }

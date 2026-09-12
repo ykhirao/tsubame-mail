@@ -1,7 +1,7 @@
 # 監査ログ
 
-管理 API（domains / addresses / rules / webhooks / api-keys / users）の変更操作は
-`audit_logs` テーブルに記録される。誰が・いつ・何に対して・IP 何から操作したかを
+管理 API（domains / addresses / rules / webhooks / api-keys / users）の変更操作と
+端末（push devices）の登録・削除は `audit_logs` テーブルに記録される。誰が・いつ・何に対して・IP 何から操作したかを
 後から追えるようにするためのもので、配信メッセージ本体の内容（本文など）は記録しない。
 
 ## 記録される項目
@@ -35,6 +35,8 @@
 | `webhook.update` | webhook 更新 | `name`, `url`（secret は含まない） |
 | `webhook.delete` | webhook 削除 | `name` |
 | `webhook.retry` | 手動再送 | `deliveryId`, `attempt` |
+| `device.register` | 端末の登録（再登録の上書きも含む） | `name`, `platform`（endpoint・キーは含まない） |
+| `device.delete` | 端末の削除 | `name` |
 
 ## 見る
 
@@ -48,5 +50,6 @@ LIMIT 50;
 
 ## 保存期間
 
-現時点で自動削除のジョブはない。要件上は「設定を増やさない」方針のため、
-保持期間の設定は導入していない（必要になったら設定項目ではなく常設の保持ポリシーで検討する）。
+**400 日**（約 13 か月）より古い行は、5 分ごとの cron（`src/services/maintenance.ts` `pruneAuditLogs`）が 1 回 1000 行ずつ消す。
+年に 1 度の見直しでも前年分が残る長さにした。設定項目にはしない（要件の「設定を増やさない」方針）。
+長く残す必要があるなら、消える前に上の SELECT で書き出して別に保管する。

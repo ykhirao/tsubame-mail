@@ -94,6 +94,23 @@ export function forgetRegisteredDevice(): void {
 	localStorage.removeItem(PUSH_KEY_KEY);
 }
 
+// SW が入らないと ready は永遠に解決しない。待ち続けず、登録し直してから期限つきで待つ。
+async function readyRegistration(): Promise<ServiceWorkerRegistration> {
+	if (!(await navigator.serviceWorker.getRegistration())) {
+		await navigator.serviceWorker.register("/sw.js");
+	}
+	return await new Promise<ServiceWorkerRegistration>((resolve, reject) => {
+		const timer = setTimeout(
+			() => reject(new Error("Service Worker の準備ができませんでした。アプリを開き直してください。")),
+			10_000,
+		);
+		void navigator.serviceWorker.ready.then((r) => {
+			clearTimeout(timer);
+			resolve(r);
+		});
+	});
+}
+
 export async function subscribeDevice(opts: { replaceExisting?: boolean } = {}): Promise<DeviceStatus> {
 	if (!pushSupported()) return "unsupported";
 	if (isIos() && !isStandalone()) return "ios_not_standalone";
@@ -101,7 +118,7 @@ export async function subscribeDevice(opts: { replaceExisting?: boolean } = {}):
 	if (permission !== "granted") return "blocked";
 	const key = await loadPushKey();
 	if (!key) return "unsupported";
-	const registration = await navigator.serviceWorker.ready;
+	const registration = await readyRegistration();
 	if (opts.replaceExisting) {
 		// 別の鍵で作った購読が残っていると subscribe は InvalidStateError で失敗する。
 		const old = await registration.pushManager.getSubscription();

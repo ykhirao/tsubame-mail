@@ -191,6 +191,14 @@ export interface AdminAddress {
 	createdAt: number;
 }
 
+/** owner は全アドレスを見られるため全員、それ以外は grants の読み書き。 */
+export interface AddressViewer {
+	userId: string;
+	name: string;
+	email: string;
+	level: "owner" | "read" | "write";
+}
+
 export interface AdminUser {
 	id: string;
 	email: string;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import type { MessageDetail } from "@/shared/contracts/messages";
 import { AttachmentApi, MessagesApi, ThreadsApi, AddressesApi } from "@/ui/lib/api";
@@ -10,6 +10,8 @@ import { ThreadNotificationSheet } from "@/ui/components/ThreadNotificationSheet
 import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 import { formatDateTime } from "@/ui/lib/format";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
+import { prevNext, useListState, listHref } from "@/ui/lib/listState";
+import { useLayoutPref } from "@/ui/lib/viewPrefs";
 
 const AVATAR_COLORS = [
 	{ bg: "#fce8e6", fg: "#c5221f" },
@@ -59,9 +61,30 @@ export function ThreadDetail() {
 	const isMobile = useIsMobile();
 	const [searchParams] = useSearchParams();
 	const includeTrash = searchParams.get("view") === "trash";
+	const { prev, next } = prevNext(id ?? "");
+	const store = useListState();
+	const backHref = store.loaded ? listHref(store.query) : "/";
+	const threadHref = (tid: string) => {
+		const s = new URLSearchParams(searchParams).toString();
+		return `/threads/${tid}${s ? `?${s}` : ""}`;
+	};
+	const [pref, setPref] = useLayoutPref();
+	const toggleLayout = () => setPref(pref === "fullscreen" ? "split" : "fullscreen");
+	const goThread = (tid: string) => navigate(threadHref(tid));
 	const [messages, setMessages] = useState<MessageDetail[] | null>(null);
 	const [subject, setSubject] = useState<string | null>(null);
 	const [notFound, setNotFound] = useState(false);
+	const [hasOlder, setHasOlder] = useState(false);
+	const [olderCursor, setOlderCursor] = useState<string | null>(null);
+	const [olderCount, setOlderCount] = useState(0);
+	const [loadingOlder, setLoadingOlder] = useState(false);
+	const mounted = useRef(true);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
+	}, []);
 	const [imagesAllowed, setImagesAllowed] = useState<ReadonlySet<string>>(new Set());
 	const [starred, setStarred] = useState(false);
 	const [menuOpen, setMenuOpen] = useState(false);
@@ -88,6 +111,9 @@ export function ThreadDetail() {
 				if (!alive) return;
 				setSubject(t.subject);
 				setMessages(t.messages);
+				setHasOlder(t.hasOlder);
+				setOlderCursor(t.olderCursor);
+				setOlderCount(t.olderCount);
 				setStarred(t.messages.at(-1)?.isStarred ?? false);
 				setExpandedIds(new Set());
 				const unread = t.messages.filter((m) => !m.isRead);
@@ -109,6 +135,21 @@ export function ThreadDetail() {
 
 	const lastId = messages?.at(-1)?.id;
 
+	const loadOlder = async () => {
+		if (!id || !olderCursor || loadingOlder) return;
+		setLoadingOlder(true);
+		try {
+			const t = await ThreadsApi.get(id, { includeTrash, before: olderCursor });
+			if (!mounted.current) return;
+			setMessages((prev) => [...t.messages, ...(prev ?? [])]);
+			setHasOlder(t.hasOlder);
+			setOlderCursor(t.olderCursor);
+			setOlderCount(t.olderCount);
+		} finally {
+			if (mounted.current) setLoadingOlder(false);
+		}
+	};
+
 	const toggleStar = async () => {
 		if (!lastId) return;
 		const next = !starred;
@@ -123,13 +164,13 @@ export function ThreadDetail() {
 	const moveToTrash = async () => {
 		if (!lastId) return;
 		await MessagesApi.patch(lastId, { status: "trash" });
-		navigate("/");
+		navigate(backHref);
 	};
 
 	const markUnread = async () => {
 		if (!lastId) return;
 		await MessagesApi.patch(lastId, { isRead: false });
-		navigate("/");
+		navigate(backHref);
 	};
 
 	if (notFound) {
@@ -151,12 +192,37 @@ export function ThreadDetail() {
 		<article className="card w-full">
 			{!isMobile && (
 				<header className="flex items-center justify-between gap-2 border-b border-[var(--line-soft)] px-5 py-3">
-					<h1 className="min-w-0 truncate text-lg font-bold text-[var(--text)]">
+					<div className="flex shrink-0 items-center gap-1">
+						<button
+							onClick={() => goThread(prev!)}
+							disabled={!prev}
+							className="pill border border-[var(--line)] px-3 py-1 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-40"
+						>
+							前へ
+						</button>
+						<button
+							onClick={() => goThread(next!)}
+							disabled={!next}
+							className="pill border border-[var(--line)] px-3 py-1 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-40"
+						>
+							次へ
+						</button>
+					</div>
+					<h1 className="min-w-0 flex-1 truncate text-center text-lg font-bold text-[var(--text)]">
 						{subject?.trim() || "（件名なし）"}
 					</h1>
-					<Link to="/" className="shrink-0 text-sm text-[var(--text-muted)] hover:text-[var(--text)]">
-						← 受信箱
-					</Link>
+					<div className="flex shrink-0 items-center gap-2">
+						<button
+							onClick={toggleLayout}
+							className="pill border border-[var(--line)] px-3 py-1 text-sm text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)]"
+							title={pref === "fullscreen" ? "分割ビューに戻す" : "本文を全画面で表示する"}
+						>
+							{pref === "fullscreen" ? "分割" : "全画面"}
+						</button>
+						<Link to={backHref} className="shrink-0 text-sm text-[var(--text-muted)] hover:text-[var(--text)]">
+							← 一覧へ
+						</Link>
+					</div>
 				</header>
 			)}
 
@@ -164,7 +230,7 @@ export function ThreadDetail() {
 				<header className="sticky top-0 z-20 flex items-center gap-1 border-b border-[var(--line-soft)] bg-[var(--surface)] px-2 py-1">
 					<button
 						type="button"
-						onClick={() => navigate(-1)}
+						onClick={() => navigate(backHref)}
 						aria-label="戻る"
 						className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
 					>
@@ -202,10 +268,20 @@ export function ThreadDetail() {
 			)}
 
 			<div className={`divide-y divide-[var(--line-soft)] ${isMobile ? "pb-24" : ""}`}>
+				{hasOlder && olderCursor && (
+					<button
+						type="button"
+						onClick={() => void loadOlder()}
+						disabled={loadingOlder}
+						className="flex w-full items-center justify-center gap-2 bg-[var(--surface-sunken)] px-5 py-3 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-60"
+					>
+						{loadingOlder ? "読み込み中…" : `古いメッセージを読み込む（${olderCount} 件）`}
+					</button>
+				)}
 				{messages.map((m) => {
 					const color = avatarColor(m.fromAddr);
 					const isLast = m.id === messages.at(-1)?.id;
-					if (isMobile && !isLast && !expandedIds.has(m.id)) {
+					if (!isLast && !expandedIds.has(m.id)) {
 						return (
 							<button
 								key={m.id}

@@ -225,6 +225,33 @@ describe("FR-7 ルーティングルール", () => {
 		expect(still.body.enabled).toBe(true);
 	});
 
+	scenario("FR-7", "mark の target は既読化の実在種別だけを許可する", async () => {
+		// read / unread / star / unstar 以外（ここでは存在しない種別）は 400 で弾く。
+		const bad = await owner.post("/api/v1/admin/rules", {
+			scope: "address",
+			addressId: aiId,
+			name: "存在しない既読化",
+			action: "mark",
+			target: "unread_star_delete",
+			matcher: { from: "a@ext.jp" },
+			priority: 10,
+			enabled: true,
+		});
+		expect(bad.status).toBe(400);
+
+		const ok = await owner.post("/api/v1/admin/rules", {
+			scope: "address",
+			addressId: aiId,
+			name: "スター",
+			action: "mark",
+			target: "star",
+			matcher: { from: "a@ext.jp" },
+			priority: 10,
+			enabled: true,
+		});
+		expect(ok.status).toBe(201);
+	});
+
 	scenario("FR-7", "不正なルール入力は 400", async () => {
 		const res = await owner.post("/api/v1/admin/rules", {
 			scope: "domain",

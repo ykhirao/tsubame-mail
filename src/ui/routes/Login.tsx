@@ -81,7 +81,7 @@ export function Login() {
 				<button
 					type="submit"
 					disabled={busy}
-					className="w-full rounded-full bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+					className="w-full min-h-11 rounded-full bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50 sm:min-h-0"
 				>
 					{busy ? "ログイン中…" : "ログイン"}
 				</button>

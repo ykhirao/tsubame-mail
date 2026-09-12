@@ -62,9 +62,12 @@ describe("sendMessageInput スキーマ", () => {
 		expect(sendMessageInput.safeParse({ ...baseInput, to: huge }).success).toBe(false);
 	});
 
-	it("subject が 998 文字を超えると失敗する（#22）", () => {
-		expect(sendMessageInput.safeParse({ ...baseInput, subject: "a".repeat(999) }).success).toBe(false);
-		expect(sendMessageInput.safeParse({ ...baseInput, subject: "a".repeat(998) }).success).toBe(true);
+	it("subject が 600 バイトを超えると失敗し、黙って切らない（#22）", () => {
+		expect(sendMessageInput.safeParse({ ...baseInput, subject: "a".repeat(601) }).success).toBe(false);
+		expect(sendMessageInput.safeParse({ ...baseInput, subject: "a".repeat(600) }).success).toBe(true);
+		// 日本語は文字数ではなくバイト数で検査する。
+		expect(sendMessageInput.safeParse({ ...baseInput, subject: "あ".repeat(201) }).success).toBe(false);
+		expect(sendMessageInput.safeParse({ ...baseInput, subject: "あ".repeat(200) }).success).toBe(true);
 	});
 
 	it("text / html が 1MB を超えると失敗する（#22）", () => {
@@ -87,7 +90,7 @@ describe("sendMessageInput スキーマ", () => {
 		expect(sendMessageInput.safeParse({ ...baseInput, text: single }).success).toBe(true);
 		// 件名も合計に数えるが、900KB 程度なら 1.5MB に収まる。
 		expect(
-			sendMessageInput.safeParse({ ...baseInput, subject: "あ".repeat(998), text: single }).success,
+			sendMessageInput.safeParse({ ...baseInput, subject: "あ".repeat(150), text: single }).success,
 		).toBe(true);
 	});
 
@@ -235,16 +238,28 @@ describe("composeMime のヘッダ行 998 文字上限（#34）", () => {
 		expect(line).toContain("<199@x.jp>");
 	});
 
-	it("長い件名でも Subject 行が 998 文字を超えない", () => {
+	it("上限いっぱい（600 バイト）の件名でも Subject 行が 998 文字を超えない", () => {
 		const raw = composeMime({
 			messageId: "msg_1",
 			fromAddr: "me@example.com",
 			toAddr: "a@b.jp",
-			subject: "あ".repeat(2000),
+			subject: "あ".repeat(200), // 600 バイト
 			textBody: "本文",
 		});
 		const line = headerLine(raw, "Subject");
 		expect(line.length).toBeLessThanOrEqual(998);
+	});
+
+	it("件名が 600 バイトを超えると黙って切らず throw する（#22）", () => {
+		expect(() =>
+			composeMime({
+				messageId: "msg_1",
+				fromAddr: "me@example.com",
+				toAddr: "a@b.jp",
+				subject: "あ".repeat(201), // 603 バイト
+				textBody: "本文",
+			}),
+		).toThrow();
 	});
 });
 

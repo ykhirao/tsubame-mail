@@ -86,6 +86,38 @@ describe("FR-14 メールボックスの色", () => {
 		}
 	});
 
+	scenario("FR-14", "削除後に作ったアドレスは残っている色と重複しない", async () => {
+		const { domainId } = await seedDomain(h, { addresses: [] });
+		const ids: string[] = [];
+		const colors: string[] = [];
+		for (let i = 0; i < 4; i++) {
+			const res = await owner.post("/api/v1/admin/addresses", {
+				domainId,
+				localPart: `delbox${i}`,
+			});
+			expect(res.status).toBe(201);
+			ids.push(res.body.data.id);
+			colors.push(res.body.data.color);
+		}
+		expect(new Set(colors).size).toBe(4);
+
+		const removed = await owner.del(`/api/v1/admin/addresses/${ids[1]}`);
+		expect(removed.status).toBe(200);
+
+		const re = await owner.post("/api/v1/admin/addresses", {
+			domainId,
+			localPart: "delbox-new",
+		});
+		expect(re.status).toBe(201);
+		const newColor = re.body.data.color;
+
+		// count % 20 だと削除で減った分だけ、残っている色とかぶる。
+		// 使われていない色を回すので、残りの 3 色とは重複せず、空いた 2 つ目の色が再割り当てされる。
+		const remaining = [0, 2, 3].map((i) => colors[i]!);
+		expect(remaining).not.toContain(newColor);
+		expect(newColor).toBe(colors[1]);
+	});
+
 	scenario("FR-14", "横断表示のときは、どのメールボックス宛かが色と文字で分かる", async () => {
 		const { domainId } = await seedDomain(h, { addresses: [] });
 		const created = await owner.post("/api/v1/admin/addresses", {

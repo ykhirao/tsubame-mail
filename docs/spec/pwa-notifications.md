@@ -1,6 +1,6 @@
 # PWA とプッシュ通知
 
-- ステータス: **実装中**。「3. 要件案」は `requirements.md` の FR-15 / FR-16 に移した（正はそちら）。
+- ステータス: **実装完了**。要件は `requirements.md` の FR-15 / FR-16（正）。
 - 画面の設計は別冊 [スマホ画面設計](mobile-screens.md)。
 
 ## 1. 目的
@@ -29,39 +29,8 @@
 
 ## 3. 要件案
 
-### FR-15 案 ホーム画面に追加（PWA）
-
-- Web App Manifest と Service Worker を配り、iOS / Android / PC のブラウザで
-  「ホーム画面に追加」「インストール」ができる。起動はアドレスバーのない単独ウィンドウ。
-- スマホ幅（768px 未満）では、スマホ用の配置に切り替わる（[スマホ画面設計](mobile-screens.md)）。
-- オフライン時もアプリの殻は開き、「オフラインです」を出す。**メール本文はオフライン保存しない**
-  （端末紛失時に残るものを増やさない）。
-- 追加の案内は、追加していない・スマホで開いている・3 回目以降の訪問、のときだけ出す。
-  閉じたら 30 日出さない。
-
-### FR-16 案 プッシュ通知
-
-- 端末ごとに通知を購読できる。1 人が複数の端末を持てる。
-- 通知の対象イベントは **新着受信** と **送信失敗**。
-- 通知の判定は「4. 通知の判定」の順で行い、**判定の理由を利用者が後から確かめられる**
-  （通知欄）。細かい設定で「なぜ鳴らなかったか」が分からなくなるのを防ぐ。
-- **通知欄**: アプリの中で、通知の対象になったメールを時系列で見返せる。一時停止中・おやすみ中に
-  止めた分は通知として出し直さず、通知欄に「一時停止中に届いた 8 件」のような束で残す。
-- 権限の変化は即座に効く。アドレスの割り当てを外されたら、そのアドレスの通知は次の 1 通から来ない。
-- **パスワードを変えると、その利用者の全端末の購読を消す**（FR-13 と同じ理屈。紛失時の対策）。
-  その端末でログアウトすると、その端末の購読を消す。
-- 90 日開かれていない端末の購読は自動で消す。
-- 既定値だけで次のように動く: 割り当てられたメールボックスの新着を、差出人と件名つきで通知。
-  owner にはキャッチオールの受け皿の新着も通知する（「キャッチオールを通知する」が既定でオン）。
-  同じ会話は 1 件にまとめる。スパム判定は通知しない。
-  おやすみ時間なし。
-- **キャッチオールの受け皿**（`addresses.is_catch_all`）は、メールボックスが出るすべての画面と通知で
-  「キャッチオール」と分かるラベルを付ける。受け皿には実在しない宛先のメールが集まるので、
-  通知には本来の宛先（例: `recruit@…`）も出す。
-- **「キャッチオールを通知する」スイッチ**を 1 つ持つ。すべての受け皿にまとめて効き、あとからドメインを
-  足して受け皿が増えても設定し直さなくてよい。キャッチオールの受け皿を 1 つでも見られる利用者にだけ出す。
-  既定はオン。
-- 送信失敗は、**そのメールを送った本人にだけ**通知する。
+要件の確定版は [requirements.md](requirements.md) の FR-15（ホーム画面に追加）と
+FR-16（プッシュ通知）に移した。ここには草案の記録を残さない。
 
 ## 4. 通知の判定
 
@@ -137,16 +106,19 @@
   - VAPID の秘密鍵は raw では読めない。JWK（`d`, `x`, `y`）で持つ。
   - ECDSA の署名は WebCrypto がそのまま r‖s の 64 バイトで返すので、ES256 の JWT に変換なしで使える。
   - Apple は JWT の作り直しを 1 時間に 1 回までにするよう求めている。isolate ごとに作ると超えうるので、
-    push サービスの origin ごとに D1 の `settings` に有効期限つきで置いて使い回す。
+    VAPID JWT の `exp` は 12 時間とし、`Authorization` ヘッダを origin ごとに D1 の `settings` へ
+    1 時間の有効期限で置いて使い回す。
 - 応答の扱い: `201` 成功 / `404`・`410` 購読を削除 / `413` 本文を縮めて再送 /
   `429`・`5xx` 指数バックオフで再試行（Webhook と同じ段数）。
+- それ以外の応答・ネットワーク断での失敗が **3 回** 続いた端末は `enabled=false` にする
+  （端末 1 台の恒久失敗がバッチ全体の再試行を握らないようにする）。
 - ヘッダ: `TTL` は 1 日、`Urgency` は「必ず通知」で `high`、通常 `normal`、音なしで `low`。
   `Topic` に会話 ID（32 文字以内）を入れ、端末に届く前の古い通知を置き換える。
 - 本文は **Declarative Web Push の形**（`{"web_push": 8030, "notification": {...}}`）で送る。
   Safari は Service Worker が動かなくても OS がそのまま表示し、`app_badge` でバッジも付く。
   Chrome / Firefox はこの形を直接は解釈しないので、Service Worker が同じ JSON を読んで表示する。
   本文の形は 1 つで済む。
-- 鍵: `VAPID_PRIVATE_KEY` を Worker Secret、`VAPID_SUBJECT`（`mailto:`）を vars に置く。
+- 鍵: `VAPID_PRIVATE_KEY` と `VAPID_SUBJECT`（`mailto:`）はどちらも Worker Secret に置く。
   生成は `scripts/vapid-keys.mjs`。**鍵を変えると全購読が無効になる**。
   クライアントは起動時に公開鍵を照合し、違えば購読し直す。
 
@@ -179,13 +151,13 @@
 
 - `manifest.webmanifest`: `name` Tsubame Mail / `short_name` Tsubame / `start_url` `/?source=pwa` /
   `display` standalone / `id` `/` / アイコン 192・512・maskable、`apple-touch-icon` 180。
-  ショートカットに「作成」「検索」。
+  ショートカットに「作成」「検索」。`share_target`（`/compose`）で OS の「共有」から作成画面を開ける。
 - `theme_color` はテーマ切り替え（`src/ui/lib/theme.ts`）に合わせて `<meta name="theme-color">` を書き換える。
   ダークは OS に従わない既存方針のまま。
 - Service Worker は `src/ui/sw.ts` を Vite の別エントリとして `/sw.js`（ハッシュなし）に出す。
   `not_found_handling: single-page-application` のため、**`sw.js` が無いと `index.html` が返って登録が壊れる**。
   ビルドの検査に「`dist/client/sw.js` がある」を足す。
-- キャッシュはアプリの殻（`index.html` と `assets/`）だけ。`/api/*` は常にネットワーク。
+- キャッシュはアプリの殻（`/` と `/assets/` と `/icons/`）だけ。`/api/*` は常にネットワーク。
 - `sw.js` と `manifest.webmanifest` は `Cache-Control: no-cache` で配る。
 
 ### 端末ごとの差（2026 年 9 月時点で確認）
@@ -218,23 +190,23 @@
 
 ## 6. データモデル案
 
-`src/db/schema.ts` への追記（W1 への**要依頼**）。ID 接頭辞は `dev_` `nrl_` `ntf_`。
+`src/db/schema.ts` に実装済み。ID 接頭辞は `dev_` `nrl_` `ntf_` `dig_`。
 
 | テーブル | 目的 | 要点 |
 | --- | --- | --- |
-| `push_devices` | 購読端末 | `user_id`, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`（受け取るメールボックス）, `last_seen_at`, `last_success_at`, `failure_count` |
+| `push_devices` | 購読端末 | `user_id`, `session_id`（ログアウトで消す用）, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`（受け取るメールボックス）, `last_seen_at`, `last_success_at`, `failure_count` |
 | `notification_prefs` | 利用者の設定 1 行 | `enabled`, `paused_until`, `display: full \| sender_subject \| minimal`, `badge: all \| notified \| off`, `group_by_thread`, `burst_window_sec`, `suppress_when_active`, `spam_suspicious: notify \| drop`, `quiet`(JSON: `tz`, 曜日と時間帯の配列, `mode: drop \| digest`), `notify_send_failure`, `notify_catch_all`（既定 true）, `feed_seen_at`（通知欄を最後に開いた時刻。未確認数に使う） |
 | `notification_mailbox_prefs` | メールボックスごと | `(user_id, address_id)` 主キー, `level: all \| new_thread \| direct \| off` |
 | `notification_rules` | 通知ルール | `user_id`, `name`, `matcher`(JSON), `action: always \| normal \| silent \| never`, `priority`, `enabled` |
 | `thread_notification_prefs` | 会話ごと | `(user_id, thread_id)` 主キー, `mode: follow \| mute` |
 | `notification_digests` | 後でまとめる分 | `user_id`, `due_at`, `message_ids[]` |
-| `notification_log` | 判定の履歴。通知欄の中身 | `user_id`, `message_id`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`（同じ一時停止・おやすみの束）, `device_count`, `created_at`。30 日で消す |
+| `notification_log` | 判定の履歴。通知欄の中身 | `user_id`, `message_id`, `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`（同じ一時停止・おやすみの束）, `device_count`, `created_at`。30 日で消す |
 
 - 設定の行が無い利用者は既定値で動く。**設定を作らないと通知が来ない、にはしない**。
 - 「自分たちが送った会話への返信」は、スレッドに `direction=outbound` があるかで判定する。
   共有メールボックスで「自分が」送ったかまで見るなら、下の `sent_by_user_id` を使える。
 
-既存のテーブルへの追記（W1 への**要依頼**）:
+既存のテーブルへの追記（実装済み）:
 
 | 列 | 目的 | 要点 |
 | --- | --- | --- |
@@ -248,20 +220,23 @@
 | メソッド | パス | 内容 |
 | --- | --- | --- |
 | GET | `/v1/me/notifications` | 設定一式（全体・メールボックスごと・ルール） |
-| PATCH | `/v1/me/notifications` | 全体設定の部分更新。プリセットの適用もここ |
+| PATCH | `/v1/me/notifications` | 全体設定の部分更新。プリセット `all` / `important` / `later` の適用もここ。`important`（重要なものだけ）は既存の通知ルールを全削除してから「To に入っているときだけ」+ 返信ルール 1 件を作る |
 | PUT | `/v1/me/notifications/mailboxes/{addressId}` | メールボックスの通知レベル |
 | GET/POST/PATCH/DELETE | `/v1/me/notifications/rules` | 通知ルール |
 | POST | `/v1/me/notifications/rules/reorder` | 並べ替え |
 | POST | `/v1/me/notifications/dry-run` | 最近のメールに今の設定を当てて、どう判定されるかを返す（ルール編集画面の「試す」） |
 | GET | `/v1/me/notifications/feed` | 通知欄（カーソルページング）。`include_dropped=1` で対象外も理由つきで返す |
 | POST | `/v1/me/notifications/feed/seen` | 通知欄を開いた（未確認数を 0 にする） |
-| PUT/DELETE | `/v1/threads/{id}/notification` | 会話のフォロー / ミュート |
+| GET/PUT/DELETE | `/v1/threads/{id}/notification` | 会話のフォロー確認 / フォロー / ミュート |
 | GET | `/v1/me/devices` | 自分の端末一覧 |
 | POST | `/v1/me/devices` | 購読の登録（`endpoint`, `keys`, `name`, `platform`）。同じ `endpoint` は上書き |
 | PATCH/DELETE | `/v1/me/devices/{id}` | 名前・有効・受け取るメールボックス / 削除 |
 | POST | `/v1/me/devices/{id}/test` | テスト通知 |
 | POST | `/v1/me/devices/{id}/seen` | 使用中の合図（「他の端末で使用中なら送らない」用。表示中だけ 60 秒ごと） |
 | GET | `/v1/push/key` | VAPID 公開鍵 |
+
+端末登録の `endpoint` はブラウザのプッシュサービス（FCM / Mozilla / Apple / Windows）のホストだけを通す
+（`isPushServiceEndpoint`。任意の URL を受けると踏み台になる）。上限: 端末は利用者 **10 台**、通知ルールは **50 件**。
 
 ## 8. 担当と置き場所
 
@@ -290,9 +265,9 @@ src/ui/routes/NotificationsFeed.tsx     [W7]
 public/manifest.webmanifest, public/icons/  [W7]
 ```
 
-要依頼: `schema.ts`（テーブル追加）、`queue.ts`（`notify` 種別）、`worker.ts`（`scheduled`）、
+要依頼として挙げていた `schema.ts`（テーブル追加）、`queue.ts`（`notify` 種別）、`worker.ts`（`scheduled`）、
 `wrangler.jsonc`（cron）、`vite.config.ts`（SW のエントリ）、`inbound.ts`（NOTIFY を積む 1 行）、
-`AppLayout.tsx`（スマホ配置）— はすべて実装済み。残るは統合（`app.ts` への push ルート載せ等）。
+`AppLayout.tsx`（スマホ配置）はすべて実装済み。統合も完了し、`app.ts` への push ルート載せも済んだ。
 
 ## 9. 段階
 
@@ -314,13 +289,12 @@ e2e は段階 2 から FR-16 に付ける。判定関数は段階 2 の時点で
 - owner には**キャッチオールの受け皿を既定で通知**する。キャッチオールは画面でラベルを付けて見分けられるようにする。
 - キャッチオールは**専用のスイッチ「キャッチオールを通知する」**でまとめてオン・オフできる。
   通知ルールはこのスイッチより先に効く（「必ず通知」に一致すれば、スイッチがオフでも通知する）。
-  それ以外の、owner の特権で見えるだけのメールボックスは既定でオフ。
+  それ以外の、owner の特権で見えるだけのメールボックスは既定でオフ。本人がメールボックスの通知レベルを明示すれば、それに従う。
+- おやすみ時間は**利用者に 1 つ**（端末ごとには持たない）。
+- Android の「共有」から作成画面を開く（`share_target`）を入れる。共有された件名・本文・URL を作成画面の初期値にする。
+- 管理画面のバッジも「キャッチオール」に揃える。
 
-未決:
-
-1. おやすみ時間を利用者に 1 つにするか、端末ごとに持たせるか（案は利用者に 1 つ）。
-2. Android の「共有」から作成画面を開く（`share_target`）を入れるか（案は段階 4 以降）。
-3. 管理画面のバッジは今「catch-all」と英語で出ている。スマホ側の「キャッチオール」に揃えるか。
+未決: 無し。
 
 ## 参考
 

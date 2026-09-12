@@ -7,8 +7,9 @@
 # 明示してあるためコミットされない。
 #
 # 使い方:
-#   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh          # ビルド含む一連
+#   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh              # ビルド含む一連
 #   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh --skip-build
+#   D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh --keep-config  # wrangler.local.jsonc を残す（手動の d1 execute 用）
 #
 # 環境変数:
 #   D1_DATABASE_ID  デプロイ対象 D1 の database_id（必須）
@@ -21,6 +22,15 @@ cd "$(dirname "$0")/.."
 BASE="wrangler.jsonc"
 OUT="wrangler.local.jsonc"
 PLACEHOLDER="00000000-0000-0000-0000-000000000000"
+
+SKIP_BUILD=0
+KEEP_CONFIG=0
+for arg in "$@"; do
+	case "$arg" in
+		--skip-build) SKIP_BUILD=1 ;;
+		--keep-config) KEEP_CONFIG=1 ;;
+	esac
+done
 
 # ---- database_id の検証 ----------------------------------------------------
 DATABASE_ID="${D1_DATABASE_ID:-}"
@@ -46,15 +56,17 @@ if ! sed "s/$PLACEHOLDER/$DATABASE_ID/" "$BASE" > "$OUT"; then
 	echo "エラー: $OUT の生成に失敗しました。" >&2
 	exit 1
 fi
-# 失敗時にも一時ファイルを残さない。成功時は明示的に残すオプションは用意しない
-# （再実行で再生成される）ため、EXIT で常に削除する。
-trap 'rm -f "$OUT"' EXIT
+# 失敗時にも一時ファイルを残さない。--keep-config なら手動の d1 execute などで使えるよう残す。
+if [[ "$KEEP_CONFIG" == "1" ]]; then
+	echo "→ --keep-config 指定: $OUT を残します（.gitignore で除外済み）"
+else
+	trap 'rm -f "$OUT"' EXIT
+fi
 
 echo "→ $OUT を生成しました（.gitignore で除外済み）"
 
 # ---- ビルド（--skip-build で省略可） ---------------------------------------
-if [[ "${1:-}" == "--skip-build" ]]; then
-	echo "→ --skip-build が指定されたためビルドをスキップします"
+if [[ "$SKIP_BUILD" == "1" ]]; then	echo "→ --skip-build が指定されたためビルドをスキップします"
 else
 	echo "→ npm run build（dist/client を作成）"
 	npm run build

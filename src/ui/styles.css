@@ -99,3 +99,16 @@ body {
 	color: var(--text);
 	font-weight: 600;
 }
+
+/* iOS は 16px 未満の入力欄にフォーカスすると自動で拡大し、外れて入力しづらくなる。 */
+@media (max-width: 767px) {
+	input,
+	select,
+	textarea {
+		font-size: 16px;
+	}
+
+	.safe-bottom {
+		padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+	}
+}

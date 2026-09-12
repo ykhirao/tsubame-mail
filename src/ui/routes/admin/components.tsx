@@ -21,7 +21,7 @@ export function AdminTabs() {
 					<Link
 						key={t.to}
 						to={t.to}
-						className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+						className={`flex h-11 items-center rounded-full px-3 py-1.5 text-sm transition-colors md:h-auto ${
 							active
 								? "bg-[var(--surface-selected)] font-medium text-[var(--text-on-selected)]"
 								: "text-[var(--text-muted)] hover:bg-[var(--surface-hover)]"
@@ -38,7 +38,7 @@ export function AdminTabs() {
 export function Page({ title, children }: { title: string; children: ReactNode }) {
 	// 中央寄せにすると、ページごとの中身の幅でタブと見出しの位置が動く。
 	return (
-		<div className="w-full max-w-6xl px-6 py-6">
+		<div className="w-full max-w-6xl px-4 py-6 md:px-6">
 			<AdminTabs />
 			<h1 className="mb-6 text-xl font-bold text-[var(--text)]">{title}</h1>
 			{children}
@@ -89,7 +89,7 @@ export function Button({
 	return (
 		<button
 			type={type}
-			className={`pill inline-flex items-center justify-center px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${buttonStyles[variant]} ${className}`}
+			className={`pill inline-flex max-md:min-h-11 items-center justify-center px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${buttonStyles[variant]} ${className}`}
 			{...rest}
 		/>
 	);
@@ -103,7 +103,7 @@ export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
 	return (
 		<input
 			{...props}
-			className={`w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] ${props.className ?? ""}`}
+			className={`w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm max-md:text-base max-md:py-2 text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] ${props.className ?? ""}`}
 		/>
 	);
 }
@@ -112,7 +112,7 @@ export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
 	return (
 		<select
 			{...props}
-			className={`w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] ${props.className ?? ""}`}
+			className={`w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm max-md:text-base max-md:py-2 text-[var(--text)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] ${props.className ?? ""}`}
 		/>
 	);
 }
@@ -225,19 +225,19 @@ export function Modal({
 
 	return (
 		<div
-			className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 pt-16"
+			className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-start md:overflow-y-auto md:p-4 md:pt-16"
 			onClick={onClose}
 		>
 			<div
-				className="w-full max-w-2xl rounded-2xl bg-[var(--surface)] shadow-xl"
+				className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-y-auto rounded-t-2xl bg-[var(--surface)] pb-[env(safe-area-inset-bottom)] shadow-xl md:max-h-none md:rounded-2xl md:pb-0"
 				onClick={(e) => e.stopPropagation()}
 			>
-				<div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-3">
-					<h3 className="text-base font-semibold text-[var(--text)]">{title}</h3>
+				<div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[var(--line)] bg-[var(--surface)] px-5 py-3">
+					<h3 className="min-w-0 text-base font-semibold text-[var(--text)]">{title}</h3>
 					<button
 						onClick={onClose}
 						aria-label="閉じる"
-						className="text-[var(--text-muted)] hover:text-[var(--text)]"
+						className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-xl text-[var(--text-muted)] hover:text-[var(--text)] md:h-auto md:w-auto"
 					>
 						×
 					</button>
@@ -246,6 +246,19 @@ export function Modal({
 			</div>
 		</div>
 	);
+}
+
+export function MobileField({ label, children }: { label: string; children: ReactNode }) {
+	return (
+		<div className="flex items-start justify-between gap-3 py-1 text-sm">
+			<span className="shrink-0 text-[var(--text-muted)]">{label}</span>
+			<span className="min-w-0 flex-1 break-words text-right text-[var(--text)]">{children}</span>
+		</div>
+	);
+}
+
+export function MobileActions({ children }: { children: ReactNode }) {
+	return <div className="flex flex-wrap justify-end gap-2 pt-2">{children}</div>;
 }
 
 export function formatDateTime(sec: number | null | undefined): string {

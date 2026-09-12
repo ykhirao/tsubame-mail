@@ -118,8 +118,11 @@ routes.get("/:id", async (c) => {
 	const thread = await getThread(db, principal, id, includeTrash);
 	if (!thread) throw notFound("スレッドが見つかりません");
 
-	const msgs = await queryThreadMessages(db, principal, id, includeTrash);
-	const msgIds = msgs.map((m) => m.id);
+	const msgs = await queryThreadMessages(db, principal, id, {
+		includeTrash,
+		before: q.data.before ?? undefined,
+	});
+	const msgIds = msgs.messages.map((m) => m.id);
 	const envRows = msgIds.length
 		? await db
 				.select({ id: messagesTable.id, envelopeTo: messagesTable.envelopeTo })
@@ -129,7 +132,7 @@ routes.get("/:id", async (c) => {
 		: [];
 	const envelopeById = new Map(envRows.map((r) => [r.id, r.envelopeTo ?? null]));
 	const messages = [];
-	for (const m of msgs) {
+	for (const m of msgs.messages) {
 		const atts = await attachmentsForMessage(db, m.id);
 		messages.push({
 			id: m.id,
@@ -166,6 +169,9 @@ routes.get("/:id", async (c) => {
 		addressId: thread.addressId,
 		subject: thread.subject,
 		messages,
+		hasOlder: msgs.hasOlder,
+		olderCursor: msgs.olderCursor,
+		olderCount: msgs.olderCount,
 	};
 	return c.json(body);
 });

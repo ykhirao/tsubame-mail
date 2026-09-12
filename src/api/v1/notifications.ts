@@ -8,7 +8,7 @@ import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
 import { readJson, unixSeconds } from "@/lib/validate";
 import { afterCursor, toPage } from "@/lib/paging";
-import { addressFilter, addressSetHas } from "@/domain/access/policy";
+import { addressFilter, addressSetHas, jsonIdsIn } from "@/domain/access/policy";
 import {
 	notificationRuleInput,
 	notificationRuleUpdate,
@@ -90,10 +90,11 @@ function prefsPayload(row: typeof schema.notificationPrefs.$inferSelect) {
 async function loadMailboxes(
 	db: Db,
 	principal: Principal,
-	rows: { id: string; address: string; color: string | null; isCatchAll: boolean }[],
+	rows: { id: string; address: string; displayName: string | null; color: string | null; isCatchAll: boolean }[],
 ): Promise<{
 	id: string;
 	address: string;
+	displayName: string | null;
 	color: string;
 	isCatchAll: boolean;
 	assigned: boolean;
@@ -124,6 +125,7 @@ async function loadMailboxes(
 		return {
 			id: row.id,
 			address: row.address,
+			displayName: row.displayName,
 			color: row.color ?? defaultColorFor(index),
 			isCatchAll: row.isCatchAll,
 			assigned,
@@ -151,6 +153,7 @@ async function loadVisibleAddresses(db: Db, principal: Principal) {
 		.select({
 			id: schema.addresses.id,
 			address: schema.addresses.address,
+			displayName: schema.addresses.displayName,
 			color: schema.addresses.color,
 			isCatchAll: schema.addresses.isCatchAll,
 		})
@@ -158,6 +161,8 @@ async function loadVisibleAddresses(db: Db, principal: Principal) {
 		.where(and(addressFilter(principal, schema.addresses.id), isNull(schema.addresses.archivedAt)));
 	return rows;
 }
+
+const MAX_RULES_PER_USER = 50;
 
 async function loadRules(db: Db, userId: string): Promise<NotificationRule[]> {
 	const rows = await db
@@ -309,6 +314,13 @@ app.post("/rules", async (c) => {
 	const principal = c.get("principal");
 	const db = c.get("db");
 	const body = await readJson(c.req, notificationRuleInput);
+	const [count] = await db
+		.select({ n: sql<number>`count(*)` })
+		.from(schema.notificationRules)
+		.where(eq(schema.notificationRules.userId, principal.userId));
+	if (Number(count?.n ?? 0) >= MAX_RULES_PER_USER) {
+		throw invalidRequest(`通知ルールは最大 ${MAX_RULES_PER_USER} 件です`);
+	}
 	const [max] = await db
 		.select({ p: sql<number>`coalesce(max(${schema.notificationRules.priority}), -1) + 1` })
 		.from(schema.notificationRules)
@@ -356,14 +368,15 @@ app.post("/rules/reorder", async (c) => {
 	const principal = c.get("principal");
 	const db = c.get("db");
 	const { ids } = await readJson(c.req, ruleReorderInput);
+	const idsDedup = [...new Set(ids)];
 	const owned = new Set((await loadRules(db, principal.userId)).map((r) => r.id));
-	const unknown = ids.filter((id) => !owned.has(id));
+	const unknown = idsDedup.filter((id) => !owned.has(id));
 	if (unknown.length > 0) throw invalidRequest("自分のルール以外は並べ替えられません", { unknown });
-	for (let i = 0; i < ids.length; i++) {
+	for (let i = 0; i < idsDedup.length; i++) {
 		await db
 			.update(schema.notificationRules)
 			.set({ priority: i })
-			.where(and(eq(schema.notificationRules.id, ids[i]!), eq(schema.notificationRules.userId, principal.userId)));
+			.where(and(eq(schema.notificationRules.id, idsDedup[i]!), eq(schema.notificationRules.userId, principal.userId)));
 	}
 	return c.json({ data: await loadRules(db, principal.userId) });
 });
@@ -467,7 +480,24 @@ app.get("/feed", async (c) => {
 	const db = c.get("db");
 	const q = feedQuery.safeParse(c.req.query());
 	if (!q.success) throw invalidRequest("クエリが不正です", q.error.issues);
-	const { limit, cursor, include_dropped } = q.data;
+	const { limit, cursor, include_dropped, hold_group } = q.data;
+
+	// 束の残り: holdGroup に属する全部を平坦に返す。
+	if (hold_group) {
+		const rows = await db
+			.select()
+			.from(schema.notificationLog)
+			.where(and(
+				eq(schema.notificationLog.userId, principal.userId),
+				eq(schema.notificationLog.holdGroup, hold_group),
+				include_dropped ? undefined : inArray(schema.notificationLog.decision, ["sent", "held", "digest"]),
+			))
+			.orderBy(asc(schema.notificationLog.createdAt), asc(schema.notificationLog.id));
+		const entries = rows.map(toFeedEntry);
+		await attachFeedDetails(db, principal, entries);
+		return c.json({ data: entries, next_cursor: null });
+	}
+
 	const scope = and(
 		eq(schema.notificationLog.userId, principal.userId),
 		include_dropped ? undefined : inArray(schema.notificationLog.decision, ["sent", "held", "digest"]),
@@ -484,19 +514,20 @@ app.get("/feed", async (c) => {
 	const hasNext = rows.length > limit;
 	const next_cursor = hasNext && pageRows.length > 0 ? toPage(rows, limit).next_cursor : null;
 
-	const items = await groupFeed(db, principal.userId, pageRows);
+	const items = await groupFeed(db, principal, pageRows);
 	return c.json({ data: items, next_cursor });
 });
 
-async function groupFeed(db: Db, userId: string, rows: typeof schema.notificationLog.$inferSelect[]): Promise<FeedItem[]> {
+async function groupFeed(db: Db, principal: Principal, rows: typeof schema.notificationLog.$inferSelect[]): Promise<FeedItem[]> {
+	const raw = rows.map(toFeedEntry);
+	await attachFeedDetails(db, principal, raw);
 	const entries = new Map<string, FeedEntry[]>();
 	const standalone: FeedItem[] = [];
-	for (const row of rows) {
-		const entry = toFeedEntry(row);
-		if (row.holdGroup && (row.decision === "held" || row.decision === "digest")) {
-			const list = entries.get(row.holdGroup) ?? [];
+	for (const entry of raw) {
+		if (entry.holdGroup && (entry.decision === "held" || entry.decision === "digest")) {
+			const list = entries.get(entry.holdGroup) ?? [];
 			list.push(entry);
-			entries.set(row.holdGroup, list);
+			entries.set(entry.holdGroup, list);
 		} else {
 			standalone.push(entry);
 		}
@@ -506,7 +537,7 @@ async function groupFeed(db: Db, userId: string, rows: typeof schema.notificatio
 		const [countRow] = await db
 			.select({ n: sql<number>`count(*)` })
 			.from(schema.notificationLog)
-			.where(and(eq(schema.notificationLog.userId, userId), eq(schema.notificationLog.holdGroup, holdGroup)));
+			.where(and(eq(schema.notificationLog.userId, principal.userId), eq(schema.notificationLog.holdGroup, holdGroup)));
 		const first = list[0]!;
 		bundles.push({
 			id: holdGroup,
@@ -533,7 +564,42 @@ function toFeedEntry(row: { id: string; createdAt: Date; decision: string; reaso
 		reason: row.reason ?? "",
 		holdGroup: row.holdGroup,
 		createdAt: Math.floor(row.createdAt.getTime() / 1000),
+		fromAddr: "",
+		subject: null,
+		mailboxAddress: "",
 	};
+}
+
+/** 通知欄の 1 件に差出人・件名・メールボックスを載せる。削除済みのメッセージは空のまま。 */
+// 通知の履歴は割り当てを外された後も残る。今は見られないアドレスのメールの差出人・件名は出さない。
+async function attachFeedDetails(db: Db, principal: Principal, entries: FeedEntry[]): Promise<void> {
+	const messageIds = [...new Set(entries.map((e) => e.messageId).filter((x): x is string => Boolean(x)))];
+	if (!messageIds.length) return;
+	const msgs = await db
+		.select({
+			id: schema.messages.id,
+			fromAddr: schema.messages.fromAddr,
+			subject: schema.messages.subject,
+			addressId: schema.messages.addressId,
+		})
+		.from(schema.messages)
+		.where(and(jsonIdsIn(schema.messages.id, messageIds), addressFilter(principal, schema.messages.addressId)));
+	const addressIds = [...new Set(msgs.map((m) => m.addressId))];
+	const addrs = addressIds.length
+		? await db
+				.select({ id: schema.addresses.id, address: schema.addresses.address })
+				.from(schema.addresses)
+				.where(jsonIdsIn(schema.addresses.id, addressIds))
+		: [];
+	const msgMap = new Map(msgs.map((m) => [m.id, m]));
+	const addrMap = new Map(addrs.map((a) => [a.id, a.address]));
+	for (const e of entries) {
+		const m = e.messageId ? msgMap.get(e.messageId) : undefined;
+		if (!m) continue;
+		e.fromAddr = m.fromAddr;
+		e.subject = m.subject;
+		e.mailboxAddress = addrMap.get(m.addressId) ?? "";
+	}
 }
 
 app.post("/feed/seen", async (c) => {
@@ -619,8 +685,6 @@ export function serializeDevice(row: typeof schema.pushDevices.$inferSelect) {
 		platform: row.platform,
 		enabled: row.enabled,
 		endpoint: row.endpoint,
-		p256dh: row.p256dh,
-		auth: row.auth,
 		addressIds: row.addressIds,
 		lastSeenAt: unixSeconds(row.lastSeenAt),
 		lastSuccessAt: unixSeconds(row.lastSuccessAt),

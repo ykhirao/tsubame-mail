@@ -11,6 +11,8 @@ import {
 	ErrorBanner,
 	formatDateTime,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -50,6 +52,7 @@ function CreateUserModal({
 	const [email, setEmail] = useState("");
 	const [role, setRole] = useState<AdminUser["role"]>("member");
 	const [password, setPassword] = useState("");
+	const [temporaryPassword, setTemporaryPassword] = useState<string | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 
@@ -57,13 +60,14 @@ function CreateUserModal({
 		setError("");
 		setBusy(true);
 		try {
-			await api.post("/api/v1/admin/users", {
+			const res = await api.post<{ temporaryPassword: string | null }>("/api/v1/admin/users", {
 				name,
 				email,
 				role,
-				password: role === "agent" ? undefined : password,
+				password: role === "agent" || password === "" ? undefined : password,
 			});
-			onCreated();
+			if (res.temporaryPassword != null) setTemporaryPassword(res.temporaryPassword);
+			else onCreated();
 		} catch (e) {
 			setError(e instanceof ApiClientError ? e.message : "ユーザーの作成に失敗しました");
 		} finally {
@@ -71,7 +75,26 @@ function CreateUserModal({
 		}
 	};
 
-	const valid = name && email && (role === "agent" || password.length >= 12);
+	const valid = name && email && (role === "agent" || password === "" || password.length >= 12);
+
+	// 仮パスワードは作成の応答で一度だけ返るので、発行されたら閉じる前に必ず見せる。
+	if (temporaryPassword !== null) {
+		return (
+			<Modal title="ユーザーを作成しました" onClose={onCreated}>
+				<div className="space-y-4">
+					<div className="text-sm text-[var(--text-muted)]">
+						仮パスワードはこれきりしか表示されません。コピーして本人に渡してください。
+					</div>
+					<div className="overflow-x-auto rounded-md bg-[var(--surface-sunken)] px-4 py-3 font-mono text-lg font-medium text-[var(--text)]">
+						{temporaryPassword}
+					</div>
+					<div className="flex justify-end gap-2 pt-2">
+						<Button onClick={onCreated}>閉じる</Button>
+					</div>
+				</div>
+			</Modal>
+		);
+	}
 
 	return (
 		<Modal title="ユーザーを作成" onClose={onClose}>
@@ -100,7 +123,7 @@ function CreateUserModal({
 				</div>
 				{role !== "agent" && (
 					<div>
-						<Label>パスワード（12 文字以上）</Label>
+						<Label>パスワード（空なら仮パスワードを発行）</Label>
 						<TextInput
 							type="password"
 							value={password}
@@ -187,7 +210,7 @@ function GrantsModal({
 						read = 読むだけ / write = 読み書き（そのアドレスで送信も可能）。エイリアスには write を付けないでください。
 					</p>
 					<div className="max-h-96 overflow-y-auto rounded-md border border-[var(--line)]">
-						<div className="overflow-x-auto">
+						<div className="hidden overflow-x-auto md:block">
 						<table className="w-full min-w-[720px]">
 							<thead className="sticky top-0 bg-[var(--surface-sunken)]">
 								<tr className="border-b border-[var(--line)]">
@@ -227,6 +250,38 @@ function GrantsModal({
 							</tbody>
 						</table>
 						</div>
+						<ul className="md:hidden">
+							{addresses.map((a) => (
+								<li
+									key={a.id}
+									className="flex items-center gap-3 border-b border-[var(--line-soft)] px-3 py-2"
+								>
+									<div className="min-w-0 flex-1">
+										<div className="text-sm font-medium text-[var(--text)]">{a.address}</div>
+										<div className="text-xs text-[var(--text-muted)]">
+											{a.kind === "alias" ? "エイリアス" : "メールボックス"}
+										</div>
+									</div>
+									<Select
+										value={levels[a.id] ?? ""}
+										onChange={(e) => {
+											const v = e.target.value as "" | "read" | "write";
+											setLevels((prev) => {
+												const next = { ...prev };
+												if (v === "") delete next[a.id];
+												else next[a.id] = v;
+												return next;
+											});
+										}}
+										className="w-24 shrink-0"
+									>
+										<option value="">なし</option>
+										<option value="read">read</option>
+										<option value="write">write</option>
+									</Select>
+								</li>
+							))}
+						</ul>
 					</div>
 					<div className="flex justify-end gap-2">
 						<Button variant="secondary" onClick={onClose}>
@@ -413,7 +468,8 @@ export function UsersPage() {
 					{users.length === 0 ? (
 						<EmptyState message="ユーザーがまだありません。" />
 					) : (
-						<div className="overflow-x-auto">
+						<>
+						<div className="hidden overflow-x-auto md:block">
 						<table className="w-full min-w-[720px]">
 							<thead>
 								<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -459,6 +515,37 @@ export function UsersPage() {
 							</tbody>
 						</table>
 						</div>
+						<ul className="md:hidden">
+							{users.map((u) => (
+								<li key={u.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+									<div className="flex items-center justify-between gap-2">
+										<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{u.name}</span>
+										<Badge color={roleBadge(u.role)}>{roleLabels[u.role]}</Badge>
+									</div>
+									<div className="mt-2 space-y-1">
+										<MobileField label="メール">{u.email}</MobileField>
+										<MobileField label="状態">
+											<Badge color={u.status === "active" ? "green" : "red"}>
+												{u.status === "active" ? "有効" : "無効"}
+											</Badge>
+										</MobileField>
+										<MobileField label="作成日">{formatDateTime(u.createdAt)}</MobileField>
+									</div>
+									<MobileActions>
+										<Button variant="secondary" onClick={() => setEditTarget(u)}>
+											編集
+										</Button>
+										<Button variant="secondary" onClick={() => setGrantsTarget(u)}>
+											権限
+										</Button>
+										<Button variant="secondary" onClick={() => setDisableTarget(u)}>
+											{u.status === "active" ? "無効化" : "再有効化"}
+										</Button>
+									</MobileActions>
+								</li>
+							))}
+						</ul>
+						</>
 					)}
 				</Card>
 

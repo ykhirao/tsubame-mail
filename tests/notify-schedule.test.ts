@@ -64,3 +64,17 @@ describe("nextQuietEnd", () => {
 		expect(nextQuietEnd(weekday, jst(2026, 6, 2, 12))).toBeGreaterThan(jst(2026, 6, 2, 12));
 	});
 });
+
+describe("壊れた tz の耐性（#132）", () => {
+	const bad: QuietSchedule = { tz: "Not/AZone", mode: "drop", ranges: [{ days: [], start: 0, end: 1440 }] };
+
+	it("isQuiet は RangeError を投げず「静音でない」とみなす", () => {
+		expect(() => isQuiet(bad, jst())).not.toThrow();
+		expect(isQuiet(bad, jst())).toBe(false);
+	});
+
+	it("nextQuietEnd は RangeError を投げず nowMs を返す", () => {
+		expect(() => nextQuietEnd(bad, jst())).not.toThrow();
+		expect(nextQuietEnd(bad, jst())).toBe(jst());
+	});
+});

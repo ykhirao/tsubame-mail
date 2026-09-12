@@ -10,6 +10,8 @@ export default defineConfig({
 	plugins: [
 		cloudflareTest({
 			wrangler: { configPath: "./wrangler.jsonc" },
+			// send_email は remote: true。これを切らないと Cloudflare に繋ごうとして、トークンの無い CI で全件落ちる。
+			remoteBindings: false,
 
 			miniflare: {
 				bindings: {

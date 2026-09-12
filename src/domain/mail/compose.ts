@@ -1,7 +1,7 @@
 // Message-ID は送信前に自前で採番する。返信がスレッドに刺さるために必要。
 // node ビルドは eol を node:os の EOL に頼り Workers では bare LF になる。browser ビルドは \r\n 固定。
 import { createMimeMessage } from "mimetext/browser";
-import { MIME_TYPE } from "@/shared/contracts/send";
+import { MIME_TYPE, MAX_SUBJECT_BYTES } from "@/shared/contracts/send";
 import { formatAddressList, parseAddressList } from "./address";
 
 export type ComposeAttachment = {
@@ -120,17 +120,12 @@ function clampReferences(ids: string[], headerNameLength: number): string[] {
 	return kept;
 }
 
-// UTF-8 の 1 文字を跨いで切らない。件名は =?utf-8?B?<base64>?= に膨らむので、
-// 生バイト数はかなり手前で止める（"Subject: =?utf-8?B?" + "?=" のオーバーヘッドと
-// base64 の 4/3 膨張を差し引いた安全側の見積り）。
-const MAX_SUBJECT_BYTES = 600;
-function clampSubjectBytes(value: string, maxBytes: number): string {
-	const bytes = new TextEncoder().encode(value);
-	if (bytes.length <= maxBytes) return value;
-	let end = maxBytes;
-	// 0x80-0xBF は UTF-8 の継続バイト。境界がその途中なら 1 バイトずつ戻る。
-	while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
-	return new TextDecoder().decode(bytes.subarray(0, end));
+// 件名はここで黙って切らない。上限を超える入力は契約（send.ts）が 400 で弾き、返信は
+// outbound.ts が「Re: 」を足す前に切り詰める。ここまで届いたら経路の抜けなので throw する（#22）。
+function assertSubjectFits(subject: string): void {
+	if (new TextEncoder().encode(subject).length > MAX_SUBJECT_BYTES) {
+		throw new Error(`件名は ${MAX_SUBJECT_BYTES} バイトまでです`);
+	}
 }
 
 const bodyEncoder = new TextEncoder();
@@ -163,7 +158,8 @@ export function composeMime(
 	const references = formatMessageIdList(input.referencesHeader, "References");
 	if (references) msg.setHeader("References", references);
 
-	const subject = clampSubjectBytes((input.subject ?? "").trim() || "(件名なし)", MAX_SUBJECT_BYTES);
+	const subject = (input.subject ?? "").trim() || "(件名なし)";
+	assertSubjectFits(subject);
 	msg.setSubject(subject);
 
 	if (input.textBody && input.htmlBody) {

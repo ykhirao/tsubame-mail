@@ -4,6 +4,7 @@ import { messages, threads } from "@/db/schema";
 import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
 import { normalizeAddress, parseAddressList } from "./address";
+import type { InboundAuth } from "./parse";
 
 /** D1 はバインド変数が 1 クエリ 100 個まで。山括弧あり・なしの 2 通りで引くので半分弱に抑える。 */
 const MAX_REFERENCE_IDS = 40;
@@ -14,6 +15,8 @@ export type ThreadRefs = {
 	references: string | null;
 	/** 新しく届いたメールの From。inbound をアンカーにしてよいかの判定に使う。 */
 	fromAddr: string | null;
+	/** null なら未認証として接ぎ木しない（#127）。 */
+	inboundAuth: InboundAuth | null;
 };
 
 export function parseThreadMessageIds(inReplyTo: string | null, references: string | null): string[] {
@@ -38,6 +41,25 @@ function addressListContains(list: string | null, target: string): boolean {
 	return parseAddressList(list).some((a) => a.address === target);
 }
 
+function domainOf(address: string): string {
+	const at = address.lastIndexOf("@");
+	return at >= 0 ? address.slice(at + 1) : address;
+}
+
+function domainCovers(subject: string, trusted: string): boolean {
+	return subject === trusted || subject.endsWith("." + trusted);
+}
+
+// 接ぎ木は送信元が認証されている（dmarc=pass、または From のドメインが dkim の署名ドメイン）
+// ときに限る。認証されなければ疑わしいので新スレッドにする（#127）。
+function isAuthenticated(auth: InboundAuth | null, sender: string | null): boolean {
+	if (!auth) return false;
+	if (auth.dmarc === "pass") return true;
+	if (!sender) return false;
+	const fromDomain = domainOf(sender);
+	return auth.dkimPassDomains.some((d) => domainCovers(fromDomain, d));
+}
+
 /**
  * 受信メールの Message-ID は送信者が自由に書ける値なので、それを知っている第三者が
  * In-Reply-To に入れるだけで他人の会話に接ぎ木できてしまう。アンカーにするのは、
@@ -48,6 +70,9 @@ function addressListContains(list: string | null, target: string): boolean {
 export async function findExistingThreadId(db: Db, refs: ThreadRefs): Promise<string | null> {
 	const ids = capReferenceIds(parseThreadMessageIds(refs.inReplyTo, refs.references));
 	if (ids.length === 0) return null;
+
+	const sender = refs.fromAddr ? normalizeAddress(refs.fromAddr) : null;
+	if (!isAuthenticated(refs.inboundAuth, sender)) return null;
 
 	// outbound は generateMessageId が山括弧付きで保存している。
 	const candidates = ids.flatMap((id) => [id, `<${id}>`]);
@@ -64,7 +89,6 @@ export async function findExistingThreadId(db: Db, refs: ThreadRefs): Promise<st
 		.where(and(eq(messages.addressId, refs.addressId), inArray(messages.rfcMessageId, candidates)))
 		.all();
 
-	const sender = refs.fromAddr ? normalizeAddress(refs.fromAddr) : null;
 	const anchor = rows.find((r) => {
 		if (r.threadId === null) return false;
 		if (r.direction === "outbound") {

@@ -35,7 +35,7 @@ declare global {
 			INTERNAL_SECRET?: string;
 			/** Web Push の VAPID 秘密鍵（JWK の JSON）。Worker Secret。変えると全端末の購読が無効になる。 */
 			VAPID_PRIVATE_KEY?: string;
-			/** VAPID の連絡先。`mailto:` で始める。 */
+			/** VAPID の連絡先（`mailto:`）。実環境の宛先をリポジトリに書かないため Worker Secret に置く。 */
 			VAPID_SUBJECT?: string;
 		}
 	}

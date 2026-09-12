@@ -120,25 +120,29 @@ export function MessageHtml({
 	const ref = useRef<HTMLIFrameElement>(null);
 
 	return (
-		<iframe
-			ref={ref}
-			title="メール本文"
-			sandbox="allow-same-origin"
-			referrerPolicy="no-referrer"
-			className="w-full border-0"
-			style={{ minHeight: 120 }}
-			srcDoc={buildSrcDoc(html, allowRemoteImages)}
-			onLoad={() => {
-				const f = ref.current;
-				if (!f) return;
-				try {
-					const doc = f.contentDocument;
-					if (!doc?.body) return;
-					f.style.height = `${Math.max(doc.body.scrollHeight + 24, 120)}px`;
-				} catch {
-					/* 高さが読めなくても本文の表示は続ける。 */
-				}
-			}}
-		/>
+		// 広い table などで本文が画面幅を超えても、外のレイアウトを押し広げないように
+		// 本文の箱の中で横スクロールさせ、iframe 本体は block にして行内の隙間を消す。
+		<div className="w-full overflow-x-auto">
+			<iframe
+				ref={ref}
+				title="メール本文"
+				sandbox="allow-same-origin"
+				referrerPolicy="no-referrer"
+				className="block w-full border-0"
+				style={{ minHeight: 120 }}
+				srcDoc={buildSrcDoc(html, allowRemoteImages)}
+				onLoad={() => {
+					const f = ref.current;
+					if (!f) return;
+					try {
+						const doc = f.contentDocument;
+						if (!doc?.body) return;
+						f.style.height = `${Math.max(doc.body.scrollHeight + 24, 120)}px`;
+					} catch {
+						/* 高さが読めなくても本文の表示は続ける。 */
+					}
+				}}
+			/>
+		</div>
 	);
 }

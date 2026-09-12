@@ -15,6 +15,16 @@ export type NotificationAction = z.infer<typeof notificationAction>;
 
 export const quietMode = z.enum(["drop", "digest"]);
 
+/** schedule.ts が Intl で解釈する値を保存から弾く。検証しないと保存時に RangeError になる。 */
+function isKnownTimeZone(tz: string): boolean {
+	try {
+		new Intl.DateTimeFormat("en-US", { timeZone: tz });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** days: 曜日（0=日曜）。end が start 以下なら日をまたぐ。時刻は "HH:MM"。 */
 export const quietRange = z.object({
 	days: z.array(z.number().int().min(0).max(6)).max(7),
@@ -22,7 +32,7 @@ export const quietRange = z.object({
 	end: z.string().regex(/^\d{2}:\d{2}$/),
 });
 export const quietHoursSchema = z.object({
-	tz: z.string().min(1),
+	tz: z.string().min(1).refine(isKnownTimeZone, { message: "タイムゾーンが正しくありません" }),
 	ranges: z.array(quietRange).default([]),
 	mode: quietMode,
 });
@@ -67,6 +77,7 @@ export type NotificationRuleUpdate = z.infer<typeof notificationRuleUpdate>;
 export const mailboxNotification = z.object({
 	id: z.string(),
 	address: z.string(),
+	displayName: z.string().nullable(),
 	color: z.string(),
 	isCatchAll: z.boolean(),
 	level: notificationLevel,
@@ -119,7 +130,7 @@ export const mailboxLevelInput = z.object({ level: notificationLevel });
 export type MailboxLevelInput = z.infer<typeof mailboxLevelInput>;
 
 export const ruleReorderInput = z.object({
-	ids: z.array(z.string()).min(1),
+	ids: z.array(z.string()).min(1).max(100),
 });
 export type RuleReorderInput = z.infer<typeof ruleReorderInput>;
 
@@ -152,6 +163,10 @@ export const feedEntry = z.object({
 	reason: z.string(),
 	holdGroup: z.string().nullable(),
 	createdAt: z.number(),
+	/** 束の中でも 1 件ごとに差出人・件名・メールボックスを出すための詳細。 */
+	fromAddr: z.string(),
+	subject: z.string().nullable(),
+	mailboxAddress: z.string(),
 });
 export type FeedEntry = z.infer<typeof feedEntry>;
 
@@ -171,7 +186,11 @@ export const feedItem = z.union([feedEntry, feedBundle]);
 export type FeedItem = z.infer<typeof feedItem>;
 
 const includeDroppedParam = z.enum(["1", "true"]).transform(() => true).optional();
-export const feedQuery = paginationQuery.extend({ include_dropped: includeDroppedParam });
+export const feedQuery = paginationQuery.extend({
+	include_dropped: includeDroppedParam,
+	/** 束の残り（holdGroup に属する全 entry）を平坦に返す。 */
+	hold_group: z.string().optional(),
+});
 export type FeedQuery = z.infer<typeof feedQuery>;
 
 export const feedResponse = page(feedItem);
@@ -238,8 +257,6 @@ export const device = z.object({
 	platform: devicePlatform,
 	enabled: z.boolean(),
 	endpoint: z.string(),
-	p256dh: z.string(),
-	auth: z.string(),
 	addressIds: z.array(z.string()).nullable(),
 	lastSeenAt: z.number().nullable(),
 	lastSuccessAt: z.number().nullable(),

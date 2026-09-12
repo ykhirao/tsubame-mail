@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { eq, sql } from "drizzle-orm";
+import { and, inArray, eq, sql } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { addresses, attachments, messages, outboundJobs, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
@@ -19,6 +19,7 @@ import {
 	MAX_RECIPIENTS,
 	MAX_BODY_BYTES,
 	MAX_COMBINED_BODY_BYTES,
+	MAX_SUBJECT_BYTES,
 	type SendMessageInput,
 } from "@/shared/contracts/send";
 
@@ -218,6 +219,33 @@ router.post("/", async (c) => {
 	// 「送信先が指定されていません」で failed になる（精査 #80）。
 	if (parseAddressList(toAddr).length === 0) throw invalidRequest("宛先が指定されていません");
 
+	// inReplyTo を付けた返信は In-Reply-To だけでなく References も継ぐ。参照先がこの Worker の
+	// 行として見つかり、かつ同じ差出人アドレス宛てなら既存スレッドに入れる
+	// （別アドレスのスレッドに混ぜない）。参照先が無ければ References は inReplyTo 単独で送る。
+	let referencesHeader: string | null = null;
+	let threadId: string | null = null;
+	if (input.inReplyTo) {
+		const bare = input.inReplyTo.replace(/^<|>$/g, "");
+		const ref = await db
+			.select({
+				addressId: messages.addressId,
+				threadId: messages.threadId,
+				referencesHeader: messages.referencesHeader,
+				rfcMessageId: messages.rfcMessageId,
+			})
+			.from(messages)
+			// 送信元のアドレスに閉じる。他のアドレスの行を引くと、見られない会話の References が
+			// 自分の送信ヘッダに写り、Message-ID の有無も分かってしまう（#136 #137）。
+			.where(and(eq(messages.addressId, addressId), inArray(messages.rfcMessageId, [bare, `<${bare}>`])))
+			.get();
+		if (ref) {
+			referencesHeader = referencesFor(ref.referencesHeader, ref.rfcMessageId ?? input.inReplyTo);
+			threadId = ref.threadId;
+		} else {
+			referencesHeader = input.inReplyTo;
+		}
+	}
+
 	const result = await enqueueOutbound(db, c.env, {
 		sentByUserId: principal.userId,
 		addressId,
@@ -229,6 +257,8 @@ router.post("/", async (c) => {
 		textBody: input.text ?? null,
 		htmlBody: input.html ?? null,
 		inReplyTo: input.inReplyTo ?? null,
+		referencesHeader,
+		threadId,
 		attachments: decoded,
 	});
 
@@ -301,7 +331,7 @@ router.post("/:id/reply", async (c) => {
 		throw invalidRequest(`宛先は合計 ${MAX_RECIPIENTS} 件までです`);
 	}
 
-	const subject = replySubject(message.subject);
+	const subject = clampReplySubject(replySubject(message.subject));
 	const inReplyTo = message.rfcMessageId ?? null;
 	const references = referencesFor(message.referencesHeader, message.rfcMessageId);
 
@@ -313,20 +343,15 @@ router.post("/:id/reply", async (c) => {
 		htmlBody: message.htmlBody,
 	});
 
-	const textBody = input.text ? input.text.trim() + "\n\n" + quote.text : quote.text;
-	const htmlBody = input.html ? input.html + quote.html : quote.html;
-
-	// 引用は入力検査の外で足すので、zod の検査では収まっていても実バイト数は超えうる。
-	// D1 の 1 行 2MB 上限に当たって 500 になる前に、#89 と同じ上限で 400 にする。#115。
-	const encoder = new TextEncoder();
-	const textBytes = encoder.encode(textBody).byteLength;
-	const htmlBytes = encoder.encode(htmlBody).byteLength;
-	if (textBytes > MAX_BODY_BYTES || htmlBytes > MAX_BODY_BYTES) {
-		throw invalidRequest("引用を含めた本文が上限を超えています");
-	}
-	if (textBytes + htmlBytes + encoder.encode(subject).byteLength > MAX_COMBINED_BODY_BYTES) {
-		throw invalidRequest("引用を含めた本文と件名の合計サイズが上限を超えています");
-	}
+	// 引用は入力検査の外で足すので、本文が上限を超えうる。利用者が書いた部分（text / html）は切らず、
+	// 引用を末尾から切り詰めて上限に収める。#115。
+	const { text: textBody, html: htmlBody } = fitReplyBodies(
+		input.text?.trim() ?? "",
+		input.html ?? "",
+		quote.text,
+		quote.html,
+		subject,
+	);
 
 	const toAddr = formatAddressList(recipients);
 	const ccAddr = ccRecipients.length > 0 ? formatAddressList(ccRecipients) : null;
@@ -350,6 +375,91 @@ router.post("/:id/reply", async (c) => {
 
 	return c.json(result, 202);
 });
+
+const quoteBytes = new TextEncoder();
+function byteLen(value: string): number {
+	return quoteBytes.encode(value).length;
+}
+
+// UTF-8 の 1 文字を跨がない。末尾を切るときに継続バイトが残らないようにする（#22 / #115）。
+function clampUtf8(value: string, maxBytes: number): string {
+	const bytes = quoteBytes.encode(value);
+	if (bytes.length <= maxBytes) return value;
+	let end = maxBytes;
+	// 0x80-0xBF は UTF-8 の継続バイト。境界がその途中なら 1 バイトずつ戻る。
+	while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+	return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
+// 返信は「Re: 」を付けて 600 バイトを超えるとき、元の件名を末尾から切る（#22）。
+function clampReplySubject(subject: string): string {
+	if (byteLen(subject) <= MAX_SUBJECT_BYTES) return subject;
+	const prefix = "Re: ";
+	return prefix + clampUtf8(subject.slice(prefix.length), MAX_SUBJECT_BYTES - byteLen(prefix));
+}
+
+const QUOTE_TRUNCATED_NOTE = "（引用が長いため途中までです）";
+
+function truncateQuoteText(quote: string, maxBytes: number): string {
+	const note = `\n${QUOTE_TRUNCATED_NOTE}`;
+	if (byteLen(quote) <= maxBytes) return quote;
+	if (maxBytes < byteLen(note)) return "";
+	return clampUtf8(quote, maxBytes - byteLen(note)).replace(/\s+$/, "") + note;
+}
+
+function truncateQuoteHtml(quote: string, maxBytes: number): string {
+	const note = `<br />${QUOTE_TRUNCATED_NOTE}</blockquote>`;
+	if (byteLen(quote) <= maxBytes) return quote;
+	if (maxBytes < byteLen(note)) return "";
+	return clampUtf8(quote, maxBytes - byteLen(note)).replace(/\s+$/, "") + note;
+}
+
+// 返信本文を本文ごと・合計の上限に収める。利用者が書いた userText / userHtml は切らず、
+// 足りない分は引用を末尾から切って注記を添える（#115）。
+function fitReplyBodies(
+	userText: string,
+	userHtml: string,
+	quoteTextFull: string,
+	quoteHtmlFull: string,
+	subject: string,
+): { text: string | null; html: string | null } {
+	const sep = userText ? "\n\n" : "";
+	const userTextBytes = byteLen(userText) + byteLen(sep);
+	const userHtmlBytes = byteLen(userHtml);
+	const subjectBytes = byteLen(subject);
+
+	const textQuoteBudget = Math.max(0, MAX_BODY_BYTES - userTextBytes);
+	const htmlQuoteBudget = Math.max(0, MAX_BODY_BYTES - userHtmlBytes);
+	const totalQuoteBudget = Math.max(
+		0,
+		MAX_COMBINED_BODY_BYTES - userTextBytes - userHtmlBytes - subjectBytes,
+	);
+
+	let textQuote = truncateQuoteText(quoteTextFull, textQuoteBudget);
+	let htmlQuote = truncateQuoteHtml(quoteHtmlFull, htmlQuoteBudget);
+
+	if (byteLen(textQuote) + byteLen(htmlQuote) > totalQuoteBudget) {
+		const used = Math.max(1, byteLen(textQuote) + byteLen(htmlQuote));
+		if (totalQuoteBudget <= 0) {
+			textQuote = "";
+			htmlQuote = "";
+		} else {
+			const ratio = totalQuoteBudget / used;
+			textQuote = truncateQuoteText(
+				quoteTextFull,
+				Math.min(textQuoteBudget, Math.floor(byteLen(textQuote) * ratio)),
+			);
+			htmlQuote = truncateQuoteHtml(
+				quoteHtmlFull,
+				Math.min(htmlQuoteBudget, Math.floor(byteLen(htmlQuote) * ratio)),
+			);
+		}
+	}
+
+	const textBody = userText ? (textQuote ? `${userText}\n\n${textQuote}` : userText) : textQuote;
+	const htmlBody = userHtml ? `${userHtml}${htmlQuote}` : htmlQuote;
+	return { text: textBody || null, html: htmlBody || null };
+}
 
 export function dedupeRecipients(
 	list: { address: string; name?: string }[],

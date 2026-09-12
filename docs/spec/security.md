@@ -240,8 +240,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] `From` が無い・複数ある・グループ構文のとき、`from_addr` が空や別人にならないか → `parse.ts` `flattenAddresses`
 - [ ] アドレススコープのルール照合がヘッダ値ではなくエンベロープで行われるか（精査 #14） → `inbound.ts` `applyAddressRules`
 - [ ] ルールの `contains` が本文全体を対象にするなら、その計算量を把握しているか → `rules.ts` `matchRule`
-- [ ] Cloudflare の判定ヘッダを読んで `spam_verdict` に**書いて**いるか。読む側だけあって書く側が無い状態になっていないか
-      → `inbound.ts` の insert、`grep -rn "spamVerdict" src`
+- [x] Cloudflare の判定ヘッダを読んで `spam_verdict` に**書いて**いるか。読む側だけあって書く側が無い状態になっていないか
+      → `inbound.ts` の insert（`spamVerdictFromScore`）、`grep -rn "spamVerdict" src`
 
 **保存**
 - [ ] 添付のファイル名・`content_id` が R2 キーに素通りしていないか（受信側はサーバ採番） → `r2.ts` `attachmentKey`、`inbound.ts`

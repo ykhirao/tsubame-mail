@@ -93,10 +93,20 @@ export const myAddress = z.object({
 	level: accessLevel,
 	isCatchAll: z.boolean(),
 	color: z.string(),
+	signature: z.string().nullable().optional(),
 	unreadCount: z.number(),
 	archived: z.boolean(),
 });
 export type MyAddress = z.infer<typeof myAddress>;
+
+/** そのアドレスを「見られる人」。所有者は全員、それ以外は grants の利用者。 */
+export const addressViewer = z.object({
+	userId: z.string(),
+	name: z.string(),
+	email: z.string(),
+	level: z.enum(["owner", "read", "write"]),
+});
+export type AddressViewer = z.infer<typeof addressViewer>;
 
 export const listAddressesQuery = z.object({
 	domainId: z.string().optional(),

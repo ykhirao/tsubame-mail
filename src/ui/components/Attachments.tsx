@@ -12,7 +12,7 @@ export function Attachments({ attachments }: { attachments: AttachmentMeta[] }) 
 					href={AttachmentApi.url(a.id)}
 					target="_blank"
 					rel="noopener noreferrer"
-					className="inline-flex items-center gap-1.5 rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+					className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)] sm:min-h-0"
 				>
 					<span>📎</span>
 					<span className="max-w-64 truncate">{a.filename}</span>

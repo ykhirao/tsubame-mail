@@ -101,6 +101,21 @@ describe("FR-16 プッシュ通知", () => {
 		return (res.body.data as Array<{ id: string }>).length;
 	}
 
+	scenario("FR-16", "端末は購読のための公開鍵をサーバから受け取れる", async () => {
+		const { generateVapidKeys } = await import("@/services/webpush");
+		const keys = await generateVapidKeys();
+		(h.env as { VAPID_PRIVATE_KEY?: string }).VAPID_PRIVATE_KEY = JSON.stringify(keys.privateKey);
+		const res = await owner.get("/api/v1/push/key");
+		expect(res.status).toBe(200);
+		expect(res.body.key).toBe(keys.publicKey);
+	});
+
+	scenario("FR-16", "画面を開いたときに付け直すバッジの数をサーバから受け取れる", async () => {
+		const res = await owner.get("/api/v1/push/badge");
+		expect(res.status).toBe(200);
+		expect(typeof res.body.count).toBe("number");
+	});
+
 	scenario(
 		"FR-16",
 		"端末を登録でき、1 人が複数の端末を持てる。同じ endpoint は上書き",
@@ -244,6 +259,17 @@ describe("FR-16 プッシュ通知", () => {
 		expect(bundle.decision).toBe("held");
 		expect(bundle.reason).toBe("paused");
 		expect(bundle.count).toBeGreaterThan(0);
+
+		// hold_group 指定で束の残りを平坦に引け、差出人・件名が入る
+		const rest = await m.get(`/api/v1/me/notifications/feed?hold_group=${bundle.id}`);
+		expect(rest.status).toBe(200);
+		expect(rest.body.data.length).toBe(bundle.count);
+		expect(rest.body.next_cursor).toBeNull();
+		const first = rest.body.data[0];
+		expect(first.type).toBe("entry");
+		expect(first.fromAddr).toBe("a@ext.jp");
+		expect(first.subject).toBe("休みの知らせ");
+		expect(first.mailboxAddress).not.toBe("");
 	});
 
 	scenario("FR-16", "アドレスの割り当てを外すと、次の 1 通から通知が来ない", async () => {
@@ -262,8 +288,11 @@ describe("FR-16 プッシュ通知", () => {
 		});
 		await drainQueues(h);
 		expect(sends).toHaveLength(1);
+		expect(JSON.stringify((await m.get("/api/v1/me/notifications/feed")).body)).toContain("最初");
 
 		await owner.put(`/api/v1/admin/users/${id}/grants`, { grants: [] });
+		// 通知の履歴は残るが、見られなくなったアドレスのメールの件名は通知欄に出さない。
+		expect(JSON.stringify((await m.get("/api/v1/me/notifications/feed")).body)).not.toContain("最初");
 
 		await deliverEmail(h, {
 			from: "a@ext.jp",

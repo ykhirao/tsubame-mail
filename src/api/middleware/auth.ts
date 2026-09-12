@@ -88,8 +88,13 @@ async function principalFromSession(c: Ctx, token: string): Promise<Principal | 
 	if (!session) return null;
 
 	if (session.expiresAt.getTime() <= Date.now()) {
-		// 期限切れは掃除しておく。失敗しても認証結果は変わらない。
-		await conn.delete(schema.sessions).where(eq(schema.sessions.id, session.id)).catch(() => {});
+		// 期限切れは掃除しておく。紐づくプッシュ端末も一緒に消し、
+		// セッションが無いのに通知が届き続けないようにする（#130）。失敗しても認証結果は変わらない。
+		// 先に端末を消す（セッションを消すと FK set-null が先に走って sessionId が空になる）。
+		try {
+			await conn.delete(schema.pushDevices).where(eq(schema.pushDevices.sessionId, session.id));
+			await conn.delete(schema.sessions).where(eq(schema.sessions.id, session.id));
+		} catch {}
 		return null;
 	}
 

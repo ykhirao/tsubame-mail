@@ -1,11 +1,16 @@
-import { Link, Outlet, useNavigate, useSearchParams } from "react-router";
+import { Link, Outlet, useNavigate, useParams, useSearchParams } from "react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
 import { AddressesApi, NotificationsApi } from "@/ui/lib/api";
 import type { MyAddress } from "@/shared/contracts/addresses";
 import { getTheme, setTheme, type Theme } from "@/ui/lib/theme";
 import { AddMemberDialog } from "@/ui/components/AddMemberDialog";
+import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
+import { EmptyState } from "@/ui/components/EmptyState";
+import { useLayoutPref } from "@/ui/lib/viewPrefs";
+import { Inbox } from "@/ui/routes/Inbox";
+import { ThreadDetail } from "@/ui/routes/ThreadDetail";
 
 const icon = "h-5 w-5";
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -122,6 +127,7 @@ function MailboxSwitcher({
 					/>
 				)}
 				<span className="truncate">{current ? current.address : "すべてのメールボックス"}</span>
+				{current?.isCatchAll && <CatchAllBadge />}
 				{(current ? current.unreadCount : totalUnread) > 0 && (
 					<span className="rounded-full bg-[var(--accent)] px-1.5 text-xs text-white">
 						{current ? current.unreadCount : totalUnread}
@@ -164,7 +170,10 @@ function MailboxSwitcher({
 									style={{ background: a.color }}
 								/>
 								<span className="min-w-0">
-								<span className="block truncate">{a.address}</span>
+								<span className="inline-flex items-center gap-1.5">
+									<span className="block truncate">{a.address}</span>
+									{a.isCatchAll && <CatchAllBadge />}
+								</span>
 								{a.displayName && (
 									<span className="block truncate text-xs text-[var(--text-muted)]">
 										{a.displayName}
@@ -200,6 +209,36 @@ const SIDEBAR_KEY = "tsubame-sidebar";
 function initialOf(value: string): string {
 	const first = value.trim().charAt(0);
 	return first ? first.toUpperCase() : "?";
+}
+
+function ChooseConversation() {
+	return (
+		<EmptyState icon="💬" title="会話を選んでください">
+			左の一覧から会話を選ぶと、ここに本文が表示されます
+		</EmptyState>
+	);
+}
+
+// "/" と "/threads/:id" を PC では分割、スマホでは今までの単独画面にする入り口。
+// 全画面モード（端末の表示設定）は分割を畳んで本文だけにする。
+export function MailShell() {
+	const { id } = useParams();
+	const isMobile = useIsMobile();
+	const [pref] = useLayoutPref();
+
+	if (isMobile || pref === "fullscreen") {
+		return id ? <ThreadDetail key={id} /> : <Inbox />;
+	}
+	return (
+		<div className="flex min-h-0 min-w-0 flex-1">
+			<div className="w-[380px] shrink-0 overflow-y-auto border-r border-[var(--line-soft)] pr-2">
+				<Inbox split />
+			</div>
+			<div className="min-w-0 flex-1 overflow-y-auto pl-4">
+				{id ? <ThreadDetail key={id} /> : <ChooseConversation />}
+			</div>
+		</div>
+	);
 }
 
 export function AppLayout() {

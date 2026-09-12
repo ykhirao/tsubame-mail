@@ -191,3 +191,74 @@ describe("送信の再回収と恒久失敗（#59 / #67 / #102）", () => {
 		expect(m!.status).not.toBe("sent");
 	});
 });
+
+describe("出し分けた宛先ごとの送信済み記録（#21 / #59）", () => {
+	async function seedTwoRecipients(h: Harness) {
+		const owner = await loginAsOwner(h);
+		await seedDomain(h, { addresses: ["ai"] });
+		const res = await owner.post("/api/v1/messages", {
+			from: "ai@mail.tsubame.test",
+			to: ["a@ext.example.jp", "b@ext.example.jp"],
+			text: "本文",
+		});
+		expect(res.status).toBe(202);
+		const messageId = res.body.id as string;
+		const job = await getDb(h.env).select().from(outboundJobs).where(eq(outboundJobs.messageId, messageId)).get();
+		return { messageId, jobId: job!.id };
+	}
+
+	it("N 件目の宛先で失敗したら、成功済みの宛先には再送しない", async () => {
+		const h = await freshHarness();
+		const db = getDb(h.env);
+		const envelope: string[] = [];
+		let bFirstFails = true;
+		(h.env as { EMAIL: unknown }).EMAIL = {
+			async send(message: { from: string; to: string }) {
+				envelope.push(message.to);
+				if (message.to === "b@ext.example.jp" && bFirstFails) {
+					bFirstFails = false;
+					throw new Error("一時的な配送失敗");
+				}
+				return { messageId: `captured-${envelope.length}` };
+			},
+		};
+		const { messageId, jobId } = await seedTwoRecipients(h);
+
+		// 1 回目: a は送れ、b で失敗。成功した a は送信済みとして記録して job を queued に戻す。
+		await runProcessOnce(h, jobId, messageId);
+		let job = await db.select().from(outboundJobs).where(eq(outboundJobs.id, jobId)).get();
+		expect(job!.status).toBe("queued");
+		expect(job!.sentRecipients).toEqual(["a@ext.example.jp"]);
+		expect(envelope.filter((t) => t === "a@ext.example.jp")).toHaveLength(1);
+
+		// 再試行では a は送らず b だけ送って sent にする。
+		await runProcessOnce(h, jobId, messageId);
+		job = await db.select().from(outboundJobs).where(eq(outboundJobs.id, jobId)).get();
+		expect(job!.status).toBe("sent");
+		expect(job!.sentRecipients).toEqual(["a@ext.example.jp", "b@ext.example.jp"]);
+		expect(envelope.filter((t) => t === "a@ext.example.jp")).toHaveLength(1);
+		expect(envelope.filter((t) => t === "b@ext.example.jp")).toHaveLength(2);
+		const m = await db.select().from(messages).where(eq(messages.id, messageId)).get();
+		expect(m!.status).toBe("sent");
+	});
+
+	it("送信済み宛先が全件記録された sending は送信 0 回で sent にする", async () => {
+		const h = await freshHarness();
+		const sent = captureSentEmails(h);
+		const db = getDb(h.env);
+		const { messageId, jobId } = await sendOne(h);
+
+		// 全宛先を送った直後にクラッシュして status=sending のまま残った job（再配達が来る）。
+		await db
+			.update(outboundJobs)
+			.set({ status: "sending", nextAttemptAt: new Date(Date.now() - 1000), sentRecipients: ["x@ext.example.jp"] })
+			.where(eq(outboundJobs.id, jobId));
+
+		await runProcessOnce(h, jobId, messageId);
+
+		expect(sent).toHaveLength(0);
+		const job = await db.select().from(outboundJobs).where(eq(outboundJobs.id, jobId)).get();
+		expect(job!.status).toBe("sent");
+		expect(job!.sentRecipients).toEqual(["x@ext.example.jp"]);
+	});
+});

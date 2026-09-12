@@ -27,5 +27,14 @@
 			"short_name": "検索",
 			"url": "/search?source=shortcut"
 		}
-	]
+	],
+	"share_target": {
+		"action": "/compose",
+		"method": "GET",
+		"params": {
+			"title": "subject",
+			"text": "body",
+			"url": "url"
+		}
+	}
 }

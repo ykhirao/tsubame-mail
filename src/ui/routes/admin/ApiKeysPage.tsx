@@ -13,6 +13,8 @@ import {
 	ErrorBanner,
 	formatDateTime,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -359,7 +361,8 @@ export function ApiKeysPage() {
 					{keys.length === 0 ? (
 						<EmptyState message="発行済みのキーはありません。" />
 					) : (
-						<div className="overflow-x-auto">
+						<>
+						<div className="hidden overflow-x-auto md:block">
 						<table className="w-full min-w-[720px]">
 							<thead>
 								<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -421,6 +424,59 @@ export function ApiKeysPage() {
 							</tbody>
 						</table>
 						</div>
+						<ul className="md:hidden">
+							{keys.map((k) => {
+								const revoked = k.revokedAt != null;
+								const expired =
+									!revoked && k.expiresAt != null && k.expiresAt * 1000 < Date.now();
+								return (
+									<li key={k.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+										<div className="flex items-start justify-between gap-2">
+											<div className="min-w-0">
+												<div className="font-medium text-[var(--text)]">{k.name}</div>
+												<div className="font-mono text-xs text-[var(--text-muted)]">{k.prefix}…</div>
+											</div>
+											{revoked ? (
+												<Badge color="red">失効</Badge>
+											) : expired ? (
+												<Badge color="yellow">期限切れ</Badge>
+											) : (
+												<Badge color="green">有効</Badge>
+											)}
+										</div>
+										<div className="mt-2 space-y-1">
+											<MobileField label="ユーザー">
+												{usersByName[k.userId]?.name ?? k.userId}
+											</MobileField>
+											<MobileField label="スコープ">
+												<div className="flex flex-wrap justify-end gap-1">
+													{k.scopes.map((s) => (
+														<Badge key={s} color="blue">
+															{s}
+														</Badge>
+													))}
+												</div>
+											</MobileField>
+											<MobileField label="対象">{addressOf(k.addressIds)}</MobileField>
+											<MobileField label="期限">
+												{k.expiresAt ? formatDateTime(k.expiresAt) : "無期限"}
+											</MobileField>
+										</div>
+										<MobileActions>
+											<Button variant="secondary" onClick={() => setRotateTarget(k)}>
+												{revoked ? "再発行" : "差し替え"}
+											</Button>
+											{!revoked && (
+												<Button variant="danger" onClick={() => setRevokeTarget(k)}>
+													失効
+												</Button>
+											)}
+										</MobileActions>
+									</li>
+								);
+							})}
+						</ul>
+						</>
 					)}
 				</Card>
 

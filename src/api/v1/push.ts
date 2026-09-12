@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { notificationSessionGuard } from "./notifications";
 import type { AppEnv } from "@/api/types";
+import { countUnread, loadPrefs } from "@/services/notify/prefs";
 
 const app = new Hono<AppEnv>();
 export default app;
@@ -37,6 +38,15 @@ app.get("/key", (c) => {
 	point.set(b64urlToBytes(jwk.x), 1);
 	point.set(b64urlToBytes(jwk.y), 33);
 	return c.json({ key: bytesToB64url(point) });
+});
+
+// アプリのアイコンのバッジは push で付けるが、他の端末で読んでも push は来ない。
+// 画面を開いたときにこの数で付け直す（数え方は通知に載せるバッジと同じ）。
+app.get("/badge", async (c) => {
+	const principal = c.get("principal");
+	const db = c.get("db");
+	const prefs = await loadPrefs(db, principal.userId);
+	return c.json({ count: await countUnread(db, principal.userId, principal.role, prefs) });
 });
 
 export { b64urlToBytes, bytesToB64url };

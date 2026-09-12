@@ -91,7 +91,7 @@ export function MyApiKeys({ addresses }: { addresses: MyAddress[] }) {
 			{keys.length > 0 && (
 				<ul className="mb-4 divide-y divide-[var(--line-soft)]">
 					{keys.map((k) => (
-						<li key={k.id} className="flex items-center gap-3 py-2 text-sm">
+						<li key={k.id} className="flex flex-wrap items-center gap-3 py-2 text-sm">
 							<span className="min-w-0 flex-1">
 								<span className="block truncate text-[var(--text)]">{k.name}</span>
 								<span className="block truncate text-xs text-[var(--text-muted)]">

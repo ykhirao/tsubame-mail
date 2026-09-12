@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
+import { auditLogs } from "@/db/schema";
 import devicesRoutes from "@/api/v1/devices";
 import pushRoutes from "@/api/v1/push";
 import { ApiError } from "@/shared/errors";
@@ -170,6 +171,34 @@ describe("端末の登録・更新・削除", () => {
 		expect((await otherApp.request(`/api/v1/me/devices/${created.id}`, { method: "DELETE" })).status).toBe(404);
 
 		expect((await app.request(`/api/v1/me/devices/${created.id}`, { method: "DELETE" })).status).toBe(204);
+	});
+
+	it("登録と削除を device.register / device.delete として記録する（エンドポイントは含めない）", async () => {
+		const member = await createUser({ role: "member" });
+		await createSession(member.id, "ses_aud");
+		const app = buildApp(sessionPrincipal(member.id, "member", "ses_aud"));
+
+		const created = (await (
+			await app.request("/api/v1/me/devices", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(devicePayload),
+			})
+		).json()) as { id: string };
+
+		let rows = await db().select().from(auditLogs).all();
+		const register = rows.find((r) => r.targetId === created.id);
+		expect(register?.action).toBe("device.register");
+		expect(register?.meta).toMatchObject({ name: "iPhone", platform: "ios" });
+		expect(JSON.stringify(register?.meta ?? null)).not.toContain(devicePayload.endpoint);
+		expect(JSON.stringify(register?.meta ?? null)).not.toContain("p256dh");
+		expect(JSON.stringify(register?.meta ?? null)).not.toContain("auth");
+
+		expect((await app.request(`/api/v1/me/devices/${created.id}`, { method: "DELETE" })).status).toBe(204);
+		rows = await db().select().from(auditLogs).all();
+		const del = rows.find((r) => r.action === "device.delete");
+		expect(del?.targetId).toBe(created.id);
+		expect(del?.meta).toMatchObject({ name: "iPhone" });
 	});
 
 	it("POST /test は OUTBOUND_QUEUE に test を積む", async () => {

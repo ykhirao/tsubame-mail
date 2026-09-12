@@ -715,4 +715,56 @@ describe("管理 API の監査（#95）", () => {
 		const rows = await getTestDb().select().from(auditLogs).all();
 		expect(rows.map((r) => r.action)).toContain("address.create");
 	});
+
+	it("アドレスの更新と削除が address.update / address.delete として記録される", async () => {
+		const id = await seedDomain("dom_audit_adr2", "mail.auditadr2.example.com");
+		const created = await callJson(adminAddresses(), "/", {
+			method: "POST",
+			body: JSON.stringify({ domainId: id, localPart: "inbox" }),
+		});
+		const addressId = created.json.data.id;
+
+		expect(
+			(
+				await callJson(adminAddresses(), `/${addressId}`, {
+					method: "PATCH",
+					body: JSON.stringify({ displayName: "更新" }),
+				})
+			).status,
+		).toBe(200);
+
+		let rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === addressId && r.action === "address.update")).toBeTruthy();
+
+		expect((await callJson(adminAddresses(), `/${addressId}`, { method: "DELETE" })).status).toBe(200);
+		rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === addressId && r.action === "address.delete")).toBeTruthy();
+	});
+
+	it("catch-all の変更が domain.catchall として記録される", async () => {
+		const id = await seedDomain("dom_audit_ca", "mail.auditca.example.com");
+		await getTestDb().insert(addresses).values({
+			id: "adr_audit_ca",
+			domainId: id,
+			localPart: "any",
+			address: "any@mail.auditca.example.com",
+			isCatchAll: true,
+		});
+
+		const res = await callJson(adminDomains(), `/${id}/catch-all`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: true, confirm: true }),
+		});
+		expect(res.status).toBe(200);
+		const rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === id && r.action === "domain.catchall")).toBeTruthy();
+	});
+
+	it("ドメイン切断が domain.disconnect として記録される", async () => {
+		const id = await seedDomain("dom_audit_del", "mail.auditdel.example.com");
+		const res = await callJson(adminDomains(), `/${id}`, { method: "DELETE" });
+		expect(res.status).toBe(200);
+		const rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === id && r.action === "domain.disconnect")).toBeTruthy();
+	});
 });

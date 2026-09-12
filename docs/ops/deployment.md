@@ -121,12 +121,12 @@ openssl rand -base64 32
 プッシュ通知（FR-16）を使うときだけ要る。未設定なら通知は送らず、判定の履歴だけが残る。
 
 ```bash
-node scripts/vapid-keys.mjs          # 1 行目の JSON を控える
+node scripts/vapid-keys.mjs          # 2 行目の JSON を控える
 npx wrangler secret put VAPID_PRIVATE_KEY
+npx wrangler secret put VAPID_SUBJECT   # 例: mailto:postmaster@<自分のドメイン>
 ```
 
-連絡先の `VAPID_SUBJECT` は `wrangler.jsonc` の `vars` にある。自分の `mailto:` に書き換える
-（push サービスが問題のあるときに連絡してくる宛先）。
+`VAPID_SUBJECT` は push サービスが問題のあるときに連絡してくる宛先。実環境の値なのでリポジトリには書かない。
 **鍵を変えると、全端末の購読が無効になる**。アプリは次に開いたとき公開鍵の違いに気付いて購読し直すが、
 それまでは通知が届かない。漏れたとき以外は変えない。
 
@@ -209,23 +209,33 @@ D1_DATABASE_ID="<手順2で控えたUUID>" ./scripts/deploy.sh --skip-build
 
 （`--skip-build` はビルド済みのとき用。初回は外してビルドから通す。）
 
+手動で `wrangler.local.jsonc` を d1 系コマンドに使いたいときは、`--keep-config` で生成物を残して使う:
+
+```bash
+D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh --skip-build --keep-config
+# 以後、このシェルで手動の d1 execute に --config wrangler.local.jsonc を付けられる
+```
+
+`wrangler.local.jsonc` はコミット対象外（`.gitignore` に明示）なので、生成し直せばいくらでも作り直せる。
+
 ---
 
 ## 5. マイグレーションを適用する
 
 `scripts/deploy.sh` が実行するため、通常は単独で叩く必要はない。
-手動で行う場合:
+手動で行う場合（`--keep-config` で `wrangler.local.jsonc` を残してから）:
 
 ```bash
 D1_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.local.jsonc --remote
 ```
 
-ただし `wrangler.local.jsonc` は生成物なので、**必ず `scripts/deploy.sh` 経由で**
-まとめて実行することを推奨する。
+`wrangler.local.jsonc` は生成物なので、**必ず `scripts/deploy.sh` 経由で**まとめて実行することを推奨する。
+`--keep-config` は手動の `d1 execute` / `d1 migrations` をそのまま流したいときのための導線で、
+不要になったら生成物は消してよい（再実行で作り直せる）。
 
 ### 5.1 既存環境への `0004_fts_delete_triggers` 適用について
 
-`0004` は最後に `INSERT INTO messages_fts VALUES ('rebuild')` を実行し、FTS 索引を**バッチ無しで
+`0004` は最後に `INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')` を実行し、FTS 索引を**バッチ無しで
 全件再構築**する。`deploy.sh` は `wrangler deploy` の**前**に `--remote` でマイグレーションを流すので、
 `messages` の行数が増えると D1 の実行時間上限（数万行を超えるあたりから現実的）に当たり得る。
 
@@ -234,7 +244,7 @@ D1_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.lo
 - **失敗したときの状態**は「トリガは新形式・索引は古いまま・デプロイ未実施」で止まる。
   `deploy.sh` は `set -euo pipefail` なので、この状態でデプロイには進まない。
 - **復旧手順**: `0004` の `'rebuild'` は後から単独で流し直せる。
-  `npx wrangler d1 execute DB --remote --config wrangler.local.jsonc --command "INSERT INTO messages_fts VALUES ('rebuild')"`
+  `npx wrangler d1 execute DB --remote --config wrangler.local.jsonc --command "INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')"`
   を実行して索引を構築してからデプロイを続ける。
 - 0004 は既存 SQL として書き換えない（スキーマの二重管理を避けるため）。
 

@@ -143,6 +143,7 @@ export function createApp() {
 
 	app.route("/api/v1/me/notifications", notificationRoutes);
 	app.route("/api/v1/me/devices", deviceRoutes);
+	app.route("/api/v1/push", pushRoutes);
 	app.route("/api/v1/me", meRoutes);
 	app.route("/api/v1/messages", messageRoutes);
 	app.route("/api/v1/messages", outboundRoutes);

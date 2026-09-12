@@ -56,7 +56,10 @@ export function NotificationMailboxDetail() {
 		}
 	};
 
-	const affectingRules = settings.rules.filter((r) => r.matcher.mailboxIds?.includes(mailbox.id));
+	// メールボックス未指定のルールは全アドレスを対象にするので、ここでも効いている。
+	const affectingRules = settings.rules.filter(
+		(r) => !r.matcher.mailboxIds || r.matcher.mailboxIds.length === 0 || r.matcher.mailboxIds.includes(mailbox.id),
+	);
 
 	const levelLabel = LEVELS.find((l) => l.value === mailbox.level)?.label ?? mailbox.level;
 
@@ -117,13 +120,13 @@ export function NotificationMailboxDetail() {
 						<button
 							key={r.id}
 							type="button"
-							onClick={() => navigate("/settings/notifications/rules")}
+							onClick={() => navigate(`/settings/notifications/rules/${r.id}`)}
 							className="flex min-h-11 w-full items-center justify-between rounded-lg px-3 text-left text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
 						>
 							<span className="truncate">{r.name}</span>
 							<span className="shrink-0 text-xs text-[var(--text-muted)]">
 								{r.action === "always"
-									? "必ず通知"
+									? "必ず通知（おやすみ時間も）"
 									: r.action === "normal"
 										? "通知"
 										: r.action === "silent"

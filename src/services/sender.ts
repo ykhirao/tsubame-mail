@@ -40,6 +40,9 @@ export function stripHeader(raw: string, name: string): string {
 	return head.replace(re, "") + rest;
 }
 
+// EmailMessage は 1 通につき 1 受信者なので、受信者ごとに 1 回送る。途中で失敗すると
+// それまでに送った分は既に届いている。onSent は 1 通送るたびに呼ばれ、呼び出し側が
+// 送信済みとして記録する。alreadySent に含まれる宛先は飛ばす（#21 / #59）。
 /** 失敗時は即座に throw する。backoff は呼び出し側の責任。 */
 export async function sendRawEmail(
 	env: CloudflareEnv,
@@ -49,8 +52,10 @@ export async function sendRawEmail(
 		cc?: SenderMailbox[];
 		bcc?: SenderMailbox[];
 		raw: string;
+		alreadySent?: Set<string>;
+		onSent?: (address: string) => void | Promise<void>;
 	},
-): Promise<{ messageId: string }> {
+): Promise<{ messageId: string; sentCount: number }> {
 	const recipients = collectRecipients({ to: params.to, cc: params.cc, bcc: params.bcc });
 	if (recipients.length === 0) throw new Error("送信先が指定されていません");
 
@@ -58,13 +63,16 @@ export async function sendRawEmail(
 	const raw = stripHeader(params.raw, "Bcc");
 
 	let lastId = "";
+	let sentCount = 0;
 	for (const r of recipients) {
-		const res = await env.EMAIL.send(
-			new EmailMessage(params.from.address, r.address, raw),
-		);
+		const key = normalizeAddress(r.address) ?? r.address.toLowerCase();
+		if (params.alreadySent && params.alreadySent.has(key)) continue;
+		const res = await env.EMAIL.send(new EmailMessage(params.from.address, r.address, raw));
 		lastId = res.messageId;
+		sentCount++;
+		if (params.onSent) await params.onSent(key);
 	}
-	return { messageId: lastId };
+	return { messageId: lastId, sentCount };
 }
 
 /** from 詐称の防止。`"all"` は owner。 */

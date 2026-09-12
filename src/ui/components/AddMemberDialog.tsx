@@ -30,11 +30,11 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 	};
 
 	const field =
-		"w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]";
+		"w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-base md:text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]";
 
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-			<div className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-6 shadow-lg">
+		<div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30 md:items-center md:p-4">
+			<div className="flex max-h-[92dvh] w-full max-w-md flex-col overflow-y-auto rounded-t-2xl border border-[var(--line)] bg-[var(--surface)] p-6 pb-[env(safe-area-inset-bottom)] shadow-lg md:rounded-2xl md:pb-6">
 				{issued ? (
 					<>
 						<h2 className="mb-1 text-lg font-bold text-[var(--text)]">メンバーを追加しました</h2>
@@ -56,7 +56,7 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 											void navigator.clipboard?.writeText(issued.password ?? "");
 											setCopied(true);
 										}}
-										className="shrink-0 rounded-full border border-[var(--line)] px-3 py-2 text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
+										className="shrink-0 rounded-full border border-[var(--line)] px-3 py-2 text-sm max-md:min-h-11 text-[var(--text)] hover:bg-[var(--surface-hover)]"
 									>
 										{copied ? "コピーしました" : "コピー"}
 									</button>
@@ -71,7 +71,7 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 						<button
 							type="button"
 							onClick={onClose}
-							className="w-full rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+							className="w-full rounded-full bg-[var(--accent)] px-4 py-2 text-sm max-md:min-h-11 font-medium text-white"
 						>
 							閉じる
 						</button>
@@ -119,14 +119,14 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 							<button
 								type="submit"
 								disabled={busy}
-								className="flex-1 rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+								className="flex-1 rounded-full bg-[var(--accent)] px-4 py-2 text-sm max-md:min-h-11 font-medium text-white disabled:opacity-50"
 							>
 								{busy ? "追加中…" : "追加する"}
 							</button>
 							<button
 								type="button"
 								onClick={onClose}
-								className="rounded-full border border-[var(--line)] px-4 py-2 text-sm text-[var(--text)]"
+								className="rounded-full border border-[var(--line)] px-4 py-2 text-sm max-md:min-h-11 text-[var(--text)]"
 							>
 								やめる
 							</button>

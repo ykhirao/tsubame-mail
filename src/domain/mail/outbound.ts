@@ -169,12 +169,23 @@ export async function processOutboundSend(
 			attachList,
 		);
 
+		// 宛先ごとに送った記録を残す。途中で失敗しても、既に送れた宛先には再送しない
+		// （#21 / #59。Cloudflare は 1 通で 1 受信者しか送れない）。全件記録済みなら何も送らず sent にする。
+		const sentLog = [...(job.sentRecipients ?? [])];
 		await sendRawEmail(env, {
 			from: { address: message.fromAddr, name: message.fromName ?? undefined },
 			to: parseMailboxes(message.toAddr),
 			cc: parseMailboxes(message.ccAddr),
 			bcc: parseMailboxes(message.bccAddr),
 			raw,
+			alreadySent: new Set(sentLog),
+			onSent: async (address) => {
+				sentLog.push(address);
+				await db
+					.update(outboundJobs)
+					.set({ sentRecipients: [...sentLog] })
+					.where(eq(outboundJobs.id, job.id));
+			},
 		});
 	} catch (err) {
 		const attempts = job.attempts;

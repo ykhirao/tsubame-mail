@@ -25,6 +25,9 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 // zod の門より先に当たって 500 になるので、バイト数で検査する（#89）。
 // 返信ではサーバが足す引用が入った後の本文にも同じ上限を掛ける（#115）。
 export const MAX_COMBINED_BODY_BYTES = 1536 * 1024;
+// mimetext は件名を =?utf-8?B?...?= の base64 に膨らませるので、998 文字のヘッダ上限より先に
+// UTF-8 バイト数で止める。#22 はここで黙って切らず、超える入力は API が 400 で弾く。
+export const MAX_SUBJECT_BYTES = 600;
 /** RFC 5322 のヘッダ行上限。base64 化後の長さなので、生バイト数はこれより少し余裕を持たせる。 */
 const base64LenForBytes = (bytes: number) => Math.ceil(bytes / 3) * 4;
 
@@ -63,7 +66,7 @@ const sendMessageBase = {
 	to: addressList,
 	cc: addressList.optional(),
 	bcc: addressList.optional(),
-	subject: z.string().max(998).optional(),
+	subject: z.string().optional(),
 	text: z.string().max(MAX_BODY_BYTES).optional(),
 	html: z.string().max(MAX_BODY_BYTES).optional(),
 	attachments: z.array(attachment).max(MAX_ATTACHMENTS, `添付は ${MAX_ATTACHMENTS} 件までです`).optional(),
@@ -82,6 +85,14 @@ function checkBodyBytes(
 	}
 	if (byteLength(input.html) > MAX_BODY_BYTES) {
 		ctx.addIssue({ code: "custom", message: "本文（html）は 1MB までです", path: ["html"] });
+	}
+	// z.string().max はコード単位を数えるため、日本語は文字数ではなくバイト数で弾く（#22）。
+	if (byteLength(input.subject) > MAX_SUBJECT_BYTES) {
+		ctx.addIssue({
+			code: "custom",
+			message: `件名は ${MAX_SUBJECT_BYTES} バイト（約 200 文字）までです`,
+			path: ["subject"],
+		});
 	}
 	const total = byteLength(input.text) + byteLength(input.html) + byteLength(input.subject);
 	if (total > MAX_COMBINED_BODY_BYTES) {

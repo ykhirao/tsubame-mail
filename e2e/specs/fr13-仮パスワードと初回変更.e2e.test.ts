@@ -8,6 +8,22 @@ import {
 	type Harness,
 } from "../harness";
 
+// UI の実装をソースの形で確かめる（fr09 / fr15 / fr17 と同じ流儀）。
+function rawBySuffix(modules: Record<string, string>, suffix: string): string {
+	const entry = Object.entries(modules).find(([k]) => k.endsWith(suffix));
+	if (!entry) throw new Error(`glob に無い: ${suffix}`);
+	return entry[1];
+}
+
+const usersPageText = rawBySuffix(
+	import.meta.glob("../../src/ui/routes/admin/UsersPage.tsx", {
+		query: "?raw",
+		import: "default",
+		eager: true,
+	}) as Record<string, string>,
+	"admin/UsersPage.tsx",
+);
+
 describe("FR-13 仮パスワードと初回変更", () => {
 	let h: Harness;
 	let owner: Client;
@@ -138,6 +154,16 @@ describe("FR-13 仮パスワードと初回変更", () => {
 				password: "member-new-password-123",
 			})).status,
 		).toBe(200);
+	});
+
+	scenario("FR-13", "ユーザー作成でパスワードを空にでき、仮パスワードを 1 度だけ表示する", () => {
+		// 空なら仮パスワードを発行する送信に変わる。
+		expect(usersPageText).toContain('password === "" || password.length >= 12');
+		expect(usersPageText).toContain('password: role === "agent" || password === "" ? undefined : password');
+		// 作成の応答の temporaryPassword を拾って、閉じる前に一枚見せる。
+		expect(usersPageText).toContain("temporaryPassword");
+		expect(usersPageText).toContain("setTemporaryPassword(res.temporaryPassword)");
+		expect(usersPageText).toContain("仮パスワードはこれきりしか表示されません");
 	});
 
 	scenario("FR-13", "agent はパスワードを持たず、仮パスワードも発行されない", async () => {

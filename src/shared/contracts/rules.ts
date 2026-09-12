@@ -11,13 +11,15 @@ export type RuleMatcher = z.infer<typeof matcherSchema>;
 
 export const scopeSchema = z.enum(["domain", "address"]);
 export const ruleActionSchema = z.enum(["deliver", "forward", "reject", "drop", "mark"]);
+export const markTargetSchema = z.enum(["read", "unread", "star", "unstar"]);
 
 /** target の存在検査（deliver の宛先 id など）は DB が要るのでルータ側で行う。 */
 const emailShape = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const targetMatchesAction = (v: { action: z.infer<typeof ruleActionSchema>; target?: string | null }) => {
-	if (v.action !== "forward") return true;
-	return typeof v.target === "string" && emailShape.test(v.target);
+	if (v.action === "forward") return typeof v.target === "string" && emailShape.test(v.target);
+	if (v.action === "mark") return typeof v.target === "string" && markTargetSchema.safeParse(v.target).success;
+	return true;
 };
 
 const baseRuleSchema = z.object({
@@ -34,9 +36,16 @@ const baseRuleSchema = z.object({
 	enabled: z.boolean().default(true),
 });
 
-export const createRuleSchema = baseRuleSchema.refine(targetMatchesAction, {
-	message: "forward の target はメールアドレスの形式である必要があります",
-	path: ["target"],
+export const createRuleSchema = baseRuleSchema.superRefine((v, ctx) => {
+	if (targetMatchesAction({ action: v.action, target: v.target })) return;
+	ctx.addIssue({
+		code: "custom",
+		path: ["target"],
+		message:
+			v.action === "forward"
+				? "forward の target はメールアドレスの形式である必要があります"
+				: "mark の target は read / unread / star / unstar のいずれかである必要があります",
+	});
 });
 export type CreateRule = z.infer<typeof createRuleSchema>;
 

@@ -69,12 +69,12 @@ npx wrangler queues info tsubame-outbound
 ### 3.1 `outbound_jobs` を確認する
 
 ```bash
-# D1 をローカルで触る場合（実際は本番なので --remote）
-npx wrangler d1 execute tsubame --remote --command \
-  "SELECT job_id, message_id, status, attempts, last_error, next_attempt_at FROM outbound_jobs ORDER BY created_at DESC LIMIT 20;"
+# scripts/deploy.sh --keep-config で生成した設定を使う（database_id の実 ID が要る）
+npx wrangler d1 execute DB --config wrangler.local.jsonc --remote --command \
+  "SELECT id, message_id, status, attempts, last_error, next_attempt_at FROM outbound_jobs ORDER BY created_at DESC LIMIT 20;"
 ```
 
-（`job_id` などの実カラム名は `src/db/schema.ts` の `outbound_jobs` を確認。）
+（`id` などの実カラム名は `src/db/schema.ts` の `outbound_jobs` を確認。）
 
 ### 3.2 典型的な原因
 
@@ -84,12 +84,16 @@ npx wrangler d1 execute tsubame --remote --command \
 - **差出人が許可されていない**: Email Sending で送れる送信元アドレスの承認が漏れている。
 - **ゾーン設定エラー**: 送信ドメインの SPF / DKIM レコードが古い・無い。
 
-対処は原因に応じた設定修正。直したら失敗ジョブを再試行に戻す:
-```bash
-npx wrangler d1 execute tsubame --remote --command \
-  "UPDATE outbound_jobs SET status='queued', attempts=0, last_error=NULL, next_attempt_at=strftime('%s','now') WHERE status='failed';"
-```
-（必要に応じて対象のジョブ ID で絞る。実行前に必ずバックアップを取る）
+対処は原因に応じた設定修正。
+
+**直したあと、`failed` ジョブを SQL で `status='queued'` に戻しても再送はされない。** 送信ジョブの
+再配達は OUTBOUND キュー（`OUTBOUND_QUEUE`）のメッセージをコンシューマが拾うことで起き、
+`outbound_jobs` の行を表から拾うスイープは無い。試行回数の上限（`src/domain/mail/outbound.ts` の
+`OUTBOUND_MAX_ATTEMPTS`）を超えた `failed` はそのまま終端し、対応するメッセージも `failed` になる。
+
+再送したいなら、アプリの作成画面（または `POST /api/v1/messages`）から**そのメールを作り直して送る**。
+一時的な失敗（権限・SPF/DKIM の整備待ちなど）は、そもそも上限内の指数バックオフで自動再送されるので、
+設定修正はその再送が追いつく前に終えるのが正しい。
 
 ---
 

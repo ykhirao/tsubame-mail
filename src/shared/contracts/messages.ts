@@ -16,6 +16,8 @@ const boolParam = z
 /** 単体取得系は既定でゴミ箱を除く。true でゴミ箱のメッセージも含める。 */
 export const detailQuery = z.object({
 	includeTrash: boolParam,
+	/** これより古いメッセージを取るカーソル。threadDetailResponse.olderCursor を渡す。 */
+	before: z.string().optional(),
 });
 export type DetailQuery = z.infer<typeof detailQuery>;
 
@@ -136,5 +138,11 @@ export const threadDetailResponse = z.object({
 	addressId: z.string(),
 	subject: z.string().nullable(),
 	messages: z.array(messageDetail),
+	/** これより古いメッセージがあるか。true なら olderCursor で更に古い側を取得できる。 */
+	hasOlder: z.boolean(),
+	/** これより古いメッセージを取るカーソル。detailQuery.before に渡す。 */
+	olderCursor: z.string().nullable(),
+	/** まだ取得していない古い方の残り件数。 */
+	olderCount: z.number(),
 });
 export type ThreadDetailResponse = z.infer<typeof threadDetailResponse>;

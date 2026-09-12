@@ -12,6 +12,8 @@ import {
 	ErrorBanner,
 	formatDateTime,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -67,7 +69,8 @@ function DomainList({
 			{domains.length === 0 ? (
 				<EmptyState message="接続済みのドメインはありません。「ドメインを接続」から追加してください。" />
 			) : (
-				<div className="overflow-x-auto">
+				<>
+				<div className="hidden overflow-x-auto md:block">
 				<table className="w-full min-w-[720px]">
 					<thead>
 						<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -126,6 +129,48 @@ function DomainList({
 					</tbody>
 				</table>
 				</div>
+				<ul className="md:hidden">
+					{domains.map((d) => (
+						<li key={d.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+							<div className="flex items-center justify-between gap-2">
+								<div className="min-w-0">
+									<div className="font-medium text-[var(--text)]">{d.name}</div>
+									<div className="text-xs text-[var(--text-muted)]">{d.zoneName}</div>
+								</div>
+								<Badge color={modeBadge(d.mode)}>
+									{d.mode === "apex" ? "apex" : "サブドメイン"}
+								</Badge>
+							</div>
+							<div className="mt-2 space-y-1">
+								<MobileField label="受信">
+									<Badge color={statusBadge(d.routingStatus)}>{d.routingStatus}</Badge>
+								</MobileField>
+								<MobileField label="送信">
+									<Badge color={statusBadge(d.sendingStatus)}>{d.sendingStatus}</Badge>
+								</MobileField>
+								<MobileField label="catch-all">
+									<Button
+										variant="ghost"
+										onClick={() => onToggleCatchAll(d)}
+										title={d.catchAllEnabled ? "無効化する" : "有効化する"}
+									>
+										{d.catchAllEnabled ? "有効" : "無効"}
+									</Button>
+								</MobileField>
+								<MobileField label="接続日">{formatDateTime(d.createdAt)}</MobileField>
+							</div>
+							<MobileActions>
+								<Button variant="secondary" onClick={() => onVerify(d)}>
+									再検査
+								</Button>
+								<Button variant="danger" onClick={() => onDelete(d)}>
+									削除
+								</Button>
+							</MobileActions>
+						</li>
+					))}
+				</ul>
+				</>
 			)}
 			{domains.some((d) => d.catchAllEnabled) && (
 				<div className="border-t border-[var(--line)] px-5 py-3">

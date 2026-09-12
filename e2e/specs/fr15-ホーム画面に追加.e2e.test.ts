@@ -75,7 +75,22 @@ describe("FR-15 ホーム画面に追加（PWA）", () => {
 		expect(manifest.icons.some((i) => i.sizes === "512x512" && i.purpose === "maskable")).toBe(true);
 	});
 
-	scenario("FR-15", "Service Worker は /api/ をキャッシュせず、/sw.js をハッシュなしで出す", async () => {
+	scenario("FR-15", "manifest に share_target があり、作成画面へ件名と本文を渡す", async () => {
+	const manifest = JSON.parse(manifestText) as {
+		share_target: {
+			action: string;
+			method: string;
+			params: { title: string; text: string; url: string };
+		};
+	};
+	expect(manifest.share_target.action).toBe("/compose");
+	expect(manifest.share_target.method).toBe("GET");
+	expect(manifest.share_target.params.title).toBe("subject");
+	expect(manifest.share_target.params.text).toBe("body");
+	expect(manifest.share_target.params.url).toBe("url");
+});
+
+scenario("FR-15", "Service Worker は /api/ をキャッシュせず、/sw.js をハッシュなしで出す", async () => {
 		// sw.ts の fetch ハンドラは /api/ のリクエストをキャッシュせず素通しする。
 		expect(swText).toMatch(/startsWith\("\/api\/"\)/);
 		expect(swText).toMatch(/SHELL_ROOTS/);

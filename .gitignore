@@ -8,3 +8,4 @@ node_modules
 node_modules/
 wrangler.local.jsonc
 docs/build
+wrangler.cleanup.jsonc

@@ -169,7 +169,7 @@ export const AddressesApi = {
 export const ThreadsApi = {
 	list: (query: ThreadListParams = {}) =>
 		request<ThreadListResponse>(`/threads${qs(query)}`),
-	get: (id: string, opts: { includeTrash?: boolean } = {}) =>
+	get: (id: string, opts: { includeTrash?: boolean; before?: string } = {}) =>
 		request<ThreadDetailResponse>(`/threads/${id}${qs(opts)}`),
 };
 
@@ -246,7 +246,7 @@ export const NotificationsApi = {
 		}),
 	dryRun: (body: DryRunInput = {}) =>
 		request<{ data: DryRunEntry[] }>("/me/notifications/dry-run", { method: "POST", body }),
-	feed: (query: { limit?: number; cursor?: string; include_dropped?: 1 } = {}) =>
+	feed: (query: { limit?: number; cursor?: string; include_dropped?: 1; hold_group?: string } = {}) =>
 		request<FeedResponse>(`/me/notifications/feed${qs(query)}`),
 	markFeedSeen: () =>
 		request<{ feed_seen_at: number; unseen_count: number }>("/me/notifications/feed/seen", {
@@ -272,4 +272,5 @@ export const DevicesApi = {
 	test: (id: string) => request<{ queued: boolean }>(`/me/devices/${id}/test`, { method: "POST" }),
 	seen: (id: string) => request<unknown>(`/me/devices/${id}/seen`, { method: "POST" }),
 	pushKey: () => request<{ key: string | null }>("/push/key"),
+	badge: () => request<{ count: number }>("/push/badge"),
 };

@@ -1,4 +1,4 @@
-import { and, eq, lt, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { loadPrefs } from "./prefs";
@@ -70,9 +70,9 @@ export async function loadMessageContext(db: Db, messageId: string): Promise<Mes
 			hasAttachments: m.hasAttachments,
 			spamVerdict: m.spamVerdict,
 			discarded: m.status === "trash",
-			markedRead: m.isRead,
+			markedRead: false,
 		},
-		mailbox: { id: mailbox.id, address: mailbox.address, isCatchAll: mailbox.isCatchAll },
+		mailbox: { id: mailbox.id, address: mailbox.address, name: mailbox.displayName ?? mailbox.address, isCatchAll: mailbox.isCatchAll },
 		thread,
 		sentByUserId: m.sentByUserId,
 		envelopeTo: m.envelopeTo,
@@ -93,6 +93,20 @@ export async function loadLastNotifiedAt(db: Db, userId: string, threadId: strin
 		)
 		.get();
 	return row?.at == null ? null : Number(row.at) * 1000;
+}
+
+/** 1 通目の通知以降に同じ会話へ届いた件数。連続まとめ(14)の「新着 N 件」の N。 */
+export async function countThreadMessagesSince(
+	db: Db,
+	threadId: string,
+	sinceMs: number,
+): Promise<number> {
+	const row = await db
+		.select({ n: sql<number>`count(*)` })
+		.from(schema.messages)
+		.where(and(eq(schema.messages.threadId, threadId), gte(schema.messages.receivedAt, new Date(sinceMs))))
+		.get();
+	return Number(row?.n ?? 0);
 }
 
 export async function loadThreadPref(
@@ -122,8 +136,39 @@ export async function countEnabledDevices(db: Db, userId: string): Promise<numbe
 	return Number(row?.n ?? 0);
 }
 
+/** digest の対象メッセージが届いたメールボックスの一覧。端末フィルタ（PN-5-8）に使う。 */
+export async function loadMessageAddressIds(db: Db, messageIds: string[]): Promise<string[]> {
+	if (messageIds.length === 0) return [];
+	const rows = await db
+		.select({ addressId: schema.messages.addressId })
+		.from(schema.messages)
+		.where(inArray(schema.messages.id, messageIds));
+	return [...new Set(rows.map((r) => r.addressId))];
+}
+
 export async function loadDevices(db: Db, userId: string) {
-	return db.select().from(schema.pushDevices).where(eq(schema.pushDevices.userId, userId)).all();
+	const rows = await db.select().from(schema.pushDevices).where(eq(schema.pushDevices.userId, userId)).all();
+	// セッションが無い・切れた端末には届かず、掃除も兼ねて消す（#130）。
+	// 端末数は #133 で 10 台上限、bind 変数は 100 個以内に収まる。
+	const live = new Set<string>();
+	const sessionIds = [...new Set(rows.flatMap((r) => (r.sessionId ? [r.sessionId] : [])))];
+	if (sessionIds.length > 0) {
+		const sessions = await db
+			.select({ id: schema.sessions.id, expiresAt: schema.sessions.expiresAt })
+			.from(schema.sessions)
+			.where(inArray(schema.sessions.id, sessionIds))
+			.all();
+		const now = Date.now();
+		for (const s of sessions) if (s.expiresAt.getTime() > now) live.add(s.id);
+	}
+	const valid = rows.filter((r) => r.sessionId !== null && live.has(r.sessionId));
+	const stale = rows.filter((r) => r.sessionId === null || !live.has(r.sessionId));
+	if (stale.length > 0) {
+		await db
+			.delete(schema.pushDevices)
+			.where(and(eq(schema.pushDevices.userId, userId), inArray(schema.pushDevices.id, stale.map((r) => r.id))));
+	}
+	return valid;
 }
 
 export async function loadUserForDecide(

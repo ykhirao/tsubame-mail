@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router";
 import { DevicesApi, NotificationsApi } from "@/ui/lib/api";
 import type { NotificationSettings, Device } from "@/shared/contracts/notifications";
-import { getDeviceStatus, getRegisteredDeviceId, subscribeDevice } from "@/ui/lib/push";
+import { getDeviceStatus, getRegisteredDeviceId } from "@/ui/lib/push";
 import { guessDeviceName } from "@/ui/lib/push";
 import { Scaffold, Card, SettingRow, Toggle, Chevron } from "./shared";
+import { formatQuietRange } from "./ruleShared";
 import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 
 const displayLabel = {
@@ -13,11 +14,29 @@ const displayLabel = {
 	minimal: "最小限",
 } as const;
 
+function pauseUntilLabel(untilSec: number): string {
+	const d = new Date(untilSec * 1000);
+	const time = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(d);
+	const now = new Date();
+	const startOfToday = new Date(now);
+	startOfToday.setHours(0, 0, 0, 0);
+	const startOfTomorrow = new Date(startOfToday);
+	startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+	if (d >= startOfTomorrow) {
+		const dayAfter = new Date(startOfTomorrow);
+		dayAfter.setDate(dayAfter.getDate() + 1);
+		return d < dayAfter ? `明日 ${time}` : `${d.getMonth() + 1}/${d.getDate()} ${time}`;
+	}
+	return time;
+}
+
 export function NotificationSettingsTop() {
 	const navigate = useNavigate();
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [devices, setDevices] = useState<Device[]>([]);
 	const [pausedOpen, setPausedOpen] = useState(false);
+	const [customPause, setCustomPause] = useState(false);
+	const [customUntil, setCustomUntil] = useState("");
 	const [presetBusy, setPresetBusy] = useState<"all" | "important" | null>(null);
 	const [busySwitch, setBusySwitch] = useState(false);
 
@@ -40,6 +59,15 @@ export function NotificationSettingsTop() {
 	const notifiedCount = settings.mailboxes.filter((m) => m.level !== "off").length;
 	const alwaysRules = settings.rules.filter((r) => r.action === "always").length;
 	const brokenDevices = devices.filter((d) => d.failureCount > 0).length;
+	const catchAllCount = settings.mailboxes.filter((m) => m.isCatchAll).length;
+	const burstLabel =
+		settings.burst_window_sec === 60
+			? "1 分でまとめる"
+			: settings.burst_window_sec === 300
+				? "5 分でまとめる"
+				: settings.burst_window_sec === 900
+					? "15 分でまとめる"
+					: null;
 
 	const applyPreset = async (preset: "all" | "important") => {
 		setPresetBusy(preset);
@@ -84,11 +112,14 @@ export function NotificationSettingsTop() {
 
 	const now = Date.now() / 1000;
 	const pausedAt = settings.paused_until && settings.paused_until > now ? settings.paused_until : null;
-	const pausedTime = pausedAt ? new Date(pausedAt * 1000).toLocaleString("ja-JP") : null;
+	const pausedTime = pausedAt ? pauseUntilLabel(pausedAt) : null;
+
+
 
 	let quietSummary = "設定なし";
 	if (settings.quiet) {
-		quietSummary = settings.quiet.mode === "digest" ? "終わったときにまとめて 1 通" : "通知しない";
+		const range = settings.quiet.ranges.map(formatQuietRange).join("、");
+		quietSummary = `${range ? `${range} は` : ""}${settings.quiet.mode === "digest" ? "終わったときにまとめて通知" : "通知しない"}`;
 	}
 
 	return (
@@ -106,16 +137,12 @@ export function NotificationSettingsTop() {
 				</div>
 				{status === "unregistered" && (
 					<div className="px-4 pb-4">
-						<button
-							type="button"
-							onClick={async () => {
-								await subscribeDevice();
-								load();
-							}}
+						<Link
+							to="/welcome/notifications"
 							className="inline-flex h-12 min-w-44 items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 text-sm font-medium text-white hover:opacity-90"
 						>
 							この端末で受け取る
-						</button>
+						</Link>
 					</div>
 				)}
 				<SettingRow
@@ -159,6 +186,34 @@ export function NotificationSettingsTop() {
 									{o.label}
 								</button>
 							))}
+							<button
+								type="button"
+								onClick={() => setCustomPause(true)}
+								className="h-11 rounded-full border border-[var(--line)] px-4 text-sm text-[var(--text)] hover:bg-[var(--surface-hover)]"
+							>
+								指定の日時まで
+							</button>
+						</div>
+					)}
+					{customPause && (
+						<div className="mt-2 flex items-center gap-2">
+							<input
+								type="datetime-local"
+								value={customUntil}
+								onChange={(e) => setCustomUntil(e.target.value)}
+								className="h-11 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+							/>
+							<button
+								type="button"
+								disabled={!customUntil}
+								onClick={() => {
+									const t = new Date(customUntil).getTime() / 1000;
+									if (t > now) pause(t);
+								}}
+								className="h-11 rounded-full border border-[var(--accent)] px-4 text-sm font-medium text-[var(--accent)] hover:bg-[var(--surface-hover)] disabled:opacity-40"
+							>
+								設定
+							</button>
 						</div>
 					)}
 					<div className="mt-2 text-xs text-[var(--text-muted)]">
@@ -167,6 +222,7 @@ export function NotificationSettingsTop() {
 				</div>
 			</Card>
 
+			<div className={!settings.enabled ? "pointer-events-none opacity-50" : ""}>
 			<div className="card p-4">
 				<div className="mb-2 text-sm text-[var(--text)]">プリセット</div>
 				<div className="flex flex-col gap-1">
@@ -220,7 +276,7 @@ export function NotificationSettingsTop() {
 				/>
 				<SettingRow
 					title="表示とまとめ方"
-					subtitle={`${displayLabel[settings.display]} / 同じ会話は 1 件`}
+					subtitle={`${displayLabel[settings.display]}${settings.group_by_thread ? " / 同じ会話は 1 件" : ""}${burstLabel ? ` / ${burstLabel}` : ""}`}
 					trailing={<Chevron />}
 					onClick={() => navigate("/settings/notifications/display")}
 				/>
@@ -241,7 +297,7 @@ export function NotificationSettingsTop() {
 								<CatchAllBadge />
 							</span>
 						}
-						subtitle="宛先が見つからないメールが届いたときに通知します。オフでも「必ず通知」のルールに一致したものは通知します"
+						subtitle={`宛先が見つからないメールが届いたとき（受け皿 ${catchAllCount} 個）。オフでも「必ず通知」のルールに一致したものは通知します`}
 						trailing={
 							<Toggle
 								checked={settings.notify_catch_all}
@@ -276,6 +332,8 @@ export function NotificationSettingsTop() {
 					onClick={() => navigate("/notifications")}
 				/>
 			</Card>
+
+			</div>
 
 			{getRegisteredDeviceId() && (
 				<Link

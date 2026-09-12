@@ -11,6 +11,11 @@ export type ParsedAttachment = {
 	content: Uint8Array;
 };
 
+export type InboundAuth = {
+	dmarc: "pass" | "fail" | "none" | null;
+	dkimPassDomains: string[];
+};
+
 export type ParsedMessage = {
 	/** 山括弧を外した値。 */
 	messageId: string | null;
@@ -26,7 +31,32 @@ export type ParsedMessage = {
 	date: number | null;
 	snippet: string;
 	attachments: ParsedAttachment[];
+	/** CF ブロックが無い・判定が無いときは null。 */
+	inboundAuth: InboundAuth | null;
+	/** CF ブロックの `X-CF-SpamH-Score`。無ければ null。 */
+	cfSpamScore: number | null;
 };
+
+// X-CF-SpamH-Score の尺度は確定していない（#128）。実運用でスコアを集めてから決めるまでは、
+// 仮に 5 以上を suspicious、それ未満を clean とし、spam は出さない。
+export function spamVerdictFromScore(score: number | null): "clean" | "suspicious" | null {
+	if (score === null) return null;
+	return score >= 5 ? "suspicious" : "clean";
+}
+
+// Cloudflare は判定ヘッダをまとめた「CF ブロック」をメールの一番上に足す。1 本目の Received が
+// mx.cloudflare.net 経由でなければブロックは無い。それ以外の名前のヘッダ（Google の Received など）が
+// 来たらブロックは終わる。#6740 では Authentication-Results が無いことがあるため、位置を偽れない
+// ARC-Authentication-Results を正として、Authentication-Results はそれとの一致だけを確認に使う。
+const CF_BLOCK_KEYS = new Set([
+	"arc-seal",
+	"arc-message-signature",
+	"arc-authentication-results",
+	"received-spf",
+	"authentication-results",
+	"x-cf-spamh-score",
+]);
+const CF_RECEIVED_MARKER = "by mx.cloudflare.net";
 
 // postal-mime は encoded-word をデコードするので、Message-ID 系ヘッダに CRLF が混入しうる
 // （実害は無いが、返信生成時に assertNoLineBreak が throw して失敗する）。トークンをこの形に絞る。
@@ -101,6 +131,68 @@ function buildSnippet(text: string | null | undefined, html: string | null | und
 	return raw.replace(/\s+/g, " ").slice(0, 200);
 }
 
+function parseAuthResult(value: string): InboundAuth {
+	let dmarc: InboundAuth["dmarc"] = null;
+	const dkimDomains: string[] = [];
+	for (const token of value.split(";")) {
+		const t = token.trim();
+		const dm = /^dmarc=(pass|fail|none)\b/.exec(t);
+		if (dm) dmarc = dm[1] as InboundAuth["dmarc"];
+		const dk = /^dkim=pass header\.d=([^\s;]+)/.exec(t);
+		if (dk) dkimDomains.push(dk[1]!);
+	}
+	return dkimDomains.length > 0 || dmarc !== null ? { dmarc, dkimPassDomains: dkimDomains } : { dmarc: null, dkimPassDomains: [] };
+}
+
+function sameVerdict(a: InboundAuth, b: InboundAuth): boolean {
+	if (a.dmarc !== b.dmarc) return false;
+	if (a.dkimPassDomains.length !== b.dkimPassDomains.length) return false;
+	const bSet = new Set(b.dkimPassDomains);
+	return a.dkimPassDomains.every((d) => bSet.has(d));
+}
+
+type Header = { key: string; originalKey: string; value: string };
+
+function cfBlock(headers: Header[]): Header[] {
+	const first = headers[0];
+	if (!first || first.key !== "received" || !first.value.includes(CF_RECEIVED_MARKER)) return [];
+	const block = [first];
+	for (const h of headers.slice(1)) {
+		if (!CF_BLOCK_KEYS.has(h.key)) break;
+		block.push(h);
+	}
+	return block;
+}
+
+function inboundAuthFrom(headers: Header[]): InboundAuth | null {
+	const block = cfBlock(headers);
+	if (block.length === 0) return null;
+	const auth = block.find((h) => h.key === "authentication-results")?.value;
+	const arc = block.find((h) => h.key === "arc-authentication-results")?.value;
+	// ARC は位置的に偽れないので正とする。#6740 の形（本物の Authentication-Results が無く送信者が偽を
+	// 置いた）でも、ARC と食い違えば未認証になる。
+	if (arc) {
+		const arcVerdict = parseAuthResult(arc);
+		if (auth && !sameVerdict(parseAuthResult(auth), arcVerdict)) return null;
+		return arcVerdict.dmarc !== null || arcVerdict.dkimPassDomains.length > 0 ? arcVerdict : null;
+	}
+	if (auth) {
+		const verdict = parseAuthResult(auth);
+		return verdict.dmarc !== null || verdict.dkimPassDomains.length > 0 ? verdict : null;
+	}
+	return null;
+}
+
+function cfSpamScoreFrom(headers: Header[]): number | null {
+	const block = cfBlock(headers);
+	for (const h of block) {
+		if (h.key !== "x-cf-spamh-score") continue;
+		const n = Number(h.value.trim());
+		if (!Number.isNaN(n)) return n;
+	}
+	return null;
+}
+
 export async function parseRawMime(raw: Uint8Array | ArrayBuffer | string): Promise<ParsedMessage> {
 	const email: Email = await PostalMime.parse(raw);
 
@@ -133,5 +225,7 @@ export async function parseRawMime(raw: Uint8Array | ArrayBuffer | string): Prom
 		date: parseDate(email.date, null),
 		snippet: buildSnippet(email.text, email.html),
 		attachments,
+		inboundAuth: inboundAuthFrom(email.headers),
+		cfSpamScore: cfSpamScoreFrom(email.headers),
 	};
 }

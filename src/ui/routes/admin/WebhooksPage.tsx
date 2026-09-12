@@ -12,6 +12,8 @@ import {
 	ErrorBanner,
 	formatDateTime,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -248,7 +250,7 @@ function DeliveriesModal({ webhook, onClose }: { webhook: Webhook; onClose: () =
 				<EmptyState message="配信履歴はまだありません。" />
 			) : (
 				<div className="max-h-96 overflow-y-auto rounded-md border border-[var(--line)]">
-					<div className="overflow-x-auto">
+					<div className="hidden overflow-x-auto md:block">
 					<table className="w-full min-w-[720px]">
 						<thead className="sticky top-0 bg-[var(--surface-sunken)]">
 							<tr className="border-b border-[var(--line)]">
@@ -285,6 +287,30 @@ function DeliveriesModal({ webhook, onClose }: { webhook: Webhook; onClose: () =
 						</tbody>
 					</table>
 					</div>
+					<ul className="md:hidden">
+						{items.map((d) => (
+							<li key={d.id} className="border-b border-[var(--line-soft)] px-3 py-2">
+								<div className="flex items-center justify-between gap-2">
+									<span className="text-sm font-medium text-[var(--text)]">{eventLabels[d.event]}</span>
+									<Badge color={d.status === "success" ? "green" : d.status === "failed" ? "red" : "yellow"}>
+										{d.status}
+									</Badge>
+								</div>
+								{d.error && <div className="mt-1 text-xs text-[var(--danger)]">{d.error}</div>}
+								<div className="mt-1 space-y-0.5 text-sm">
+									<div className="text-[var(--text-muted)]">{formatDateTime(d.createdAt)}</div>
+									<div className="text-[var(--text)]">HTTP: {d.httpStatus ?? "—"} / 試行: {d.attempt}</div>
+								</div>
+								{d.status === "failed" && (
+									<div className="mt-1">
+										<Button variant="secondary" disabled={retrying === d.id} onClick={() => retry(d)}>
+											{retrying === d.id ? "再送中…" : "再送"}
+										</Button>
+									</div>
+								)}
+							</li>
+						))}
+					</ul>
 				</div>
 			)}
 		</Modal>
@@ -349,7 +375,8 @@ export function WebhooksPage() {
 					{webhooks.length === 0 ? (
 						<EmptyState message="Webhook はまだありません。「Webhook を作成」から追加してください。" />
 					) : (
-						<div className="overflow-x-auto">
+						<>
+						<div className="hidden overflow-x-auto md:block">
 						<table className="w-full min-w-[720px]">
 							<thead>
 								<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -401,6 +428,41 @@ export function WebhooksPage() {
 							</tbody>
 						</table>
 						</div>
+						<ul className="md:hidden">
+							{webhooks.map((w) => (
+								<li key={w.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+									<div className="flex items-center justify-between gap-2">
+										<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{w.name}</span>
+										<Badge color={w.enabled ? "green" : "gray"}>{w.enabled ? "有効" : "無効"}</Badge>
+									</div>
+									<div className="mt-1 break-all font-mono text-xs text-[var(--text-muted)]">{w.url}</div>
+									<div className="mt-2 space-y-1">
+										<MobileField label="イベント">
+											<div className="flex flex-wrap justify-end gap-1">
+												{w.events.map((e) => (
+													<Badge key={e} color="blue">
+														{eventLabels[e]}
+													</Badge>
+												))}
+											</div>
+										</MobileField>
+										<MobileField label="対象">{addressLabel(w.addressIds)}</MobileField>
+									</div>
+									<MobileActions>
+										<Button variant="secondary" onClick={() => setEditTarget(w)}>
+											編集
+										</Button>
+										<Button variant="secondary" onClick={() => setDeliveriesTarget(w)}>
+											配信履歴
+										</Button>
+										<Button variant="danger" onClick={() => setDeleteTarget(w)}>
+											削除
+										</Button>
+									</MobileActions>
+								</li>
+							))}
+						</ul>
+						</>
 					)}
 				</Card>
 

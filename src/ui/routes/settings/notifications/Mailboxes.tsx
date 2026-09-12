@@ -81,6 +81,7 @@ export function NotificationMailboxes() {
 					<MailboxRow
 						key={m.id}
 						mailbox={m}
+						catchAllOff={m.isCatchAll && !settings.notify_catch_all}
 						onClick={() => navigate(`/settings/notifications/mailboxes/${m.id}`)}
 					/>
 				))}
@@ -96,6 +97,7 @@ export function NotificationMailboxes() {
 							<MailboxRow
 								key={m.id}
 								mailbox={m}
+								catchAllOff={m.isCatchAll && !settings.notify_catch_all}
 								onClick={() => navigate(`/settings/notifications/mailboxes/${m.id}`)}
 							/>
 						))}
@@ -108,31 +110,43 @@ export function NotificationMailboxes() {
 
 function MailboxRow({
 	mailbox,
+	catchAllOff,
 	onClick,
 }: {
 	mailbox: {
 		id: string;
 		address: string;
+		displayName: string | null;
 		color: string;
 		isCatchAll: boolean;
 		level: NotificationLevel;
 	};
+	catchAllOff: boolean;
 	onClick: () => void;
 }) {
+	const primary = mailbox.displayName || mailbox.address;
 	return (
 		<button
 			type="button"
 			onClick={onClick}
-			className="flex min-h-[64px] w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
+			className={`flex min-h-[64px] w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-hover)] ${
+				catchAllOff ? "opacity-50" : ""
+			}`}
 		>
 			<MailboxDot color={mailbox.color} />
 			<span className="min-w-0 flex-1">
 				<span className="flex items-center gap-2">
-					<span className={`truncate text-sm ${mailbox.level === "off" ? "text-[var(--text-muted)]" : "text-[var(--text)]"}`}>
-						{mailbox.address}
+					<span className={`truncate text-sm ${mailbox.level === "off" || catchAllOff ? "text-[var(--text-muted)]" : "text-[var(--text)]"}`}>
+						{primary}
 					</span>
 					{mailbox.isCatchAll && <CatchAllBadge />}
 				</span>
+				{mailbox.displayName && mailbox.address !== primary && (
+					<span className="block truncate text-xs text-[var(--text-muted)]">{mailbox.address}</span>
+				)}
+				{catchAllOff && (
+					<span className="block text-xs text-[var(--text-muted)]">キャッチオールの通知がオフです</span>
+				)}
 			</span>
 			<LevelChip level={mailbox.level} />
 			<Chevron />

@@ -1,5 +1,7 @@
 const RS = 4096;
 const VAPID_TTL_SECONDS = 12 * 3600;
+// プッシュサービスが応答しないと Worker を拘束する。redirect は追わず 3xx を失敗として扱う。
+const PUSH_FETCH_TIMEOUT_MS = 10_000;
 
 const encoder = new TextEncoder();
 
@@ -215,9 +217,16 @@ export async function sendWebPush(
 
 	let res: Response;
 	try {
-		res = await (opts.fetch ?? fetch)(sub.endpoint, { method: "POST", headers, body });
-	} catch (err) {
-		return { status: 0, outcome: "error" };
+		res = await (opts.fetch ?? fetch)(sub.endpoint, {
+			method: "POST",
+			headers,
+			body,
+			signal: AbortSignal.timeout(PUSH_FETCH_TIMEOUT_MS),
+			redirect: "manual",
+		});
+	} catch {
+		// ネットワーク断・タイムアウトは一過性として再試行へ回す（恒久 4xx と分ける）。
+		return { status: 0, outcome: "retry" };
 	}
 
 	const status = res.status;

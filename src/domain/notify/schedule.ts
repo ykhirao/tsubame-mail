@@ -73,35 +73,45 @@ function occurrence(tz: string, root: WallDate, range: QuietRange): [number, num
 }
 
 export function isQuiet(schedule: QuietSchedule, nowMs: number): boolean {
-	const { wd } = wall(schedule.tz, nowMs);
-	// 区間は最大 2 日をまたぐので、昨日・今日に開始する分だけ見ればよい。
-	const roots = [shiftDay(wd, -1), wd];
-	for (const range of schedule.ranges) {
-		for (const root of roots) {
-			if (range.days.length > 0 && !range.days.includes(new Date(Date.UTC(root.y, root.mo - 1, root.d)).getUTCDay())) {
-				continue;
+	try {
+		const { wd } = wall(schedule.tz, nowMs);
+		// 区間は最大 2 日をまたぐので、昨日・今日に開始する分だけ見ればよい。
+		const roots = [shiftDay(wd, -1), wd];
+		for (const range of schedule.ranges) {
+			for (const root of roots) {
+				if (range.days.length > 0 && !range.days.includes(new Date(Date.UTC(root.y, root.mo - 1, root.d)).getUTCDay())) {
+					continue;
+				}
+				const [startMs, endMs] = occurrence(schedule.tz, root, range);
+				if (nowMs >= startMs && nowMs < endMs) return true;
 			}
-			const [startMs, endMs] = occurrence(schedule.tz, root, range);
-			if (nowMs >= startMs && nowMs < endMs) return true;
 		}
+		return false;
+	} catch {
+		// 壊れた tz は「静音でない」とみなし、通知を止めない。
+		return false;
 	}
-	return false;
 }
 
 /** 今より後で最初に静音が終わる時刻（epoch ms）。 */
 export function nextQuietEnd(schedule: QuietSchedule, nowMs: number): number {
-	const { wd } = wall(schedule.tz, nowMs);
-	let best = Infinity;
-	// 曜日の並びは週で繰り返すので、昨日＋8 日先まで調べればどの区間の終わりにも届く。
-	for (const range of schedule.ranges) {
-		for (let k = -1; k < 8; k++) {
-			const root = shiftDay(wd, k);
-			if (range.days.length > 0 && !range.days.includes(new Date(Date.UTC(root.y, root.mo - 1, root.d)).getUTCDay())) {
-				continue;
+	try {
+		const { wd } = wall(schedule.tz, nowMs);
+		let best = Infinity;
+		// 曜日の並びは週で繰り返すので、昨日＋8 日先まで調べればどの区間の終わりにも届く。
+		for (const range of schedule.ranges) {
+			for (let k = -1; k < 8; k++) {
+				const root = shiftDay(wd, k);
+				if (range.days.length > 0 && !range.days.includes(new Date(Date.UTC(root.y, root.mo - 1, root.d)).getUTCDay())) {
+					continue;
+				}
+				const [, endMs] = occurrence(schedule.tz, root, range);
+				if (endMs > nowMs && endMs < best) best = endMs;
 			}
-			const [, endMs] = occurrence(schedule.tz, root, range);
-			if (endMs > nowMs && endMs < best) best = endMs;
 		}
+		return best;
+	} catch {
+		// 壊れた tz は静音でないので、今すぐ配信できるよう nowMs を返す。
+		return nowMs;
 	}
-	return best;
 }

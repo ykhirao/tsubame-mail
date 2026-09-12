@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import type { ThreadListItem } from "@/shared/contracts/messages";
+import type { MessageDetail, ThreadListItem } from "@/shared/contracts/messages";
 import { MessagesApi, ThreadsApi, AddressesApi } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
 import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
 import { InstallBanner } from "@/ui/components/InstallBanner";
+import {
+	commitScrollTop,
+	listKey,
+	resetList,
+	setList,
+	useListState,
+} from "@/ui/lib/listState";
 
 const PAGE = 25;
 const PULL_THRESHOLD = 60;
@@ -39,12 +46,16 @@ const PencilIcon = () => (
 	</svg>
 );
 
-export function Inbox() {
+export function Inbox({ split = false }: { split?: boolean } = {}) {
 	const navigate = useNavigate();
 	const [searchParams] = useSearchParams();
 	const selected = searchParams.get("address") ?? "";
 	const view = searchParams.get("view") ?? "inbox";
 	const isMobile = useIsMobile();
+	const store = useListState();
+
+	const query = { address: selected, view } as const;
+	const queryKey = listKey(query);
 
 	const [threads, setThreads] = useState<ThreadListItem[]>([]);
 	const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -53,13 +64,19 @@ export function Inbox() {
 	const [catchAllIds, setCatchAllIds] = useState<Set<string>>(new Set());
 	const [pullDist, setPullDist] = useState(0);
 	const [scrolled, setScrolled] = useState(false);
+	const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+	const [bulkBusy, setBulkBusy] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 	const pullRef = useRef(0);
+	const restoreRef = useRef(false);
+	const idsRef = useRef<string[]>([]);
+	const scrollerRef = useRef<HTMLElement | null>(null);
 
 	// 未選択のときは絞らず、触れる全メールボックスを出す。切り替えは上部バーが持つ。
 
 	const fetchThreads = useCallback(async (cursor?: string) => {
 		if (!cursor) {
+			if (!restoreRef.current) resetList(query);
 			setLoading(true);
 			setThreads([]);
 			setNextCursor(null);
@@ -78,15 +95,50 @@ export function Inbox() {
 			if (!cursor) {
 				setThreads(res.data);
 				setNextCursor(res.next_cursor);
+				setList(query, res.data.map((t) => t.id));
 			} else {
+				const ids = [...idsRef.current, ...res.data.map((t) => t.id)];
 				setThreads((prev) => [...prev, ...res.data]);
 				setNextCursor(res.next_cursor);
+				setList(query, ids);
 			}
 		} finally {
 			setLoading(false);
 			setLoadingMore(false);
 		}
 	}, [selected, view]);
+
+	useEffect(() => {
+		idsRef.current = threads.map((t) => t.id);
+	}, [threads]);
+
+	useEffect(() => {
+		const main = rootRef.current?.closest(".overflow-y-auto");
+		scrollerRef.current = (main as HTMLElement | null) ?? null;
+	}, []);
+
+	// 一覧を開いたとき、同じ絞り込みの状態が残っていれば、会話から戻った扱いで
+	// 位置を復元する。絞り込みが違えば白紙から取り直す。
+	useEffect(() => {
+		restoreRef.current = store.loaded && listKey(store.query) === queryKey;
+		void fetchThreads();
+	}, [fetchThreads]);
+
+	useEffect(() => {
+		if (!restoreRef.current) return;
+		if (!loading && threads.length > 0) {
+			const s = scrollerRef.current;
+			if (s && store.scrollTop > 0) s.scrollTop = store.scrollTop;
+			restoreRef.current = false;
+		}
+	}, [loading, threads, store.scrollTop]);
+
+	useEffect(() => {
+		return () => {
+			const s = scrollerRef.current;
+			if (s) commitScrollTop(s.scrollTop);
+		};
+	}, []);
 
 	/**
 	 * スターはメッセージ側に付くので、スレッドの最新 1 件を代表として更新する。
@@ -104,9 +156,57 @@ export function Inbox() {
 		}
 	};
 
-	useEffect(() => {
-		void fetchThreads();
-	}, [fetchThreads]);
+	const toggleSelect = (id: string) =>
+		setSelectedIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
+			return next;
+		});
+	const selectBox = (t: ThreadListItem) => (
+		<input
+			type="checkbox"
+			aria-label="選択"
+			checked={selectedIds.has(t.id)}
+			readOnly
+			className="h-4 w-4 shrink-0 accent-[var(--accent)]"
+			onClick={(e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				toggleSelect(t.id);
+			}}
+		/>
+	);
+
+	const markAllRead = async (msgs: MessageDetail[]) => {
+		for (const m of msgs) if (!m.isRead) await MessagesApi.patch(m.id, { isRead: true });
+	};
+	const markAllUnread = async (msgs: MessageDetail[]) => {
+		const last = msgs.at(-1);
+		if (last) await MessagesApi.patch(last.id, { isRead: false });
+	};
+	const moveToTrash = async (msgs: MessageDetail[]) => {
+		const last = msgs.at(-1);
+		if (last) await MessagesApi.patch(last.id, { status: "trash" });
+	};
+
+	const bulkApply = async (op: (msgs: MessageDetail[]) => Promise<void>) => {
+		setBulkBusy(true);
+		try {
+			for (const tid of selectedIds) {
+				try {
+					const detail = await ThreadsApi.get(tid);
+					await op(detail.messages);
+				} catch {
+					// 既にゴミ箱に移った等で消えたスレッドは飛ばす。
+				}
+			}
+			await fetchThreads();
+			setSelectedIds(new Set());
+		} finally {
+			setBulkBusy(false);
+		}
+	};
 
 	useEffect(() => {
 		let alive = true;
@@ -193,6 +293,39 @@ export function Inbox() {
 					)}
 				</>
 			)}
+			{!isMobile && selectedIds.size > 0 && (
+				<div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2">
+					<span className="text-sm text-[var(--text-muted)]">{selectedIds.size} 件を選択中</span>
+					<button
+						onClick={() => void bulkApply(markAllRead)}
+						disabled={bulkBusy}
+						className="pill border border-[var(--line)] px-3 py-1 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+					>
+						既読にする
+					</button>
+					<button
+						onClick={() => void bulkApply(markAllUnread)}
+						disabled={bulkBusy}
+						className="pill border border-[var(--line)] px-3 py-1 text-sm text-[var(--accent)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+					>
+						未読にする
+					</button>
+					<button
+						onClick={() => void bulkApply(moveToTrash)}
+						disabled={bulkBusy}
+						className="pill border border-[var(--danger)]/40 px-3 py-1 text-sm text-[var(--danger)] transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+					>
+						ゴミ箱へ
+					</button>
+					<button
+						onClick={() => setSelectedIds(new Set())}
+						disabled={bulkBusy}
+						className="ml-auto text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text)] disabled:opacity-50"
+					>
+						選択を解除
+					</button>
+				</div>
+			)}
 			<section className="card overflow-hidden">
 				{loading ? (
 					<Spinner />
@@ -213,7 +346,10 @@ export function Inbox() {
 						<ul className="divide-y divide-[var(--line-soft)]">
 							{threads.map((t) => {
 								const unread = t.unreadCount > 0;
-								const rowUrl = `/threads/${t.id}${view === "trash" ? "?view=trash" : ""}`;
+								const rowParams = new URLSearchParams();
+								if (selected) rowParams.set("address", selected);
+								if (view !== "inbox") rowParams.set("view", view);
+								const rowUrl = `/threads/${t.id}${rowParams.toString() ? `?${rowParams}` : ""}`;
 								if (isMobile) {
 									return (
 										<li key={t.id}>
@@ -280,6 +416,76 @@ export function Inbox() {
 										</li>
 									);
 								}
+								if (split) {
+									return (
+										<li key={t.id}>
+											<Link
+												to={rowUrl}
+												className={`flex min-h-11 items-center gap-2 px-3 py-1.5 transition-colors hover:bg-[var(--surface-hover)] ${
+													unread
+														? "bg-[var(--surface)] font-medium text-[var(--text)]"
+														: "bg-[var(--surface-read)] text-[var(--text-muted)]"
+												}`}
+											>
+												{selectBox(t)}
+												<button
+													type="button"
+													aria-label={t.isStarred ? "スターを外す" : "スターを付ける"}
+													title={t.isStarred ? "スターを外す" : "スターを付ける"}
+													onClick={(e) => {
+														e.preventDefault();
+														e.stopPropagation();
+														void toggleStar(t);
+													}}
+													className="shrink-0 text-[var(--text-muted)] hover:text-[var(--warning)]"
+												>
+													<svg
+														className="h-4 w-4"
+														viewBox="0 0 24 24"
+														fill={t.isStarred ? "var(--warning)" : "none"}
+														stroke={t.isStarred ? "var(--warning)" : "currentColor"}
+														strokeWidth="1.8"
+														strokeLinejoin="round"
+													>
+														<path d="m12 4 2.4 5 5.6.8-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-.8z" />
+													</svg>
+												</button>
+												<div className="min-w-0 flex-1">
+													<div className="flex items-baseline justify-between gap-2">
+														<span className={`min-w-0 truncate text-sm ${unread ? "font-medium" : ""}`}>
+															{t.lastFromName?.trim() || t.lastFromAddr || "（差出人不明）"}
+														</span>
+														<span className="shrink-0 text-xs opacity-70">
+															{formatListDate(t.lastMessageAt)}
+														</span>
+													</div>
+													<div className="truncate text-sm">
+														{t.messageCount > 1 && (
+															<span className="mr-1.5 text-xs opacity-70">{t.messageCount}</span>
+														)}
+														{t.subject?.trim() || "（件名なし）"}
+														{t.snippet?.trim() ? (
+															<span className="ml-2 opacity-70">— {t.snippet}</span>
+														) : null}
+													</div>
+													{!selected && t.address && (
+														<span
+															className="flex items-center gap-1 truncate text-[10px] text-[var(--text-muted)]"
+															title={t.address}
+														>
+															<span
+																className="inline-block h-1.5 w-[9px] shrink-0 rounded-full"
+																style={{ background: t.addressColor ?? "var(--text-muted)" }}
+															/>
+															<span className="truncate opacity-80">{t.address}</span>
+															{catchAllIds.has(t.addressId) && <CatchAllBadge />}
+														</span>
+													)}
+												</div>
+											</Link>
+										</li>
+									);
+								}
 								return (
 									<li key={t.id}>
 										<Link
@@ -290,15 +496,7 @@ export function Inbox() {
 													: "bg-[var(--surface-read)] text-[var(--text-muted)]"
 											}`}
 										>
-											<input
-												type="checkbox"
-												aria-label="選択"
-												className="h-4 w-4 shrink-0 accent-[var(--accent)]"
-												onClick={(e) => {
-													e.preventDefault();
-													e.stopPropagation();
-												}}
-											/>
+											{selectBox(t)}
 											<button
 												type="button"
 												aria-label={t.isStarred ? "スターを外す" : "スターを付ける"}

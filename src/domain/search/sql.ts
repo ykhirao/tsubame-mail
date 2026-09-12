@@ -429,25 +429,59 @@ export async function getThread(
 /** 同じ From への接ぎ木を無限に続けられても、1 スレッドで返す本文量に上限を付ける。 */
 export const MAX_THREAD_MESSAGES = 200;
 
+export type ThreadMessagesOptions = {
+	includeTrash?: boolean;
+	/** これより古いメッセージを取るカーソル。無いときは最新の MAX_THREAD_MESSAGES 件。 */
+	before?: string;
+};
+
+export type ThreadMessagesResult = {
+	/** 古い順。 */
+	messages: MessageRow[];
+	hasOlder: boolean;
+	olderCursor: string | null;
+	olderCount: number;
+};
+
 export async function queryThreadMessages(
 	db: Db,
 	principal: Principal,
 	threadId: string,
-	includeTrash = false,
-): Promise<MessageRow[]> {
+	opts: ThreadMessagesOptions = {},
+): Promise<ThreadMessagesResult> {
 	const conds: SQL[] = [eq(messages.threadId, threadId)];
 	if (principal.addressIds !== "all") {
 		conds.push(jsonIdsIn(messages.addressId, principal.addressIds));
 	}
-	if (!includeTrash) conds.push(ne(messages.status, "trash"));
-	return db
-		.select({ ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody })
+	if (!opts.includeTrash) conds.push(ne(messages.status, "trash"));
+	if (opts.before) {
+		const cur = decodeCursor(opts.before);
+		if (!cur) throw invalidRequest("カーソルが不正です");
+		conds.push(cursorCondition(cur));
+	}
+	const where = and(...conds);
+	const columns = { ...listColumns, textBody: messages.textBody, htmlBody: messages.htmlBody };
+	// 最新の MAX_THREAD_MESSAGES 件を古い順に返すため、降順で max+1 取り、末尾の 1 件を捨てて反転する。#35 の再発防止。
+	const rows = await db
+		.select(columns)
 		.from(messages)
-		.where(and(...conds))
-		// 同じ秒に届いた分は rowid で決める。id は nanoid なので順序を持たない。
-		.orderBy(messages.receivedAt, sql`rowid`)
-		.limit(MAX_THREAD_MESSAGES)
+		.where(where)
+		.orderBy(desc(messages.receivedAt), desc(messages.id))
+		.limit(MAX_THREAD_MESSAGES + 1)
 		.all();
+	const hasOlder = rows.length > MAX_THREAD_MESSAGES;
+	const page = rows.slice(0, MAX_THREAD_MESSAGES);
+	const messagesAsc = page.reverse();
+	const oldest = messagesAsc[0];
+	const olderCursor = hasOlder && oldest ? encodeCursor(toUnix(oldest.receivedAt), oldest.id) : null;
+	const totalRow = await db
+		.select({ n: sql`count(*)` })
+		.from(messages)
+		.where(where)
+		.get();
+	const total = Number(totalRow?.n ?? 0);
+	const olderCount = Math.max(0, total - messagesAsc.length);
+	return { messages: messagesAsc, hasOlder, olderCursor, olderCount };
 }
 
 export async function attachmentsForMessage(

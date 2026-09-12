@@ -5,10 +5,10 @@ import { MyApiKeys } from "@/ui/components/MyApiKeys";
 import { MeApi } from "@/ui/lib/api";
 
 const inputCls =
-	"w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none";
+	"w-full min-h-11 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none sm:min-h-0";
 
 const saveBtnCls =
-	"rounded-full bg-[var(--accent)] px-5 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
+	"rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 min-h-11 sm:min-h-0";
 
 export function Settings() {
 	const { me, refresh } = useAuth();
@@ -62,7 +62,7 @@ export function Settings() {
 	};
 
 	return (
-		<div className="mx-auto flex w-full max-w-xl flex-col gap-6">
+		<div className="mx-auto flex w-full max-w-xl flex-col gap-6 safe-bottom">
 			<div>
 				<h1 className="mb-1 text-lg font-bold text-[var(--text)]">設定</h1>
 				<p className="mb-4 text-sm text-[var(--text-muted)]">
@@ -75,7 +75,7 @@ export function Settings() {
 				className="card flex flex-col gap-3 p-5"
 			>
 				<h2 className="text-sm font-semibold text-[var(--text)]">表示名</h2>
-				<div className="flex items-center gap-3">
+				<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
 					<label className="w-24 shrink-0 text-sm text-[var(--text-muted)]">表示名</label>
 					<input
 						value={name}
@@ -94,7 +94,7 @@ export function Settings() {
 
 			<form onSubmit={savePassword} className="card flex flex-col gap-3 p-5">
 				<h2 className="text-sm font-semibold text-[var(--text)]">パスワード変更</h2>
-				<div className="flex items-center gap-3">
+				<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
 					<label className="w-24 shrink-0 text-sm text-[var(--text-muted)]">現在のパスワード</label>
 					<input
 						type="password"
@@ -104,7 +104,7 @@ export function Settings() {
 						className={inputCls}
 					/>
 				</div>
-				<div className="flex items-center gap-3">
+				<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
 					<label className="w-24 shrink-0 text-sm text-[var(--text-muted)]">新しいパスワード</label>
 					<input
 						type="password"

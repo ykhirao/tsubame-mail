@@ -11,6 +11,8 @@ import {
 	EmptyState,
 	ErrorBanner,
 	Label,
+	MobileActions,
+	MobileField,
 	Modal,
 	Notice,
 	Page,
@@ -135,7 +137,10 @@ function RuleModal({
 		}
 	};
 
-	const valid = name && (scope === "domain" ? domainId : addressId);
+	const matchesAll = !matcherFrom && !matcherTo && !matcherSubject && !matcherContains;
+	// 条件が空のルールはすべてのメールに当たる。拒否や破棄だと全部が消えるので、明示の確認を求める。
+	const [allConfirmed, setAllConfirmed] = useState(false);
+	const valid = name && (scope === "domain" ? domainId : addressId) && (!matchesAll || allConfirmed);
 
 	return (
 		<Modal
@@ -188,7 +193,7 @@ function RuleModal({
 					</Select>
 				</div>
 
-				<div className="grid grid-cols-2 gap-3">
+				<div className="grid grid-cols-1 gap-3 md:grid-cols-2">
 					<div>
 						<Label>From 条件</Label>
 						<TextInput value={matcherFrom} onChange={(e) => setMatcherFrom(e.target.value)} placeholder="部分一致" />
@@ -209,6 +214,15 @@ function RuleModal({
 				<p className="text-xs text-[var(--text-muted)]">
 					条件はすべて空欄で「全件一致」。条件は部分一致・大文字小文字を無視します。
 				</p>
+				{matchesAll && (
+					<Notice tone={action === "reject" || action === "drop" ? "danger" : "warn"}>
+						<p>条件が空なので、このルールは{scope === "domain" ? "このドメイン宛て" : "このアドレス宛て"}のすべてのメールに当たります。</p>
+						<label className="mt-2 flex min-h-11 items-center gap-2">
+							<input type="checkbox" checked={allConfirmed} onChange={(e) => setAllConfirmed(e.target.checked)} />
+							すべてのメールに当てることを確認しました
+						</label>
+					</Notice>
+				)}
 
 				<div>
 					<Label>対象の値（action ごとの引数）</Label>
@@ -278,7 +292,8 @@ function RuleTable({
 			{rules.length === 0 ? (
 				<EmptyState message="このスコープのルールはまだありません。" />
 			) : (
-				<div className="overflow-x-auto">
+				<>
+				<div className="hidden overflow-x-auto md:block">
 				<table className="w-full min-w-[720px]">
 					<thead>
 						<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
@@ -326,6 +341,38 @@ function RuleTable({
 					</tbody>
 				</table>
 				</div>
+				<ul className="md:hidden">
+					{rules.map((r) => (
+						<li key={r.id} className="border-b border-[var(--line-soft)] px-4 py-3">
+							<div className="flex items-center justify-between gap-2">
+								<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{r.name}</span>
+								<Badge color={actionColor(r.action)}>{r.action}</Badge>
+							</div>
+							{r.target && <div className="mt-0.5 text-xs text-[var(--text-muted)]">→ {r.target}</div>}
+							<div className="mt-2 space-y-1">
+								<MobileField label="対象">
+									<RuleTargetLabel rule={r} domains={domains} addresses={addresses} />
+								</MobileField>
+								<MobileField label="条件">
+									<MatcherText matcher={r.matcher} />
+								</MobileField>
+								<MobileField label="優先度">{r.priority}</MobileField>
+								<MobileField label="状態">
+									<Badge color={r.enabled ? "green" : "gray"}>{r.enabled ? "有効" : "無効"}</Badge>
+								</MobileField>
+							</div>
+							<MobileActions>
+								<Button variant="secondary" onClick={() => onEdit(r)}>
+									編集
+								</Button>
+								<Button variant="danger" onClick={() => onDelete(r)}>
+									削除
+								</Button>
+							</MobileActions>
+						</li>
+					))}
+				</ul>
+				</>
 			)}
 		</Card>
 	);

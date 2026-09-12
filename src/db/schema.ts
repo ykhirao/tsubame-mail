@@ -252,6 +252,8 @@ export const outboundJobs = sqliteTable(
 			.default("queued"),
 		attempts: integer("attempts").notNull().default(0),
 		lastError: text("last_error"),
+		/** 送れた宛先（小文字のアドレス）。再試行で成功済みの宛先に二重送信しないため（#21 #59）。 */
+		sentRecipients: text("sent_recipients", { mode: "json" }).$type<string[]>(),
 		nextAttemptAt: integer("next_attempt_at", { mode: "timestamp" }),
 		sentAt: integer("sent_at", { mode: "timestamp" }),
 		createdAt: createdAt(),
@@ -445,6 +447,8 @@ export const notificationLog = sqliteTable(
 		reason: text("reason").notNull(),
 		holdGroup: text("hold_group"),
 		deviceCount: integer("device_count").notNull().default(0),
+		/** 一時的に失敗し、再試行で送り直す端末。成功した端末には二度送らない（#131）。 */
+		retryDeviceIds: text("retry_device_ids", { mode: "json" }).$type<string[]>(),
 		createdAt: createdAt(),
 	},
 	(t) => [index("notification_log_user_idx").on(t.userId, t.createdAt)],
