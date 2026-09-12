@@ -42,6 +42,12 @@ async function loginCookie(email: string) {
 	return sessionCookie(res);
 }
 
+// プライマリは既存メールボックス（addressId）で作る。CF の provision に触れない経路。
+async function mailboxPrimary() {
+	const domainId = await createDomain();
+	return createAddress(domainId, `box-${crypto.randomUUID().slice(0, 6)}`);
+}
+
 describe("/v1/admin は owner 専用", () => {
 	it("member は 403", async () => {
 		await ownerCookie();
@@ -71,7 +77,7 @@ describe("POST /v1/admin/users", () => {
 		const noPassword = await request(
 			app,
 			"/api/v1/admin/users",
-			{ ...json({ email: "x@example.test", name: "X", role: "member" }), cookie },
+			{ ...json({ email: "x@example.test", name: "X", role: "member", primaryAddress: { addressId: await mailboxPrimary() } }), cookie },
 		);
 		expect(noPassword.status).toBe(201);
 		const created = (await noPassword.json()) as {
@@ -81,7 +87,7 @@ describe("POST /v1/admin/users", () => {
 		expect(created.temporaryPassword).toMatch(/^[A-Za-z2-9]{20}$/);
 
 		const agent = await request(app, "/api/v1/admin/users", {
-			...json({ email: "ai@example.test", name: "AI", role: "agent" }),
+			...json({ email: "ai@example.test", name: "AI", role: "agent", primaryAddress: { addressId: await mailboxPrimary() } }),
 			cookie,
 		});
 		expect(agent.status).toBe(201);
@@ -92,7 +98,7 @@ describe("POST /v1/admin/users", () => {
 	it("agent に password を付けると 400（#51: 以前は POST だけ黙って捨てていた）", async () => {
 		const cookie = await ownerCookie();
 		const res = await request(app, "/api/v1/admin/users", {
-			...json({ email: "ai2@example.test", name: "AI2", role: "agent", password: PASSWORD }),
+			...json({ email: "ai2@example.test", name: "AI2", role: "agent", password: PASSWORD, primaryAddress: { addressId: await mailboxPrimary() } }),
 			cookie,
 		});
 		expect(res.status).toBe(400);
@@ -100,7 +106,7 @@ describe("POST /v1/admin/users", () => {
 
 	it("メールアドレスの重複は 409", async () => {
 		const cookie = await ownerCookie();
-		const body = { email: "dup@example.test", name: "D", role: "member", password: PASSWORD };
+		const body = { email: "dup@example.test", name: "D", role: "member", password: PASSWORD, primaryAddress: { addressId: await mailboxPrimary() } };
 		expect((await request(app, "/api/v1/admin/users", { ...json(body), cookie })).status).toBe(201);
 		expect((await request(app, "/api/v1/admin/users", { ...json(body), cookie })).status).toBe(409);
 	});
@@ -108,7 +114,7 @@ describe("POST /v1/admin/users", () => {
 	it("監査ログが残る", async () => {
 		const cookie = await ownerCookie();
 		await request(app, "/api/v1/admin/users", {
-			...json({ email: "audit@example.test", name: "A", role: "agent" }),
+			...json({ email: "audit@example.test", name: "A", role: "agent", primaryAddress: { addressId: await mailboxPrimary() } }),
 			cookie,
 		});
 		const logs = await db()
@@ -160,7 +166,7 @@ describe("最後の owner は消せない", () => {
 	it("owner が 2 人いれば片方は消せる", async () => {
 		const cookie = await ownerCookie();
 		const second = await request(app, "/api/v1/admin/users", {
-			...json({ email: "o2@example.test", name: "O2", role: "owner", password: PASSWORD }),
+			...json({ email: "o2@example.test", name: "O2", role: "owner", password: PASSWORD, primaryAddress: { addressId: await mailboxPrimary() } }),
 			cookie,
 		});
 		const created = (await second.json()) as { id: string };
@@ -173,11 +179,8 @@ describe("最後の owner は消せない", () => {
 
 	it("owner 2 人が同時に互いを降格しても 0 人にならない（#54）", async () => {
 		const cookie = await ownerCookie();
-		const second = await request(app, "/api/v1/admin/users", {
-			...json({ email: "o3@example.test", name: "O3", role: "owner", password: PASSWORD }),
-			cookie,
-		});
-		const created = (await second.json()) as { id: string };
+		const secondOwner = await createUser({ role: "owner", email: "o3@example.test", password: PASSWORD });
+		const created = { id: secondOwner.id };
 		const cookie2 = await loginCookie("o3@example.test");
 		const [firstOwner] = await db()
 			.select({ id: schema.users.id })
@@ -275,7 +278,7 @@ describe("POST /v1/admin/api-keys", () => {
 		const other = await createAddress(domainId, "human");
 
 		const created = await request(app, "/api/v1/admin/users", {
-			...json({ email: "bot@example.test", name: "ボット", role: "agent" }),
+			...json({ email: "bot@example.test", name: "ボット", role: "agent", primaryAddress: { addressId: mine } }),
 			cookie,
 		});
 		const agent = (await created.json()) as { id: string };

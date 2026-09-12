@@ -77,6 +77,29 @@ async function createSession(
 	return { token, expiresAt };
 }
 
+// ログインに使えるのはプライマリアドレスと確認済みの外部アドレス。プライマリの無い利用者（ドメインを繋ぐ前の
+// 最初の owner）だけは、確認前の外部アドレスでも入れる（FR-4）。
+async function findLoginUser(db: Db, identifier: string) {
+	const [byExternal] = await db
+		.select()
+		.from(schema.users)
+		.where(eq(schema.users.externalEmail, identifier))
+		.limit(1);
+	if (
+		byExternal &&
+		(byExternal.externalVerifiedAt || (byExternal.role === "owner" && !byExternal.primaryAddressId))
+	) {
+		return byExternal;
+	}
+	const [byPrimary] = await db
+		.select({ user: schema.users })
+		.from(schema.users)
+		.innerJoin(schema.addresses, eq(schema.addresses.id, schema.users.primaryAddressId))
+		.where(eq(schema.addresses.address, identifier))
+		.limit(1);
+	return byPrimary?.user;
+}
+
 app.post("/login", async (c) => {
 	const body = await readJson(c.req, loginBody);
 	const email = body.email.trim().toLowerCase();
@@ -92,7 +115,7 @@ app.post("/login", async (c) => {
 	]);
 
 	const db = c.get("db");
-	const [user] = await db.select().from(schema.users).where(eq(schema.users.email, email)).limit(1);
+	const user = await findLoginUser(db, email);
 
 	// 「居ない」「無効」「agent（パスワード無し）」「パスワード不一致」は全部同じ応答にする。
 	// 応答時間も揃えるため、user が居ない／passwordHash が無いときも同じ形のダミーハッシュに対して
@@ -121,7 +144,7 @@ app.post("/login", async (c) => {
 
 	return c.json({
 		userId: user.id,
-		email: user.email,
+		email: user.externalEmail,
 		name: user.name,
 		role: user.role,
 		expiresAt: unixSeconds(expiresAt),
@@ -153,7 +176,7 @@ app.get("/session", requireAuth, async (c) => {
 	const principal = getPrincipal(c);
 	const db = c.get("db");
 	const [user] = await db
-		.select({ id: schema.users.id, email: schema.users.email, name: schema.users.name })
+		.select({ id: schema.users.id, email: schema.users.externalEmail, name: schema.users.name })
 		.from(schema.users)
 		.where(eq(schema.users.id, principal.userId))
 		.limit(1);
@@ -232,6 +255,7 @@ app.post("/bootstrap", async (c) => {
 	await db.insert(schema.users).values({
 		id: userId,
 		email,
+		externalEmail: email,
 		name: body.name,
 		passwordHash: await hashPassword(body.password),
 		role: "owner",

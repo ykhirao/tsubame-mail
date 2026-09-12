@@ -14,6 +14,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-2 送信", () => {
@@ -130,7 +131,7 @@ describe("FR-2 送信", () => {
 			expect(decodeHeaderValue(headerValue(raw, "Subject"))).toBe("日本語の件名です");
 			expect(raw).toMatch(/Message-ID: <[^>]+@mail\.tsubame\.test>/);
 
-			const userRes = await owner.post("/api/v1/admin/users", {
+			const userRes = await createUserViaApi(h, owner, {
 				email: "bot@tsubame.test",
 				name: "見積ボット",
 				role: "agent",

@@ -32,7 +32,7 @@
 | `agent`（AI） | 絞られた API キー | スコープ外への逸脱。**プロンプトインジェクションで乗っ取られている前提で考える** |
 | 漏れた API キー | キー 1 本 | キーに付いた範囲すべて |
 | Webhook の受け手 | 通知を受ける URL | 応答を遅らせて Worker を拘束する程度。信頼しない |
-| `owner` | 全権 | 脅威ではないが、誤操作の爆風（apex 奪取、catch-all、SSRF）を設計で抑える |
+| `owner` | 管理の全権。メールは割り当てたアドレスだけで、全部を読むには管理者モード（セッション限定・1 時間・監査ログ） | 脅威ではないが、誤操作の爆風（apex 奪取、catch-all、SSRF）を設計で抑える。管理者モードは「読めるだけ」にし、入った・出たを残す |
 
 **AI エージェントは信頼された攻撃者として扱う。** 受信メールの本文には攻撃者の書いた
 文章が入る。それを読んだエージェントが自分の API キーで動くので、
@@ -59,10 +59,10 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 | --- | --- | --- | --- |
 | `/api/health`, `/auth/login`, `/auth/logout`, `/auth/setup-state`, `/auth/bootstrap` | 無し | — | `v1/auth.ts` |
 | `/auth/session` | `requireAuth`（ルート単体） | — | `v1/auth.ts` |
-| `/me/*` | `requireAuth` | ハンドラ内で `principal` を見る。キーの発行・失効は `requireKeyManagement`（セッションか admin キー、仮パスワード中は 403） | `v1/me.ts` |
+| `/me/*` | `requireAuth` | ハンドラ内で `principal` を見る。キーの発行・失効は `requireKeyManagement`（セッションか admin キー、仮パスワード中は 403）。`/me/admin-mode` は `role === "owner"` かつ `via === "session"`（それ以外は 403）。`/me/external-email*` は `requireMeSession`（API キーは 403） | `v1/me.ts` |
 | `/me/notifications/*`, `/me/devices/*`, `/push/*`, `/threads/:id/notification` | `requireAuth` | ハンドラ内で `via === "session"` を要求（API キーは 403）。`agent` は対象外 | `v1/notifications.ts`, `devices.ts`, `push.ts` |
-| `/messages/*`, `/threads/*`, `/addresses/*`, `/attachments/*`, `/messages/:id/raw` | `requireAuth` | ハンドラ内で `addressIds` を見る。`/addresses/:id/signature` はセッション限定 | `v1/messages.ts`, `outbound.ts`, `threads.ts`, `addresses.ts`, `attachments.ts` |
-| `/admin/*`, `/webhooks/*` | `requireAuth` + `requireOwner`（role が owner **かつ** admin スコープ） | 各ルータの `use("*")` にも同じ `requireOwner` を重ねている（精査 #13）。変更系は `requireUnrestricted`（範囲を絞ったキーは 403。#129）、ユーザー管理の変更系は `requireSession`（#121）、`/admin/audit-logs` は両方 | `v1/admin/**`, `v1/webhooks.ts` |
+| `/messages/*`, `/threads/*`, `/addresses/*`, `/attachments/*`, `/messages/:id/raw` | `requireAuth` | ハンドラ内で `addressIds` を見る。状態の変更（`PATCH /messages/:id`）は `canModify`（管理者モードでは自分の割り当てだけ）。`/addresses/:id/signature` はセッション限定。`/addresses/:id/hidden` は自分の `address_grants` の行だけ | `v1/messages.ts`, `outbound.ts`, `threads.ts`, `addresses.ts`, `attachments.ts` |
+| `/admin/*`, `/webhooks/*` | `requireAuth` + `requireOwner`（role が owner **かつ** admin スコープ） | 各ルータの `use("*")` にも同じ `requireOwner` を重ねている（精査 #13）。変更系は `requireUnrestricted`（範囲を絞ったキーは 403。#129）、ユーザー管理の変更系と `/admin/users/:id/external-email` は `requireSession`（#121）、`/admin/audit-logs` は両方 | `v1/admin/**`, `v1/webhooks.ts` |
 
 **信頼できない文字列の追跡表。** 受信メールの各フィールドが、どこを通ってどこで
 「実行可能な文脈」に触れるか。監査ではこの表の右端を 1 つずつ確かめる。
@@ -91,8 +91,32 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 
 見る場所: `src/api/v1/auth.ts`（login / logout / bootstrap / setup-state）、
 `src/api/middleware/auth.ts`（Cookie と Bearer の解決）、`src/lib/password.ts`、
-`src/lib/tokens.ts`、`src/api/v1/me.ts`（パスワード変更）、
-`src/api/v1/admin/users.ts`（無効化・ロール変更）、`wrangler.jsonc` の `ratelimits`。
+`src/lib/tokens.ts`、`src/api/v1/me.ts`（パスワード変更・外部アドレス・管理者モード）、
+`src/services/verification-mail.ts`（確認コード）、`src/api/v1/admin/external-email.ts`、
+`src/api/v1/admin/users.ts`（無効化・ロール変更・プライマリ）、`wrangler.jsonc` の `ratelimits`。
+
+**ログインの識別子（誰として入るか）**
+- [ ] ログインに使えるのが「プライマリアドレス」と「確認済みの外部アドレス」だけか。未確認の外部アドレスで入れるのは
+      プライマリがまだ無い利用者（ドメインを繋ぐ前の最初の owner）に限るか → `auth.ts` `findLoginUser`
+- [ ] 外部アドレスとプライマリが別の利用者を指せないか（外部アドレスは全利用者で一意、かつ `addresses.address` と重ならない。
+      解決は外部 → プライマリの順なので、重なると誰として入ったかが曖昧になる） → `verification-mail.ts` `assertExternalEmailAvailable`、
+      `admin/users.ts` POST、`db/schema.ts` `users_external_email_idx` / `users_primary_address_idx`
+- [ ] 旧 `users.email` 列をログインや一意性の判定に使う経路が残っていないか（今は外部アドレスの写しで、無い利用者は `<id>@users.invalid`）
+      → `grep -rn "users.email" src`
+- [ ] プライマリの変更・剥奪でログイン識別子が変わることを把握しているか（プライマリは削除・アーカイブ・エイリアス化できず、
+      grants から外しても write で残る） → `admin/addresses.ts` `primaryHolder`、`admin/users.ts` PUT grants
+
+**外部アドレスの確認**
+- [ ] 確認コードが CSPRNG 由来で偏りが無く、DB にはハッシュだけを置くか → `verification-mail.ts` `generateVerificationCode`、`email_verifications.code_hash`
+- [ ] 6 桁のコードに対して、試行回数（5 回で行を消す）と期限（30 分）があるか。総当たりをオンラインで止めているか
+      → `verifyExternalEmail`、`VERIFICATION_MAX_ATTEMPTS` / `VERIFICATION_CODE_TTL_SECONDS`
+- [ ] 再送に間隔（60 秒）があるか。第三者のアドレスへ確認メールを大量に送る踏み台にならないか
+      （登録 `POST /me/external-email` 自体には間隔が無い。宛先を変えれば毎回送れる） → `resendExternalEmail`、`registerExternalEmail`
+- [ ] 登録し直すと未確認に戻るか（確認済みのまま宛先だけ差し替えられないか） → `registerExternalEmail` の `externalVerifiedAt: null`
+- [ ] 外部アドレスの登録・確認が API キーからできないか（ログイン先そのものを変える操作） → `me.ts` `requireMeSession`、`admin/external-email.ts` `requireSession`
+- [ ] owner が他人の外部アドレスを登録できることを把握しているか（監査ログ `user.external_email.set` に `actorId` が残る）
+- [ ] 確認メールの差出人の選び方（本人のプライマリ → owner のプライマリ → 送信できる最古のメールボックス）が、
+      送信を無効にしたドメインを使わないか → `pickSender`（`domains.sending_status = 'active'` だけ）
 
 **パスワード**
 - [ ] KDF（PBKDF2 等）で保存し、反復回数を保存形式に含めて上げられるか。
@@ -125,6 +149,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] ログアウトがサーバ側の行を消すか（Cookie を消すだけでないか） → `auth.ts` logout
 - [ ] パスワード変更・ロール変更・無効化で既存セッションが落ちるか。購読端末も一緒に消えるか（#130）
       → `me.ts` PATCH、`admin/users.ts` PATCH / DELETE、`auth.ts` logout（その端末の購読）
+- [ ] 管理者モード（`sessions.admin_mode_until`）がセッションにだけ付き、期限を**毎リクエスト**見ているか。
+      owner から降格されたセッションで残らないか（降格でセッションごと消える） → `middleware/auth.ts` `principalFromSession`、`policy.ts` `resolvePrincipal`
 
 **API キー**
 - [ ] 生成が CSPRNG 由来で十分な長さか。接頭辞 `tsb_` で Cookie と混同しないか
@@ -149,20 +175,47 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 設計上の不変条件は 1 つ。**すべてのメールデータへのアクセスは、先に確定した
 `address_id` の集合で絞られる**（`docs/spec/architecture.md` §5）。
 
-見る場所: `src/domain/access/policy.ts`（`resolvePrincipal` / `canRead` / `canWrite` /
+見る場所: `src/domain/access/policy.ts`（`resolvePrincipal` / `resolveUserAddressAccess` / `canRead` / `canWrite` / `canModify` /
 `requireScope` / `requireOwner` / `addressFilter`）、`src/api/app.ts`（門の掛け方）、
 `src/api/v1/**` の各ハンドラ、`src/domain/search/sql.ts`（`getMessage` / `queryMessages` /
-`resolveMailboxId`）、`src/shared/contracts/*.ts`（何を受け付けるか）。
+`resolveMailboxId` / `hiddenAddressIds`）、`src/shared/contracts/*.ts`（何を受け付けるか）。
 
 **不変条件**
 - [ ] メールデータ（messages / threads / attachments / raw）を `userId` で絞るクエリが無いか
       （共有アドレスと API キーのスコープが同時に壊れる）。
-      逆に `api_keys` / `sessions` のような**本人所有物**は `userId` で絞るのが正しい
+      逆に `api_keys` / `sessions` / `address_grants.hidden` のような**本人所有物**は `userId` で絞るのが正しい
       → `grep -rn "users.id\|userId" src/api src/domain/search`
 - [ ] 単体取得・更新・削除が id だけで引かれていないか（IDOR）
       → `messages.ts` PATCH、`threads.ts` `/:id`、`attachments.ts` 両ルート、`outbound.ts` reply
-- [ ] `addressFilter()` / `principal.addressIds !== "all"` の分岐で、非オーナーなのに
-      フィルタが消える経路が無いか → `policy.ts` `addressFilter`、`sql.ts` の各 `conds`
+- [ ] `addressFilter()` / `principal.addressIds !== "all"` の分岐で、管理者モードでないのに
+      フィルタが消える経路が無いか。**owner でも `"all"` にならない**（`resolveUserAddressAccess` に role の分岐が無い）
+      → `policy.ts` `resolvePrincipal` / `addressFilter`、`sql.ts` の各 `conds`
+
+**管理者モード（FR-19）**
+- [ ] 入れるのが owner の**セッション**だけで、API キー（owner の admin キーでも）では 403 か → `me.ts` `/admin-mode`
+- [ ] 広がるのが**読む範囲だけ**か。送信（`writableAddressIds`）・既読・スター・ゴミ箱（`canModify` → `ownAddressIds`）・署名・非表示は
+      割り当てたアドレスに留まるか → `policy.ts` `resolvePrincipal` / `canModify`、`messages.ts` PATCH、`addresses.ts` `/hidden`
+- [ ] 通知・未読数・通知設定の対象が管理者モードで広がらないか → `services/notify/load.ts` `eligibleUserIds`、`prefs.ts` `countUnread`、`notifications.ts` `loadVisibleAddresses`
+- [ ] 期限（1 時間）が固定で、延長の API が無いか。期限切れがサーバで判定されるか（UI の帯は表示だけ） → `me.ts` `ADMIN_MODE_SECONDS`、`resolvePrincipal`
+- [ ] 入った・出たが監査ログに残るか（`admin_mode.enter` / `admin_mode.exit`。`meta.until`） → `me.ts` `/admin-mode`
+- [ ] 管理者モードで読んだメールの記録は**無い**（読んだことは監査ログに残らない）ことを把握しているか
+- [ ] `GET /addresses` / `GET /me` が管理者モードでは全アドレスを返すことを、UI が「読めるだけ」として扱うか
+      → `ui/routes/ThreadDetail.tsx` `canModify`（自動既読・スター・メニューを出さない）、`ui/components/AdminModeBanner.tsx`
+
+**非表示（見え方であって権限ではない）**
+- [ ] `hidden` が一覧・検索の**既定の絞り込み**だけに効き、`address=` の名指し・単体取得・添付・生 MIME・通知・未読数には効かないか
+      （非表示にしても届く・読める・鳴る） → `messages.ts` / `threads.ts` の `hiddenIds`、`sql.ts` `buildMessageConditions` / `queryThreads`
+- [ ] 他人の `hidden` が自分の一覧に影響しないか（`address_grants` を `userId` で引く） → `sql.ts` `hiddenAddressIds`
+- [ ] 非表示の id が 100 件を超えても D1 のバインド上限に当たらないか（JSON 1 本） → `sql.ts` `jsonIdsNotIn`
+- [ ] 割り当ての無いアドレス（管理者モードで見えるだけを含む）を非表示にしようとすると 404 か → `addresses.ts` `/:id/hidden`
+
+**プライマリアドレス**
+- [ ] member / agent の作成で必ずプライマリが付き、write で割り当てられるか。既存のアドレスを指すとき、
+      アーカイブ済み・エイリアス・他人のプライマリを弾くか → `admin/users.ts` POST / PATCH
+- [ ] プライマリを消せない・下げられないか（削除・アーカイブ・エイリアス化は 409、grants で `read` は 400、一覧から外しても write で残る）
+      → `admin/addresses.ts` `primaryHolder`、`admin/users.ts` PUT grants
+- [ ] 最初のメールボックスを作った owner に自動で write の割り当てとプライマリが付くこと、`assignToMe` が作った本人にしか付かないことを把握しているか
+      → `admin/addresses.ts` POST（`firstPrimary` / `assignToMe`）
 - [ ] 検索の**全経路**（FTS、LIKE フォールバック、関連度順、スレッド一覧、スレッド内一覧）に
       アドレスの絞り込みが付くか → `sql.ts` `buildMessageConditions` / `queryThreads` / `queryThreadMessages`
 - [ ] クエリ引数のアドレス指定（`address=` / `in:`）が権限外なら空で返るか → `sql.ts` `resolveMailboxId`
@@ -185,9 +238,14 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] オーナー専用操作が `role == owner` **かつ** `admin` スコープを要求するか。
       重複実装が「または」になっていないか → `policy.ts` `requireOwner`、各ルータの `use("*", requireOwner)`（精査 #13）
 - [ ] 範囲を絞った admin キー（`addressIds` あり）で、キーより広い範囲を変える管理 API（ドメイン・アドレス・ルール・Webhook・
-      他人のキーの失効）を叩けないか → `middleware/auth.ts` `requireUnrestricted`、`grep -rn "requireUnrestricted" src/api`（精査 #129）
-- [ ] パスワード・ロールのように期限や範囲で縛れない資格情報を、API キーから変えられないか
-      → `requireSession`（ユーザー管理の変更系）、`addresses.ts` PATCH signature、`notifications.ts` / `devices.ts`（`via === "session"`）（#121 / #143）
+      他人のキーの失効）を叩けないか。「絞った」の判定が `keyRestricted`（キーが `address_ids` を持つ）で、
+      `addressIds !== "all"`（owner も割り当てでしか見ないので、絞っていないキーでも真になる）に戻っていないか
+      → `middleware/auth.ts` `requireUnrestricted`、`grep -rn "keyRestricted" src/api`（精査 #129）
+- [ ] 絞っていないキーの clamp の基準が「持ち主の割り当て」ではなく「制限なし」か（持ち主の割り当てで凍結すると、
+      owner が他人向けに発行するキーや Webhook の `addressIds` が壊れる） → `admin/api-keys.ts` POST、`webhooks.ts` `assertAddressIdsValid`
+- [ ] パスワード・ロール・外部アドレス・管理者モードのように期限や範囲で縛れない資格情報を、API キーから変えられないか
+      → `requireSession`（ユーザー管理の変更系・`/admin/users/:id/external-email`）、`me.ts` `requireMeSession` / `/admin-mode`、
+      `addresses.ts` PATCH signature、`notifications.ts` / `devices.ts`（`via === "session"`）（#121 / #143）
 - [ ] 認証ミドルウェアがパス前置で掛かっているので、広いプレフィックスに載るルータ
       （`rawRouter` は `/api/v1` に載る）へ後からルートを足すと未認証になりうる → `app.ts` `app.route`
 - [ ] ミドルウェアのパスパターンが、末尾スラッシュ無し・大文字・エンコード違いを含めて
@@ -459,7 +517,9 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
       新しい変更系のエンドポイントを足したら `recordAudit` と一覧の両方に足す
       → `grep -rn "recordAudit" src/api`
 - [ ] 記録の失敗で本処理を落とさないか → `policy.ts` `recordAudit`
-- [ ] 監査ログにシークレット・パスワード・仮パスワード・署名の本文を書いていないか → 各 `recordAudit` の `meta`
+- [ ] 監査ログにシークレット・パスワード・仮パスワード・署名の本文・確認コードを書いていないか → 各 `recordAudit` の `meta`
+- [ ] 見る範囲が広がる操作（`admin_mode.enter` / `exit`）とログイン先が変わる操作（`user.external_email.set` / `verify`）が記録されるか。
+      プライマリの変更（`PATCH /admin/users/:id` の `primaryAddressId`）は `user.update` に含まれるが `meta` には出ない → `me.ts`、`admin/users.ts`
 - [ ] 監査ログを読む手段と保持期間が文書どおりか（`GET /v1/admin/audit-logs` は owner のセッションか範囲を絞っていない admin キー、
       400 日で消す） → `admin/audit-logs.ts`、`maintenance.ts` `pruneAuditLogs`、`docs/ops/audit-log.md`
 

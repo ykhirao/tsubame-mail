@@ -45,7 +45,6 @@ npm run deploy           # build + wrangler deploy
 - 並列作業の進め方は `.agents/skills/workstream/SKILL.md`、
   レビュー観点は `.agents/skills/code-review/SKILL.md`、
   e2e の書き方と育て方は `.agents/skills/e2e/SKILL.md` にある。
-- 「`docs/spec/security-audit.md` を進めて」と言われたら `.agents/skills/security-audit/SKILL.md` の手順で動く。
 
 - インデントはタブ。`@/*` は `src/*`。
 - **担当ディレクトリの外を編集しない**（`docs/spec/architecture.md` の「2. ディレクトリと所有権」）。

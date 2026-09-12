@@ -76,25 +76,35 @@ describe("decide 表 1・2: 対象外", () => {
 		const d = expectReason(args({ user: { ...user, assigned: false } }), "not_assigned");
 		expect(d.decision).toBe("excluded");
 	});
-	it("owner で割り当て無し・非キャッチオールは対象外（既得権だけの通知を防ぐ）", () => {
-		const d = expectReason(
-			args({ user: { ...user, role: "owner", assigned: false } }),
-			"privilege_only",
-		);
-		expect(d.decision).toBe("excluded");
+	it("owner で割り当て無しは対象外（キャッチオール・レベル明示でも同じ）", () => {
+		for (const over of [
+			{ user: { ...user, role: "owner" as const, assigned: false } },
+			{
+				user: { ...user, role: "owner" as const, assigned: false },
+				prefs: { ...defaultPrefs, mailboxLevels: { [mailbox.id]: "all" as const } },
+			},
+			{
+				user: { ...user, role: "owner" as const, assigned: false },
+				mailbox: { ...mailbox, isCatchAll: true },
+			},
+		] as Parameters<typeof args>[0][]) {
+			const d = decide(args(over));
+			expect(d.reason).toBe("not_assigned");
+			expect(d.decision).toBe("excluded");
+		}
 	});
-	it("owner で割り当て無しでも、メールボックスの通知レベルを明示すればそれに従う", () => {
+	it("owner で割り当てられていれば通知レベルに従う", () => {
 		const optIn = (level: "all" | "off") =>
 			args({
-				user: { ...user, role: "owner", assigned: false },
+				user: { ...user, role: "owner", assigned: true },
 				prefs: { ...defaultPrefs, mailboxLevels: { [mailbox.id]: level } },
 			});
 		expect(decide(optIn("all")).decision).toBe("sent");
 		expect(decide(optIn("off")).decision).not.toBe("sent");
 	});
-	it("owner で割り当て無し・キャッチオールは候補に残り通知される", () => {
+	it("owner で割り当てたキャッチオールなら通知される", () => {
 		const d = expectReason(
-			args({ user: { ...user, role: "owner", assigned: false }, mailbox: { ...mailbox, isCatchAll: true } }),
+			args({ user: { ...user, role: "owner", assigned: true }, mailbox: { ...mailbox, isCatchAll: true } }),
 			"mailbox_level",
 		);
 		expect(d.decision).toBe("sent");
@@ -171,7 +181,7 @@ describe("decide 表 8: 通知ルール", () => {
 	it("必ず通知はキャッチオールのスイッチがオフでも通る", () => {
 		const d = expectReason(
 			args({
-				user: { ...user, role: "owner", assigned: false },
+				user: { ...user, role: "owner", assigned: true },
 				mailbox: { ...mailbox, isCatchAll: true },
 				prefs: { ...defaultPrefs, notifyCatchAll: false, rules: [{ id: "nrl_1", action: "always", enabled: true, matcher: { from: "bob" } }] },
 			}),

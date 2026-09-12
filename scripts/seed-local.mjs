@@ -251,11 +251,21 @@ const boot = await fetch(`${BASE}/api/v1/auth/bootstrap`, {
 if (boot.status === 409) console.log("  既にオーナーがいます");
 else if (!boot.ok) console.log("  作成できませんでした:", await boot.text());
 
+// owner も割り当てたアドレスしか見ない（FR-11 / FR-19）。seed のアドレスは全部オーナーに割り当て、最初をプライマリにする。
+const ownerSelect = `(select id from users where external_email = ${q(OWNER.email)})`;
+d1(
+	ADDRESSES.map(
+		(a) => `insert or ignore into address_grants (user_id,address_id,level) select id, ${q(a.id)}, 'write' from users where external_email = ${q(OWNER.email)};`,
+	).join(" ") +
+		` update users set primary_address_id = ${q(ADDRESSES[0].id)} where id = ${ownerSelect} and primary_address_id is null;`,
+);
+
 console.log(`
 できました。
 
   ${BASE}/login
-  ${OWNER.email} / ${OWNER.password}
+  ${addrOf(ADDRESSES[0])} / ${OWNER.password}
+  （プライマリでログインする。${OWNER.email} は外部アドレスで、設定から確認するまではログインに使えない）
 
 アドレス:
 ${ADDRESSES.map((a) => `  ${addrOf(a)}`).join("\n")}

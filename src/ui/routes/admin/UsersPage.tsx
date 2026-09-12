@@ -43,9 +43,11 @@ function roleBadge(role: AdminUser["role"]): BadgeColor {
 }
 
 function CreateUserModal({
+	addresses,
 	onClose,
 	onCreated,
 }: {
+	addresses: AdminAddress[];
 	onClose: () => void;
 	onCreated: () => void;
 }) {
@@ -56,17 +58,45 @@ function CreateUserModal({
 	const [temporaryPassword, setTemporaryPassword] = useState<string | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
+	const [primaryMode, setPrimaryMode] = useState<"existing" | "new">("existing");
+	const [primaryAddressId, setPrimaryAddressId] = useState("");
+	const [domains, setDomains] = useState<{ id: string; name: string }[]>([]);
+	const [domainId, setDomainId] = useState("");
+	const [localPart, setLocalPart] = useState("");
+	const [displayName, setDisplayName] = useState("");
+
+	useEffect(() => {
+		let cancelled = false;
+		getAllPages<{ id: string; name: string }>("/api/v1/admin/domains").then((list) => {
+			if (cancelled) return;
+			setDomains(list);
+			if (list.length > 0 && list[0]) setDomainId(list[0].id);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	const create = async () => {
 		setError("");
 		setBusy(true);
 		try {
-			const res = await api.post<{ temporaryPassword: string | null }>("/api/v1/admin/users", {
-				name,
-				email,
+			const emailTrimmed = email.trim();
+			const payload = {
+				name: name.trim(),
+				...(emailTrimmed ? { email: emailTrimmed } : {}),
 				role,
 				password: role === "agent" || password === "" ? undefined : password,
-			});
+				primaryAddress:
+					primaryMode === "existing"
+						? { addressId: primaryAddressId }
+						: {
+								domainId,
+								localPart: localPart.trim(),
+								displayName: displayName.trim() ? displayName.trim() : undefined,
+						  },
+			};
+			const res = await api.post<{ temporaryPassword: string | null }>("/api/v1/admin/users", payload);
 			if (res.temporaryPassword != null) setTemporaryPassword(res.temporaryPassword);
 			else onCreated();
 		} catch (e) {
@@ -76,7 +106,17 @@ function CreateUserModal({
 		}
 	};
 
-	const valid = name && email && (role === "agent" || password === "" || password.length >= 12);
+	const mailboxes = addresses.filter((a) => a.kind === "mailbox" && a.archivedAt === null);
+	const emailRequired = role === "owner";
+	const primaryValid =
+		primaryMode === "existing"
+			? primaryAddressId !== ""
+			: domainId !== "" && localPart.trim().length > 0;
+	const valid =
+		name.trim().length > 0 &&
+		primaryValid &&
+		(role === "agent" || password === "" || password.length >= 12) &&
+		(!emailRequired || email.trim().length > 0);
 
 	// 仮パスワードは作成の応答で一度だけ返るので、発行されたら閉じる前に必ず見せる。
 	if (temporaryPassword !== null) {
@@ -106,9 +146,62 @@ function CreateUserModal({
 					<TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="山田 太郎" />
 				</div>
 				<div>
-					<Label>メールアドレス（ログイン ID）</Label>
-					<TextInput value={email} onChange={(e) => setEmail(e.target.value)} placeholder="taro@example.com" />
+					<Label>外部メールアドレス（ログイン ID）{emailRequired ? "※必須" : "（任意）"}</Label>
+					<TextInput
+						value={email}
+						onChange={(e) => setEmail(e.target.value)}
+						placeholder="hoge@example.net"
+					/>
+					<p className="mt-1 text-xs text-[var(--text-muted)]">
+						{emailRequired
+							? "owner には外部メールアドレスが必須です。認証はこのアドレスで行います。"
+							: "空にすると、この人のログインはプライマリアドレスを使います。"}
+					</p>
 				</div>
+				<div>
+					<Label>プライマリ（その人が主に使うメールボックス）</Label>
+					<Select
+						value={primaryMode}
+						onChange={(e) => setPrimaryMode(e.target.value as "existing" | "new")}
+					>
+						<option value="existing">既存のアドレスから選ぶ</option>
+						<option value="new">この場で新しいアドレスを作る</option>
+					</Select>
+				</div>
+				{primaryMode === "existing" ? (
+					<div>
+						<Label>プライマリにするメールボックス</Label>
+						<Select value={primaryAddressId} onChange={(e) => setPrimaryAddressId(e.target.value)}>
+							<option value="">選択してください</option>
+							{mailboxes.map((a) => (
+								<option key={a.id} value={a.id}>
+									{a.address}
+								</option>
+							))}
+						</Select>
+					</div>
+				) : (
+					<div className="space-y-4">
+						<div>
+							<Label>ドメイン</Label>
+							<Select value={domainId} onChange={(e) => setDomainId(e.target.value)}>
+								{domains.map((d) => (
+									<option key={d.id} value={d.id}>
+										{d.name}
+									</option>
+								))}
+							</Select>
+						</div>
+						<div>
+							<Label>ローカルパート（@ の前）</Label>
+							<TextInput value={localPart} onChange={(e) => setLocalPart(e.target.value)} placeholder="taro" />
+						</div>
+						<div>
+							<Label>表示名（任意）</Label>
+							<TextInput value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="山田 太郎" />
+						</div>
+					</div>
+				)}
 				<div>
 					<Label>ロール</Label>
 					<Select value={role} onChange={(e) => setRole(e.target.value as AdminUser["role"])}>
@@ -210,6 +303,11 @@ export function GrantsModal({
 					<p className="text-sm text-[var(--text-muted)]">
 						read = 読むだけ / write = 読み書き（そのアドレスで送信も可能）。エイリアスには write を付けないでください。
 					</p>
+					{loaded && user.primaryAddressId && levels[user.primaryAddressId] !== "write" && (
+						<p className="text-xs text-[var(--danger)]">
+							プライマリの write は外せません。先にプライマリを変更してください。
+						</p>
+					)}
 					<div className="max-h-96 overflow-y-auto rounded-md border border-[var(--line)]">
 						<div className="hidden overflow-x-auto md:block">
 						<table className="w-full min-w-[720px]">
@@ -455,7 +553,8 @@ export function UsersPage() {
 				<div className="mb-4">
 					<div className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--text-muted)]">
 						オーナーが社内メンバーと AI エージェントを作成します。自己登録はありません。各ユーザーに
-						アドレスごとの権限（read / write）を割り当てられます。AI エージェントは
+						アドレスごとの権限（read / write）を割り当てられます。プライマリはその人が主に使う
+						メールボックスで、必ず write で割り当てられます。AI エージェントは
 						AI エージェント（agent）ロールで作ります。
 					</div>
 				</div>
@@ -471,32 +570,51 @@ export function UsersPage() {
 					) : (
 						<>
 						<div className="hidden overflow-x-auto md:block">
-						<table className="w-full min-w-[720px]">
-							<thead>
-								<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
-									<th className={thCls}>名前</th>
-									<th className={thCls}>メール</th>
-									<th className={thCls}>ロール</th>
-									<th className={thCls}>状態</th>
-									<th className={thCls}>作成日</th>
-									<th className={thCls}>操作</th>
-								</tr>
-							</thead>
-							<tbody>
-								{users.map((u) => (
-									<TableRow key={u.id}>
-										<td className={tdCls}>
-											<Link
-												to={`/admin/users/${u.id}`}
-												className="font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+						<table className="w-full min-w-[880px]">
+						<thead>
+							<tr className="border-b border-[var(--line)] bg-[var(--surface-sunken)]">
+								<th className={thCls}>名前</th>
+								<th className={thCls}>外部メール</th>
+								<th className={thCls}>プライマリ</th>
+								<th className={thCls}>ロール</th>
+								<th className={thCls}>状態</th>
+								<th className={thCls}>作成日</th>
+								<th className={thCls}>操作</th>
+							</tr>
+						</thead>
+						<tbody>
+							{users.map((u) => (
+								<TableRow key={u.id}>
+									<td className={tdCls}>
+										<Link
+											to={`/admin/users/${u.id}`}
+											className="font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+										>
+											{u.name}
+										</Link>
+										{!u.primaryAddressId && (
+											<span
+												title="プライマリ未設定"
+												className="ml-1 cursor-help text-[var(--warning)]"
 											>
-												{u.name}
-											</Link>
-										</td>
-										<td className={tdCls}>{u.email}</td>
-										<td className={tdCls}>
-											<Badge color={roleBadge(u.role)}>{roleLabels[u.role]}</Badge>
-										</td>
+												⚠
+											</span>
+										)}
+									</td>
+									<td className={tdCls}>
+										{u.externalEmail ? u.externalEmail : "—"}
+										{u.externalEmail && (
+											<span className="ml-1">
+												<Badge color={u.externalVerified ? "green" : "yellow"}>
+													{u.externalVerified ? "確認済み" : "未確認"}
+												</Badge>
+											</span>
+										)}
+									</td>
+									<td className={tdCls}>{u.primaryAddress ?? "—"}</td>
+									<td className={tdCls}>
+										<Badge color={roleBadge(u.role)}>{roleLabels[u.role]}</Badge>
+									</td>
 										<td className={tdCls}>
 											<Badge color={u.status === "active" ? "green" : "red"}>
 												{u.status === "active" ? "有効" : "無効"}
@@ -534,7 +652,8 @@ export function UsersPage() {
 										<Badge color={roleBadge(u.role)}>{roleLabels[u.role]}</Badge>
 									</div>
 									<div className="mt-2 space-y-1">
-										<MobileField label="メール">{u.email}</MobileField>
+										<MobileField label="外部メール">{u.externalEmail ?? "—"}</MobileField>
+										<MobileField label="プライマリ">{u.primaryAddress ?? "—"}</MobileField>
 										<MobileField label="状態">
 											<Badge color={u.status === "active" ? "green" : "red"}>
 												{u.status === "active" ? "有効" : "無効"}
@@ -562,6 +681,7 @@ export function UsersPage() {
 
 				{showCreate && (
 					<CreateUserModal
+						addresses={addresses}
 						onClose={() => setShowCreate(false)}
 						onCreated={() => {
 							setShowCreate(false);

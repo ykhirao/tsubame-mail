@@ -236,10 +236,17 @@ describe("POST /v1/auth/logout と GET /v1/auth/session", () => {
 });
 
 describe("GET /v1/me", () => {
-	it("owner はアドレス無制限として返る", async () => {
+	it("owner は割り当てたアドレスだけを見る（FR-11）", async () => {
 		const { cookie } = await bootstrap();
 		const domainId = await createDomain();
-		await createAddress(domainId, "info");
+		const infoId = await createAddress(domainId, "info");
+		// owner も割り当てが要る。見せたいアドレスを write で付ける。
+		const [owner] = await db()
+			.select()
+			.from(schema.users)
+			.where(eq(schema.users.role, "owner"))
+			.limit(1);
+		await grant(owner!.id, infoId, "write");
 
 		const res = await request(app, "/api/v1/me", { cookie });
 		expect(res.status).toBe(200);
@@ -251,7 +258,7 @@ describe("GET /v1/me", () => {
 		};
 		expect(body.role).toBe("owner");
 		expect(body.via).toBe("session");
-		expect(body.addressIds).toBe("all");
+		expect(body.addressIds).toEqual([infoId]);
 		expect(body.addresses).toHaveLength(1);
 		expect(body.addresses[0]!.canWrite).toBe(true);
 	});
@@ -291,9 +298,11 @@ describe("GET /v1/me", () => {
 		await bootstrap();
 		const domainId = await createDomain();
 		const a = await createAddress(domainId, "a");
-		await createAddress(domainId, "b");
+		const b = await createAddress(domainId, "b");
 
 		const owner = await createUser({ role: "owner", email: "o2@example.test" });
+		await grant(owner.id, a, "write");
+		await grant(owner.id, b, "write");
 		const key = await createApiKeyFor({ userId: owner.id, addressIds: [a], scopes: ["read"] });
 
 		const res = await request(app, "/api/v1/me", { bearer: key.token });
@@ -579,6 +588,8 @@ describe("admin API キーからの発行は自分の範囲まで（#58）", () 
 		const aId = await createAddress(domainId, "a");
 		const bId = await createAddress(domainId, "b");
 		const owner = await createUser({ role: "owner", email: "admin-owner@example.test" });
+		// owner にも割り当てが要る。キーの範囲（ここでは a だけ）は割り当ての範囲でさらに絞られる。
+		await grant(owner.id, aId, "write");
 		const parentExpiry = new Date(Date.now() + 60_000);
 		const parent = await createApiKeyFor({
 			userId: owner.id,

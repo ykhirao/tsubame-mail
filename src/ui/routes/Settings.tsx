@@ -23,6 +23,14 @@ export function Settings() {
 	const [pwMsg, setPwMsg] = useState<string | null>(null);
 	const [pwError, setPwError] = useState<string | null>(null);
 
+	const [externalEmail, setExternalEmail] = useState(me?.externalEmail ?? "");
+	const [changingEmail, setChangingEmail] = useState(false);
+	const [emailMsg, setEmailMsg] = useState<string | null>(null);
+	const [emailError, setEmailError] = useState<string | null>(null);
+	const [code, setCode] = useState("");
+	const [verifying, setVerifying] = useState(false);
+	const [verifyingMsg, setVerifyingMsg] = useState<string | null>(null);
+
 	const [sigs, setSigs] = useState<Record<string, string>>({});
 	const [mailboxes, setMailboxes] = useState<MyAddress[]>([]);
 	const [savingSigId, setSavingSigId] = useState<string | null>(null);
@@ -86,6 +94,46 @@ export function Settings() {
 			setPwError(err instanceof Error ? err.message : "変更に失敗しました");
 		} finally {
 			setSavingPw(false);
+		}
+	};
+
+	const saveExternalEmail = async (resend: boolean) => {
+		setChangingEmail(true);
+		setEmailMsg(null);
+		setEmailError(null);
+		setCode("");
+		setVerifyingMsg(null);
+		try {
+			const res = resend
+				? await MeApi.resendExternalEmail()
+				: await MeApi.setExternalEmail(externalEmail.trim());
+			await refresh();
+			setEmailMsg(
+				res.sent
+					? resend
+						? "確認メールを送り直しました。"
+						: "確認メールを送りました。コードを入力してください"
+					: (res.reason ?? "確認メールを送れませんでした"),
+			);
+		} catch (err) {
+			setEmailError(err instanceof Error ? err.message : "登録に失敗しました");
+		} finally {
+			setChangingEmail(false);
+		}
+	};
+
+	const verifyCode = async () => {
+		setVerifying(true);
+		setVerifyingMsg(null);
+		try {
+			await MeApi.verifyExternalEmail(code);
+			await refresh();
+			setCode("");
+			setVerifyingMsg("確認しました。このアドレスでログインできます");
+		} catch (err) {
+			setVerifyingMsg(err instanceof Error ? err.message : "確認に失敗しました");
+		} finally {
+			setVerifying(false);
 		}
 	};
 
@@ -160,6 +208,71 @@ export function Settings() {
 					</button>
 				</div>
 			</form>
+
+			<section className="card flex flex-col gap-3 p-5">
+				<h2 className="text-sm font-semibold text-[var(--text)]">外部アドレス</h2>
+				<p className="text-xs text-[var(--text-muted)]">
+					このアプリ以外のメールアドレス。そこに送った確認コードを入れて確認すると、そのアドレスでもログインできます。
+				</p>
+				{me?.externalEmail ? (
+					<div className="flex items-center gap-2 text-sm">
+						<span className="text-[var(--text)]">{me.externalEmail}</span>
+						<span
+							className={me.externalVerified ? "text-[var(--success)]" : "text-[var(--warning)]"}
+						>
+							{me.externalVerified ? "確認済み" : "未確認"}
+						</span>
+					</div>
+				) : (
+					<p className="text-sm text-[var(--text-muted)]">登録されていません。</p>
+				)}
+				<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+					<label className="w-28 shrink-0 text-sm text-[var(--text-muted)]">メールアドレス</label>
+					<input
+						type="email"
+						value={externalEmail}
+						onChange={(e) => setExternalEmail(e.target.value)}
+						className={inputCls}
+					/>
+				</div>
+				<div className="flex justify-end">
+					<button type="button" onClick={() => void saveExternalEmail(false)} disabled={changingEmail} className={saveBtnCls}>
+						{changingEmail ? "送信中…" : "登録して確認メールを送る"}
+					</button>
+				</div>
+				{emailError && (
+					<div className="rounded border border-[var(--danger)] bg-[var(--surface-hover)] px-3 py-2 text-sm text-[var(--danger)]">
+						{emailError}
+					</div>
+				)}
+				{emailMsg && <div className="text-sm text-[var(--text-muted)]">{emailMsg}</div>}
+				{me?.externalEmail && !me.externalVerified && (
+					<div className="flex flex-col gap-2 border-t border-[var(--line)] pt-3">
+						<p className="text-xs text-[var(--warning)]">
+							確認が完了していません。届いたメールの 6 桁のコードを入力してください。
+						</p>
+						<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+							<label className="w-28 shrink-0 text-sm text-[var(--text-muted)]">確認コード</label>
+							<input
+								inputMode="numeric"
+								maxLength={6}
+								value={code}
+								onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+								className={inputCls}
+							/>
+						</div>
+						<div className="flex gap-2">
+							<button type="button" onClick={() => void saveExternalEmail(true)} disabled={changingEmail} className={saveBtnCls}>
+								確認メールを送り直す
+							</button>
+							<button type="button" onClick={() => void verifyCode()} disabled={verifying} className={saveBtnCls}>
+								{verifying ? "確認中…" : "確認する"}
+							</button>
+						</div>
+						{verifyingMsg && <div className="text-sm text-[var(--text-muted)]">{verifyingMsg}</div>}
+					</div>
+				)}
+			</section>
 
 			<section className="card flex flex-col gap-3 p-5">
 				<h2 className="text-sm font-semibold text-[var(--text)]">メールボックスの署名</h2>

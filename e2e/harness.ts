@@ -335,6 +335,15 @@ export async function seedDomain(
 			isCatchAll: false,
 		});
 	}
+	// owner も割り当てたアドレスしか見ない（FR-11）。seed のアドレスは既存の owner の持ち物として割り当てる。
+	const { addressGrants, users } = await import("@/db/schema");
+	const { eq } = await import("drizzle-orm");
+	const owners = await db.select({ id: users.id }).from(users).where(eq(users.role, "owner")).all();
+	for (const o of owners) {
+		for (const id of Object.values(addressIds)) {
+			await db.insert(addressGrants).values({ userId: o.id, addressId: id, level: "write" }).onConflictDoNothing();
+		}
+	}
 	return { domainId, addressIds };
 }
 
@@ -370,4 +379,53 @@ export function mime(opts: {
 	}
 	for (const [k, v] of Object.entries(opts.extraHeaders ?? {})) lines.push(`${k}: ${v}`);
 	return `${lines.join("\r\n")}\r\n\r\n${opts.body ?? "本文です。"}\r\n`;
+}
+
+/**
+ * `POST /admin/users` はプライマリ必須（FR-4-5）。プライマリを確かめるのが目的でないテストのために、
+ * 指定が無ければ使い捨てのメールボックスをプライマリにし、外部アドレスは確認済みにする
+ * （外部アドレスの確認は fr04-外部アドレス が確かめる）。
+ */
+export async function createUserViaApi(
+	h: Harness,
+	client: Client,
+	body: Record<string, unknown>,
+): Promise<ApiResponse<any>> {
+	const { getDb } = await import("@/db/client");
+	const { addresses, domains, users } = await import("@/db/schema");
+	const { newId } = await import("@/lib/id");
+	const { eq } = await import("drizzle-orm");
+	const db = getDb(h.env);
+	const payload = { ...body };
+	if (payload.primaryAddress === undefined) {
+		const domainName = "primary.tsubame.test";
+		let [domain] = await db.select({ id: domains.id }).from(domains).where(eq(domains.name, domainName));
+		if (!domain) {
+			domain = { id: newId("domain") };
+			await db.insert(domains).values({
+				id: domain.id,
+				name: domainName,
+				zoneId: "zone_primary",
+				zoneName: "tsubame.test",
+				mode: "subdomain",
+				routingStatus: "active",
+				sendingStatus: "active",
+			});
+		}
+		const addressId = newId("address");
+		const localPart = `u-${addressId.slice(-8).toLowerCase()}`;
+		await db.insert(addresses).values({
+			id: addressId,
+			domainId: domain.id,
+			localPart,
+			address: `${localPart}@${domainName}`,
+			kind: "mailbox",
+		});
+		payload.primaryAddress = { addressId };
+	}
+	const res = await client.post("/api/v1/admin/users", payload);
+	if (res.status < 300 && typeof payload.email === "string") {
+		await db.update(users).set({ externalVerifiedAt: new Date() }).where(eq(users.id, res.body.id));
+	}
+	return res;
 }

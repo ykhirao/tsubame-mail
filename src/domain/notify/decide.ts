@@ -112,7 +112,6 @@ export type NotifyInput = {
 export type ReasonCode =
 	| "user_ineligible"
 	| "not_assigned"
-	| "privilege_only"
 	| "disabled"
 	| "paused"
 	| "rule_trashed"
@@ -202,15 +201,9 @@ export function decide(input: NotifyInput): Decision {
 	if (user.role === "agent" || user.status === "disabled" || user.deviceCount === 0) {
 		return { decision: "excluded", reason: "user_ineligible" };
 	}
-	// owner は割り当てが無くても特権で見える。全部で鳴らないよう既定では外すが、キャッチオールの受け皿と、
-	// 本人がメールボックスの通知レベルを明示したものは候補に残す（レベルは 10 で見る）。
-	const ownerOptedIn =
-		user.role === "owner" && (mailbox.isCatchAll || prefs.mailboxLevels[mailbox.id] !== undefined);
-	if (!user.assigned && !ownerOptedIn) {
-		return {
-			decision: "excluded",
-			reason: user.role === "owner" ? "privilege_only" : "not_assigned",
-		};
+	// 管理者モードは通知に影響しない。owner も割り当てたメールボックス（キャッチオール含む）だけを対象にする（FR-19）。
+	if (!user.assigned) {
+		return { decision: "excluded", reason: "not_assigned" };
 	}
 
 	if (!prefs.enabled) return { decision: "dropped", reason: "disabled" };

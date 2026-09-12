@@ -9,6 +9,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../e2e/harness";
 
 describe("共有メールボックスの read 割り当て", () => {
@@ -17,7 +18,7 @@ describe("共有メールボックスの read 割り当て", () => {
 	let sharedId: string;
 
 	async function createMember(email: string, level: "read" | "write") {
-		const created = await owner.post("/api/v1/admin/users", { email, name: email, role: "member" });
+		const created = await createUserViaApi(h, owner, { email, name: email, role: "member" });
 		expect(created.status).toBe(201);
 		const temp = created.body.temporaryPassword as string;
 		await owner.put(`/api/v1/admin/users/${created.body.id}/grants`, {

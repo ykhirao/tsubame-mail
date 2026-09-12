@@ -10,6 +10,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-7 ルーティングルール", () => {
@@ -200,7 +201,7 @@ describe("FR-7 ルーティングルール", () => {
 	});
 
 	async function memberAndKeyedOwner(): Promise<[Client, Client]> {
-		const memberCreate = await owner.post("/api/v1/admin/users", {
+		const memberCreate = await createUserViaApi(h, owner, {
 			email: "member@tsubame.test",
 			name: "メンバー",
 			role: "member",

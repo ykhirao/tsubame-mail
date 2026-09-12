@@ -85,14 +85,14 @@ describe("#83 expiresAt のオーバーフローでは無期限キーができ�
 });
 
 describe("#100 addressIds の実在と上限", () => {
-	it("存在しない addressId は 400（owner の all でも保存されない）", async () => {
+	it("存在しない addressId は保存されない（割り当てが無い owner は 403）", async () => {
 		const cookie = await ownerCookie();
 		const res = await request(app, "/api/v1/me/api-keys", {
 			method: "POST",
 			cookie,
 			body: JSON.stringify({ name: "k", scopes: ["read"], addressIds: ["adr_nope"] }),
 		});
-		expect(res.status).toBe(400);
+		expect(res.status).toBe(403);
 	});
 
 	it("addressIds が上限（100）を超えると 400", async () => {

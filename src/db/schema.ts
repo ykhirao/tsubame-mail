@@ -11,7 +11,16 @@ export const users = sqliteTable(
 	"users",
 	{
 		id: text("id").primaryKey(),
+		/**
+		 * 旧ログイン用。外部アドレスが無い利用者には `<id>@users.invalid` を入れる。NOT NULL を外すにはテーブルの
+		 * 作り直しが要り、D1 では子（セッション・キー・割り当て）の cascade 削除が走るので残している。
+		 */
 		email: text("email").notNull(),
+		/** ログインに使える外部アドレス。確認済み（externalVerifiedAt あり）でなければ、プライマリの無い owner しか使えない。 */
+		externalEmail: text("external_email"),
+		externalVerifiedAt: integer("external_verified_at", { mode: "timestamp" }),
+		/** 利用者の主アドレス（内部）。ログインにも使える。member / agent は必ず持つ。 */
+		primaryAddressId: text("primary_address_id"),
 		name: text("name").notNull(),
 		passwordHash: text("password_hash"),
 		role: text("role", { enum: ["owner", "member", "agent"] }).notNull(),
@@ -24,7 +33,26 @@ export const users = sqliteTable(
 		lastLoginAt: integer("last_login_at", { mode: "timestamp" }),
 		createdAt: createdAt(),
 	},
-	(t) => [uniqueIndex("users_email_idx").on(t.email)],
+	(t) => [
+		uniqueIndex("users_email_idx").on(t.email),
+		uniqueIndex("users_external_email_idx").on(t.externalEmail),
+		uniqueIndex("users_primary_address_idx").on(t.primaryAddressId),
+	],
+);
+
+/** 外部アドレスの確認コード。平文は送ったメールにだけあり、ここにはハッシュを置く。 */
+export const emailVerifications = sqliteTable(
+	"email_verifications",
+	{
+		userId: text("user_id")
+			.primaryKey()
+			.references(() => users.id, { onDelete: "cascade" }),
+		email: text("email").notNull(),
+		codeHash: text("code_hash").notNull(),
+		attempts: integer("attempts").notNull().default(0),
+		expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+		createdAt: createdAt(),
+	},
 );
 
 export const sessions = sqliteTable(
@@ -38,6 +66,8 @@ export const sessions = sqliteTable(
 		expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 		userAgent: text("user_agent"),
 		ip: text("ip"),
+		/** owner の管理者モードの期限。これより前なら全アドレスを読める（FR-19）。 */
+		adminModeUntil: integer("admin_mode_until", { mode: "timestamp" }),
 		createdAt: createdAt(),
 	},
 	(t) => [uniqueIndex("sessions_token_idx").on(t.tokenHash), index("sessions_user_idx").on(t.userId)],
@@ -119,7 +149,7 @@ export const addresses = sqliteTable(
 	],
 );
 
-/** owner はこの表に依らず全アドレスを見られる。 */
+/** owner もこの表で割り当てたアドレスしか見ない。全部を読めるのは管理者モードのときだけ（FR-19）。 */
 export const addressGrants = sqliteTable(
 	"address_grants",
 	{
@@ -130,6 +160,8 @@ export const addressGrants = sqliteTable(
 			.notNull()
 			.references(() => addresses.id, { onDelete: "cascade" }),
 		level: text("level", { enum: ["read", "write"] }).notNull(),
+		/** まとめた受信箱・一覧・検索の既定から外す。見え方の設定で、権限と通知は変えない。 */
+		hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
 		createdAt: createdAt(),
 	},
 	(t) => [

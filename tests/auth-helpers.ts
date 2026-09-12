@@ -99,6 +99,8 @@ export async function createUser(opts: {
 		.values({
 			id,
 			email,
+			externalEmail: email,
+			externalVerifiedAt: new Date(),
 			name: opts.name ?? "テスト",
 			passwordHash: opts.password ? await hashPassword(opts.password, 1000) : null,
 			role: opts.role,

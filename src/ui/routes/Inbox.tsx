@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import type { MessageDetail, ThreadListItem } from "@/shared/contracts/messages";
-import { MessagesApi, ThreadsApi, AddressesApi } from "@/ui/lib/api";
+import { MessagesApi, ThreadsApi, AddressesApi, useIncludeHidden } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
 import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
@@ -52,6 +52,7 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 	const selected = searchParams.get("address") ?? "";
 	const view = searchParams.get("view") ?? "inbox";
 	const isMobile = useIsMobile();
+	const includeHidden = useIncludeHidden();
 	const store = useListState();
 
 	const query = { address: selected, view } as const;
@@ -79,6 +80,7 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 		const queryParams = {
 			...(selected ? { address: selected } : {}),
 			...(view !== "inbox" ? { view: view as "starred" | "sent" | "trash" } : {}),
+			...(includeHidden && !selected ? { includeHidden: "true" as const } : {}),
 		};
 		if (cursor) {
 			setLoadingMore(true);
@@ -116,7 +118,7 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 		} finally {
 			setLoading(false);
 		}
-	}, [selected, view]);
+	}, [selected, view, includeHidden]);
 
 	useEffect(() => {
 		idsRef.current = threads.map((t) => t.id);

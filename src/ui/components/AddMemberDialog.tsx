@@ -1,5 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { UsersApi } from "@/ui/lib/api";
+import { getAllPages } from "@/ui/routes/admin/api";
+
+type DomainOption = { id: string; name: string };
+type AddressOption = { id: string; address: string; kind: string; archivedAt: number | null };
 
 // 仮パスワードはこの画面でしか表示されない。閉じたらもう誰も平文を読めない。
 export function AddMemberDialog({ onClose }: { onClose: () => void }) {
@@ -10,18 +14,51 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 	const [error, setError] = useState("");
 	const [issued, setIssued] = useState<{ email: string; password: string | null } | null>(null);
 	const [copied, setCopied] = useState(false);
+	const [primaryMode, setPrimaryMode] = useState<"new" | "existing">("new");
+	const [domains, setDomains] = useState<DomainOption[]>([]);
+	const [mailboxes, setMailboxes] = useState<AddressOption[]>([]);
+	const [domainId, setDomainId] = useState("");
+	const [localPart, setLocalPart] = useState("");
+	const [addressId, setAddressId] = useState("");
+
+	useEffect(() => {
+		let alive = true;
+		void Promise.all([
+			getAllPages<DomainOption>("/api/v1/admin/domains"),
+			getAllPages<AddressOption>("/api/v1/admin/addresses"),
+		])
+			.then(([ds, as]) => {
+				if (!alive) return;
+				setDomains(ds);
+				setDomainId((cur) => cur || ds[0]?.id || "");
+				setMailboxes(as.filter((a) => a.kind === "mailbox" && a.archivedAt === null));
+			})
+			.catch(() => {});
+		return () => {
+			alive = false;
+		};
+	}, []);
+
+	const primaryDomain = domains.find((d) => d.id === domainId)?.name ?? "";
 
 	const submit = async (e: React.FormEvent) => {
 		e.preventDefault();
 		setBusy(true);
 		setError("");
 		try {
+			const external = email.trim().toLowerCase();
 			const created = await UsersApi.create({
-				email: email.trim().toLowerCase(),
+				...(external ? { email: external } : {}),
 				name: name.trim(),
 				role,
+				primaryAddress:
+					primaryMode === "new" ? { domainId, localPart: localPart.trim().toLowerCase() } : { addressId },
 			});
-			setIssued({ email: created.email, password: created.temporaryPassword });
+			const login =
+				primaryMode === "new"
+					? `${localPart.trim().toLowerCase()}@${primaryDomain}`
+					: (mailboxes.find((m) => m.id === addressId)?.address ?? created.email);
+			setIssued({ email: login, password: created.temporaryPassword });
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "追加できませんでした");
 		} finally {
@@ -38,7 +75,7 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 				{issued ? (
 					<>
 						<h2 className="mb-1 text-lg font-bold text-[var(--text)]">メンバーを追加しました</h2>
-						<p className="mb-4 text-sm text-[var(--text-muted)]">{issued.email}</p>
+						<p className="mb-4 text-sm text-[var(--text-muted)]">ログイン: {issued.email}</p>
 
 						{issued.password ? (
 							<>
@@ -88,13 +125,64 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 							className={`${field} mb-3`}
 						/>
 
-						<label className="mb-1 block text-sm text-[var(--text)]">メールアドレス</label>
+						<label className="mb-1 block text-sm text-[var(--text)]">プライマリアドレス</label>
 						<p className="mb-1 text-xs text-[var(--text-muted)]">
-							ログインに使うだけなので、このアプリで受信するアドレスでなくてよい。
+							この人のメールボックス。ログインにも使える。本人に割り当てられ、他の人からは見えない。
+						</p>
+						<div className="mb-2 flex gap-4 text-sm text-[var(--text)]">
+							<label className="flex items-center gap-1.5">
+								<input type="radio" checked={primaryMode === "new"} onChange={() => setPrimaryMode("new")} />
+								新しく作る
+							</label>
+							<label className="flex items-center gap-1.5">
+								<input
+									type="radio"
+									checked={primaryMode === "existing"}
+									onChange={() => setPrimaryMode("existing")}
+								/>
+								既存から選ぶ
+							</label>
+						</div>
+						{primaryMode === "new" ? (
+							<div className="mb-3 flex items-center gap-1">
+								<input
+									required
+									value={localPart}
+									onChange={(e) => setLocalPart(e.target.value)}
+									placeholder="tanaka"
+									className={`${field} min-w-0 flex-1`}
+								/>
+								<span className="shrink-0 text-sm text-[var(--text-muted)]">@</span>
+								<select value={domainId} onChange={(e) => setDomainId(e.target.value)} className={`${field} min-w-0 flex-1`}>
+									{domains.map((d) => (
+										<option key={d.id} value={d.id}>
+											{d.name}
+										</option>
+									))}
+								</select>
+							</div>
+						) : (
+							<select
+								required
+								value={addressId}
+								onChange={(e) => setAddressId(e.target.value)}
+								className={`${field} mb-3`}
+							>
+								<option value="">選んでください</option>
+								{mailboxes.map((m) => (
+									<option key={m.id} value={m.id}>
+										{m.address}
+									</option>
+								))}
+							</select>
+						)}
+
+						<label className="mb-1 block text-sm text-[var(--text)]">外部アドレス（任意）</label>
+						<p className="mb-1 text-xs text-[var(--text-muted)]">
+							Gmail など。本人が後から登録・確認してもよい。確認するまではログインに使えない。
 						</p>
 						<input
 							type="email"
-							required
 							value={email}
 							onChange={(e) => setEmail(e.target.value)}
 							className={`${field} mb-3`}
@@ -110,7 +198,7 @@ export function AddMemberDialog({ onClose }: { onClose: () => void }) {
 							<option value="agent">エージェント（AI が API キーで使う）</option>
 						</select>
 						<p className="mb-4 text-xs text-[var(--text-muted)]">
-							どちらも、触れるメールボックスは管理画面で割り当てる。
+							プライマリ以外に触れるメールボックスは、管理画面で割り当てる。
 						</p>
 
 						{error && <p className="mb-3 text-sm text-[var(--danger)]">{error}</p>}

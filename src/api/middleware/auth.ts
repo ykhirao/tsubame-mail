@@ -102,7 +102,11 @@ async function principalFromSession(c: Ctx, token: string): Promise<Principal | 
 	const user = await loadActiveUser(conn, session.userId);
 	if (!user) return null;
 
-	return await resolvePrincipal(conn, { user: { id: user.id, role: user.role }, sessionId: session.id });
+	return await resolvePrincipal(conn, {
+		user: { id: user.id, role: user.role },
+		sessionId: session.id,
+		adminModeUntil: session.adminModeUntil,
+	});
 }
 
 async function loadActiveUser(conn: Db, userId: string) {
@@ -189,7 +193,7 @@ export const requireUnrestricted: MiddlewareHandler<AppEnv> = async (c, next) =>
 		principal = resolved;
 		c.set("principal", principal);
 	}
-	if (principal.via === "api_key" && principal.addressIds !== "all") {
+	if (principal.via === "api_key" && principal.keyRestricted) {
 		throw forbidden("範囲を絞った API キーでは管理の変更はできません");
 	}
 	await next();

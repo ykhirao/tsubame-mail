@@ -83,6 +83,8 @@ export const messageListQuery = paginationQuery.extend({
 	has_attachment: boolParam,
 	thread: z.string().optional(),
 	order: z.enum(["received_at", "relevance"]).default("received_at"),
+	/** アドレスで絞っていないとき、自分で非表示にしたメールボックスのメールも含める。 */
+	includeHidden: boolParam,
 });
 export type MessageListQuery = z.infer<typeof messageListQuery>;
 
@@ -130,6 +132,8 @@ export type ThreadListResponse = z.infer<typeof threadListResponse>;
 export const threadListQuery = paginationQuery.extend({
 	address: z.string().optional(),
 	view: z.enum(["inbox", "starred", "sent", "trash"]).optional(),
+	/** アドレスで絞っていないとき、自分で非表示にしたメールボックスも含める。 */
+	includeHidden: boolParam,
 });
 export type ThreadListQuery = z.infer<typeof threadListQuery>;
 

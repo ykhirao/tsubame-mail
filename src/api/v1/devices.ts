@@ -4,7 +4,7 @@ import { schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
 import { readJson } from "@/lib/validate";
-import { addressSetHas, recordAudit } from "@/domain/access/policy";
+import { addressSetHas, recordAudit, ownAddresses } from "@/domain/access/policy";
 import { clientIp } from "@/api/middleware/auth";
 import { deviceInput, deviceUpdate } from "@/shared/contracts/notifications";
 import { forbidden, invalidRequest, notFound } from "@/shared/errors";
@@ -185,7 +185,8 @@ async function requireOwnDevice(db: Db, principal: Principal, id: string) {
 }
 
 async function validateAddressIds(db: Db, principal: Principal, addressIds: string[]): Promise<string[]> {
-	const denied = addressIds.filter((id) => !addressSetHas(principal.addressIds, id));
+	const own = ownAddresses(principal);
+	const denied = addressIds.filter((id) => !addressSetHas(own, id));
 	if (denied.length > 0) throw forbidden("権限の無いメールボックスです");
 	return [...new Set(addressIds)];
 }

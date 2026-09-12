@@ -10,6 +10,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-3 検索（重点機能）", () => {
@@ -49,7 +50,7 @@ describe("FR-3 検索（重点機能）", () => {
 		email: string,
 		grants: { addressId: string; level: "read" | "write" }[],
 	): Promise<Client> {
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email,
 			name: "メンバー",
 			role: "member",

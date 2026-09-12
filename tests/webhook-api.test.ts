@@ -307,6 +307,7 @@ describe("webhook の addressIds / events の検査（#44）", () => {
 			scopes: ["read", "send", "admin"],
 			addressIds: ["adr_visible"],
 			writableAddressIds: ["adr_visible"],
+			keyRestricted: true,
 		};
 		const bare = new Hono<AppEnv>();
 		bare.onError((err, c) =>

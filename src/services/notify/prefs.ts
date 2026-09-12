@@ -80,23 +80,21 @@ export async function loadPrefs(db: Db, userId: string): Promise<NotificationPre
 export async function countUnread(
 	db: Db,
 	userId: string,
-	role: Role,
+	_role: Role,
 	prefs: NotificationPrefs,
 ): Promise<number> {
 	if (prefs.badge === "off") return 0;
-	const filter =
-		role === "owner"
-			? undefined
-			: jsonIdsIn(
-					schema.threads.addressId,
-					(
-						await db
-							.select({ addressId: schema.addressGrants.addressId })
-							.from(schema.addressGrants)
-							.where(eq(schema.addressGrants.userId, userId))
-							.all()
-					).map((g) => g.addressId),
-				);
+	// owner も割り当てたメールボックスだけ数える（管理者モードで全アドレスが見えても数は増やさない）。
+	const filter = jsonIdsIn(
+		schema.threads.addressId,
+		(
+			await db
+				.select({ addressId: schema.addressGrants.addressId })
+				.from(schema.addressGrants)
+				.where(eq(schema.addressGrants.userId, userId))
+				.all()
+		).map((g) => g.addressId),
+	);
 	const rows = await db
 		.select({ addressId: schema.threads.addressId, unread: schema.threads.unreadCount })
 		.from(schema.threads)

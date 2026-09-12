@@ -30,10 +30,16 @@ export type Principal = {
 	role: Role;
 	via: "session" | "api_key";
 	scopes: Scope[];
-	/** "all" は owner のみ。 */
+	/** "all" は管理者モードの owner だけ（FR-19）。それ以外は割り当てたアドレス。 */
 	addressIds: string[] | "all";
-	/** addressIds の部分集合。 */
+	/** addressIds の部分集合。管理者モードでも割り当てたアドレスだけ。 */
 	writableAddressIds: string[] | "all";
+	/** 管理者モードで全アドレスを読めるとき true。 */
+	adminMode?: boolean;
+	/** 管理者モードのとき、自分に割り当てたアドレス（既読などの変更はここだけ）。 */
+	ownAddressIds?: string[];
+	/** API キーが対象アドレスを絞っているとき true。管理の変更を止める判定に使う（#129）。 */
+	keyRestricted?: boolean;
 	apiKeyId?: string;
 	/** セッションで入ったときだけ。端末の購読をログアウトで消すのに使う。 */
 	sessionId?: string;

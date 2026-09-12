@@ -63,11 +63,12 @@ function generateSecret(): string {
 async function assertAddressIdsValid(
 	db: ReturnType<typeof getDb>,
 	addressIds: string[] | null | undefined,
-	principal: { addressIds: string[] | "all" },
+	principal: { addressIds: string[] | "all"; keyRestricted?: boolean },
 ): Promise<void> {
 	if (!addressIds || addressIds.length === 0) return;
 
-	if (principal.addressIds !== "all") {
+	// Webhook は owner の管理の設定なので、見えるメールの範囲（割り当て）には縛らない。縛るのは絞ったキーだけ。
+	if (principal.keyRestricted && principal.addressIds !== "all") {
 		const visible = new Set(principal.addressIds);
 		const denied = addressIds.filter((id) => !visible.has(id));
 		if (denied.length > 0) {

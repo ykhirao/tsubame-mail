@@ -17,6 +17,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-16 プッシュ通知", () => {
@@ -58,7 +59,7 @@ describe("FR-16 プッシュ通知", () => {
 		email: string,
 		grants: { addressId: string; level: string }[],
 	): Promise<{ client: Client; id: string; email: string; password: string }> {
-		const created = await owner.post("/api/v1/admin/users", { email, name: email, role: "member" });
+		const created = await createUserViaApi(h, owner, { email, name: email, role: "member" });
 		expect(created.status).toBe(201);
 		const id = created.body.id as string;
 		const temp = created.body.temporaryPassword as string;
@@ -162,7 +163,7 @@ describe("FR-16 プッシュ通知", () => {
 				expect((await owner.get("/api/v1/me/devices")).status).toBe(403);
 
 				owner.useKey(null);
-				const agent = await owner.post("/api/v1/admin/users", {
+				const agent = await createUserViaApi(h, owner, {
 					email: "agent@tsubame.test",
 					name: "エージェント",
 					role: "agent",
@@ -379,11 +380,14 @@ describe("FR-16 プッシュ通知", () => {
 		expect(sends).toHaveLength(0);
 	});
 
-	scenario("FR-16-7", "owner にはキャッチオールの受け皿の新着が通知される", async () => {
+	scenario("FR-16-7", "キャッチオールの受け皿は割り当てた人にだけ通知される（owner も割り当てが要る）", async () => {
 		const seeded = await seedDomain(h, { addresses: ["recruit"] });
 		const recruit = seeded.addressIds["recruit"]!;
 		const db = getDb(h.env);
 		await db.update(schema.addresses).set({ isCatchAll: true }).where(eq(schema.addresses.id, recruit));
+		const [ownerRow] = await db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.role, "owner"));
+		// seedDomain が owner に全アドレスを割り当てるので、いったん外して「割り当て無し」を再現する。
+		await db.delete(schema.addressGrants).where(eq(schema.addressGrants.addressId, recruit));
 
 		await addDevice(owner, { name: "オーナーの iPhone" });
 
@@ -394,7 +398,18 @@ describe("FR-16 プッシュ通知", () => {
 			raw: mime({ from: "job@ext.jp", to: "recruit@mail.tsubame.test", subject: "応募ありがとう" }),
 		});
 		await drainQueues(h);
+		// 割り当てが無い owner にはキャッチオールの新着は届かない。
+		expect(sends).toHaveLength(0);
 
+		await db
+			.insert(schema.addressGrants)
+			.values({ userId: ownerRow!.id, addressId: recruit, level: "write" });
+		await deliverEmail(h, {
+			from: "job@ext.jp",
+			to: "recruit@mail.tsubame.test",
+			raw: mime({ from: "job@ext.jp", to: "recruit@mail.tsubame.test", subject: "二通目" }),
+		});
+		await drainQueues(h);
 		expect(sends).toHaveLength(1);
 	});
 

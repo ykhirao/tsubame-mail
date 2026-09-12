@@ -13,7 +13,9 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
 
 キーには**スコープ**（`read` / `send` / `admin`）と**対象アドレス**が設定されている。
 キーの権限は所有ユーザーの権限との積集合で効くので、キーが持ち主を超えることはない。
-`GET /v1/me` で、今のキーのスコープ・対象アドレス（`addressIds`。`"all"` なら無制限）・持ち主が分かる。
+持ち主が owner でも、**見えるのは持ち主に割り当てたアドレスだけ**（owner の特権は無い）。
+`GET /v1/me` で、今のキーのスコープ・対象アドレス（`addressIds`）・書けるアドレス（`writableAddressIds`）・持ち主が分かる。
+API キーで `addressIds` が `"all"` になることは無い（`"all"` は画面の管理者モードだけ）。
 
 まず疎通を確認する。認証不要で叩ける。
 
@@ -36,8 +38,9 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
     {
       "id": "adr_...",
       "address": "ai@m.example.com",
-      "level": "write",       // read | write（owner も write）
-      "unreadCount": 3
+      "level": "write",       // read | write（割り当ての段階そのまま。owner でも割り当てが read なら read）
+      "unreadCount": 3,
+      "hidden": false         // 持ち主がそのメールボックスを「非表示」にしているか（下記）
     }
   ],
   "next_cursor": null
@@ -45,6 +48,16 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
 ```
 
 `level` が `read` のアドレスからは送信できない。
+
+### 非表示のメールボックス
+
+利用者はメールボックスごとに「非表示」にできる（画面か `PATCH /v1/addresses/{id}/hidden` `{"hidden": true}`。API キーでも通る）。
+非表示にしたメールボックスのメールは、**`address` を付けずに** `GET /v1/messages` / `GET /v1/threads` を呼んだときの結果から外れる。
+権限・通知・単体取得は変わらない（`GET /v1/messages/{id}` は普通に読める）。
+
+- 全部を見たいときは `?includeHidden=true` を付ける。
+- `?address=` でそのメールボックスを名指しすれば、非表示でもそのまま出る。
+- 「一覧に出ないのに `unreadCount` がある」ときは、まず `hidden` を疑う。
 
 この一覧の既定は**100 件**（最大 200）、カーソルページング対応（`limit` / `cursor`）。
 件数が多くて先頭しか見えないときは `limit` で広げて辿る。
@@ -83,6 +96,7 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/messages/msg_...
 | `status` | `received` / `sent` / `draft` / `queued` / `failed` / `trash` |
 | `unread` `starred` `has_attachment` | `true` / `false` / `1` / `0` |
 | `thread` | スレッド id |
+| `includeHidden` | `true` で、非表示にしたメールボックスのメールも含める（`address` 無しのとき） |
 | `order` | `received_at`（既定）/ `relevance` |
 | `limit` | 既定 25 / 最大 100 |
 | `cursor` | `next_cursor` をそのまま渡す |
@@ -246,8 +260,14 @@ curl -H "Authorization: Bearer tsb_..." -OJ https://<host>/api/v1/messages/msg_.
 
 **API キーでは叩けないもの（`403`）。** 画面のログイン（Cookie セッション）だけが通る。
 - 署名の変更 `PATCH /v1/addresses/{id}/signature`（人が書くメールに差し込まれるため）
+- 外部アドレス（ログイン先）の登録・確認 `POST /v1/me/external-email*`、`PUT /v1/admin/users/{id}/external-email`
+- 管理者モード `POST /v1/me/admin-mode`（owner の画面だけ。キーで全アドレスを読む手段は無い）
 - 通知・端末の設定 `/v1/me/notifications/*` `/v1/me/devices/*` `/v1/push/*` `/v1/threads/{id}/notification`
 - ユーザー管理の変更 `POST/PATCH/DELETE /v1/admin/users*`（パスワードやロールはキーの期限や範囲で縛れないため）
+
+**見えない id は、割り当てが無いだけかもしれない。** owner が作ったアドレスでも、誰かに割り当てないと誰にも見えない
+（`POST /v1/admin/addresses` は `assignToMe: true` で作った owner に割り当てる）。エージェントに見せるには、
+管理画面でその利用者に `read` / `write` を割り当ててもらう。
 
 **対象アドレスを絞った admin キーでは、管理の変更ができない（`403`）。** ドメイン・アドレス・ルール・Webhook の
 作成・変更・削除、Webhook の手動再送、他のキーの失効、`GET /v1/admin/audit-logs` は、`addressIds` が無制限のキーか
@@ -265,11 +285,12 @@ Cloudflare が Return-Path に使う正常な envelope sender。
 
 ## 8. 補足
 
-- `GET /v1/openapi.json` は**未実装**（404 が返る）。機械可読な定義は無い。
+- `GET /v1/openapi.json` で OpenAPI 3.1 の定義が読める（認証不要。`/v1/openapi` はそれを描いた HTML）。
 - 時刻はすべて **Unix 秒**（`receivedAt` など）。
 - `to` / `cc` は複数アドレスが 1 本の文字列に入る（カンマ結合）。読むときは分割すること。
 - レート制限に当たると `rate_limited` が返る。間隔を空けて再試行する。
 - ボディを送る要求（POST / PATCH / PUT）は `Content-Type: application/json` が無いと 400。
 - 管理（`admin` スコープ + owner のキー）で読めるもの: `/v1/admin/users` `/v1/admin/api-keys` `/v1/admin/domains`
-  `/v1/admin/addresses`（+ `/{id}/viewers`）`/v1/admin/rules` `/v1/webhooks`（+ `/{id}/deliveries`）。
+  `/v1/admin/addresses`（+ `/{id}/viewers`。割り当てた人と `level` / `isPrimary`。`email` は外部アドレスで無ければ null）`/v1/admin/rules` `/v1/webhooks`（+ `/{id}/deliveries`）。
   一覧はどれも `{ data, next_cursor }`。Webhook の `secret` は作成の応答にしか出ない。
+  利用者には `primaryAddressId` / `primaryAddress`（本人のメールボックス。member / agent は必ず持つ）と `externalEmail` / `externalVerified` が付く。

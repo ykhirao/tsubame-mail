@@ -2,14 +2,14 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { defaultColorFor } from "@/shared/colors";
 import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
-import { addresses, domains, messages, threads } from "@/db/schema";
+import { addresses, addressGrants, domains, messages, threads } from "@/db/schema";
 import type { AppEnv } from "@/api/types";
 import { canRead, canWrite, jsonIdsIn, recordAudit } from "@/domain/access/policy";
 import { conflict, forbidden, invalidRequest, notFound, unauthorized, ApiError } from "@/shared/errors";
 import { afterCursor, toPage } from "@/lib/paging";
 import { clientIp } from "@/api/middleware/auth";
 import { readJson } from "@/lib/validate";
-import { updateMySignatureInput } from "@/shared/contracts/addresses";
+import { updateMySignatureInput, updateMyHiddenInput } from "@/shared/contracts/addresses";
 import { redactError } from "@/lib/logError";
 
 const app = new Hono<AppEnv>();
@@ -87,6 +87,14 @@ app.get("/", async (c) => {
 	const page = toPage(pageRows, limit);
 	const rows = page.rows;
 
+	// hidden は利用者ごとの設定なので、grants の自分の行から引く。
+	const grantRows = await db
+		.select({ addressId: addressGrants.addressId, hidden: addressGrants.hidden })
+		.from(addressGrants)
+		.where(eq(addressGrants.userId, principal.userId))
+		.all();
+	const hiddenById = new Map(grantRows.map((g) => [g.addressId, g.hidden]));
+
 	const writable = principal.writableAddressIds;
 	const canWrite = (id: string) => writable === "all" || writable.includes(id);
 
@@ -106,6 +114,7 @@ app.get("/", async (c) => {
 		signature: r.address.signature,
 		unreadCount: Number(r.unreadCount),
 		archived: r.address.archivedAt !== null,
+		hidden: hiddenById.get(r.address.id) ?? false,
 	}));
 
 	// ページ内だけの並び替え。cursor は createdAt 基準なので、ページをまたいだ完全な
@@ -156,6 +165,30 @@ app.patch("/:id/signature", async (c) => {
 	});
 
 	return c.json({ data: { id, signature: next } });
+});
+
+// 非表示は見え方の設定で権限を変えない。API キーでも扱える（署名と違い秘密を混ぜない操作）。
+app.patch("/:id/hidden", async (c) => {
+	const principal = c.get("principal");
+	if (!principal) throw unauthorized();
+	const db = c.get("db");
+	const id = c.req.param("id");
+
+	// 自分に割り当てられたアドレスだけ。管理者モードで見えているだけのアドレスは 404（FR-19）。
+	const grant = await db
+		.select({ userId: addressGrants.userId })
+		.from(addressGrants)
+		.where(and(eq(addressGrants.userId, principal.userId), eq(addressGrants.addressId, id)))
+		.get();
+	if (!grant) throw notFound("アドレスが見つかりません");
+
+	const { hidden } = await readJson(c.req, updateMyHiddenInput);
+	await db
+		.update(addressGrants)
+		.set({ hidden })
+		.where(and(eq(addressGrants.userId, principal.userId), eq(addressGrants.addressId, id)));
+
+	return c.json({ data: { id, hidden } });
 });
 
 export default app;

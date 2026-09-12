@@ -10,6 +10,7 @@ import { z } from "zod";
 
 export type ThreadListParams = z.input<typeof threadListQuery>;
 export type MessageListParams = z.input<typeof messageListQuery>;
+import { useSyncExternalStore } from "react";
 import type { MyAddress } from "@/shared/contracts/addresses";
 import type {
 	Device,
@@ -103,6 +104,11 @@ function qs(params: Record<string, unknown> = {}): string {
 export type Me = {
 	id: string;
 	email: string;
+	externalEmail: string | null;
+	externalVerified: boolean;
+	primaryAddressId: string | null;
+	adminMode: boolean;
+	adminModeUntil: number | null;
 	name: string;
 	role: "owner" | "member" | "agent";
 	status: string;
@@ -145,6 +151,18 @@ export const MeApi = {
 			passwordChanged: boolean;
 			revokedApiKeys: number;
 		}>("/me", { method: "PATCH", body }),
+	setExternalEmail: (email: string) =>
+		request<{ sent: boolean; reason?: string }>("/me/external-email", {
+			method: "POST",
+			body: { email },
+		}),
+	verifyExternalEmail: (code: string) =>
+		request<{ verified: boolean; email: string }>("/me/external-email/verify", {
+			method: "POST",
+			body: { code },
+		}),
+	resendExternalEmail: () =>
+		request<{ sent: boolean; reason?: string }>("/me/external-email/resend", { method: "POST" }),
 };
 
 type AddressListPage = { data: MyAddress[]; next_cursor: string | null };
@@ -169,7 +187,44 @@ export const AddressesApi = {
 			method: "PATCH",
 			body: { signature },
 		}),
+	setHidden: (id: string, hidden: boolean) =>
+		request<{ data: { id: string; hidden: boolean } }>(`/addresses/${id}/hidden`, {
+			method: "PATCH",
+			body: { hidden },
+		}),
 };
+
+const INCLUDE_HIDDEN_KEY = "tsubame-include-hidden";
+let includeHidden =
+	(typeof localStorage === "undefined" ? false : readIncludeHidden());
+const includeHiddenListeners = new Set<() => void>();
+function readIncludeHidden(): boolean {
+	try {
+		return localStorage.getItem(INCLUDE_HIDDEN_KEY) === "true";
+	} catch {
+		return false;
+	}
+}
+/** まとめた表示や検索で、自分で非表示にしたメールボックスも出す（端末の表示設定）。 */
+export function getIncludeHidden(): boolean {
+	return includeHidden;
+}
+export function setIncludeHidden(v: boolean): void {
+	includeHidden = v;
+	try {
+		localStorage.setItem(INCLUDE_HIDDEN_KEY, v ? "true" : "false");
+	} catch {
+		// 保存できなくても画面の状態としては反映する。
+	}
+	for (const l of includeHiddenListeners) l();
+}
+export function subscribeIncludeHidden(cb: () => void): () => void {
+	includeHiddenListeners.add(cb);
+	return () => includeHiddenListeners.delete(cb);
+}
+export function useIncludeHidden(): boolean {
+	return useSyncExternalStore(subscribeIncludeHidden, getIncludeHidden);
+}
 
 export const ThreadsApi = {
 	list: (query: ThreadListParams = {}) =>
@@ -198,7 +253,12 @@ export const AttachmentApi = {
 
 export const UsersApi = {
 	/** password を送らないと仮パスワードが発行され、**このレスポンスにだけ**平文が入る。 */
-	create: (input: { email: string; name: string; role: "member" | "agent" }) =>
+	create: (input: {
+		email?: string;
+		name: string;
+		role: "member" | "agent";
+		primaryAddress: { addressId: string } | { domainId: string; localPart: string };
+	}) =>
 		request<{
 			id: string;
 			email: string;

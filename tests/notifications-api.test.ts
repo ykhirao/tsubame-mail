@@ -8,7 +8,7 @@ import { ApiError } from "@/shared/errors";
 import type { AppEnv } from "@/api/types";
 import type { Principal } from "@/shared/contracts/common";
 import { applyMigrations } from "./helpers/migrate";
-import { createAddress, createDomain, createUser, db } from "./auth-helpers";
+import { createAddress, createDomain, createUser, db, grant } from "./auth-helpers";
 
 type SessionPrincipal = Omit<Principal, "via"> & { via: "session" };
 
@@ -48,6 +48,7 @@ async function seedOwnerWithAddresses(addressCount = 1, catchAll = false) {
 	const owner = await createUser({ role: "owner" });
 	const domainId = await createDomain();
 	const addressId = await createAddress(domainId, "inbox");
+	await grant(owner.id, addressId, "write");
 	if (catchAll) {
 		await db()
 			.update(schema.addresses)
@@ -122,29 +123,37 @@ describe("GET /me/notifications（既定値とメールボックス一覧）", (
 		expect(body.rules).toEqual([]);
 	});
 
-	it("owner: 割り当てが無いメールボックスは既定 off、キャッチオールは notify_catch_all に従う", async () => {
+	it("owner は割り当てたメールボックスだけを対象にし、キャッチオールも割り当てが必要", async () => {
 		const owner = await createUser({ role: "owner" });
 		const domainId = await createDomain();
 		const catchAllId = await createAddress(domainId, "catch");
 		await db().update(schema.addresses).set({ isCatchAll: true }).where(eq(schema.addresses.id, catchAllId));
 		await createAddress(domainId, "plain");
 		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
-		const res = await app.request("/api/v1/me/notifications");
-		const body = (await res.json()) as { mailboxes: { isCatchAll: boolean; level: string; assigned: boolean }[] };
-		expect(body.mailboxes).toHaveLength(2);
-		const catchAll = body.mailboxes.find((m) => m.isCatchAll)!;
-		expect(catchAll.level).toBe("all");
+
+		// 割り当てが無い owner には受け皿も含めて何も出ない。
+		const before = (await (await app.request("/api/v1/me/notifications")).json()) as {
+			mailboxes: { isCatchAll: boolean; level: string; assigned: boolean }[];
+		};
+		expect(before.mailboxes).toHaveLength(0);
+
+		await grant(owner.id, catchAllId, "write");
+		const after = (await (await app.request("/api/v1/me/notifications")).json()) as {
+			mailboxes: { isCatchAll: boolean; level: string; assigned: boolean }[];
+		};
+		expect(after.mailboxes).toHaveLength(1);
+		const catchAll = after.mailboxes[0]!;
+		expect(catchAll.isCatchAll).toBe(true);
 		expect(catchAll.assigned).toBe(true);
-		const plain = body.mailboxes.find((m) => !m.isCatchAll)!;
-		expect(plain.level).toBe("off");
-		expect(plain.assigned).toBe(false);
-	});
+		expect(catchAll.level).toBe("all");
+	});;
 
 	it("owner: notify_catch_all=false のとき catch-all は既定 off", async () => {
 		const owner = await createUser({ role: "owner" });
 		const domainId = await createDomain();
 		const catchAllId = await createAddress(domainId, "catch");
 		await db().update(schema.addresses).set({ isCatchAll: true }).where(eq(schema.addresses.id, catchAllId));
+		await grant(owner.id, catchAllId, "write");
 		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
 		await app.request("/api/v1/me/notifications", {
 			method: "PATCH",

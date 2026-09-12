@@ -8,7 +8,7 @@ import type { Db } from "@/db/client";
 import { newId } from "@/lib/id";
 import { readJson, unixSeconds } from "@/lib/validate";
 import { afterCursor, toPage } from "@/lib/paging";
-import { addressFilter, addressSetHas, jsonIdsIn } from "@/domain/access/policy";
+import { addressFilter, addressSetHas, jsonIdsIn, ownAddresses } from "@/domain/access/policy";
 import {
 	notificationRuleInput,
 	notificationRuleUpdate,
@@ -100,16 +100,8 @@ async function loadMailboxes(
 	assigned: boolean;
 	level: NotificationLevel;
 }[]> {
-	// owner は addressIds が "all" で、grant の有無で「割り当て」かを分ける。member は全て割り当て済み。
-	let grants = new Set<string>();
-	if (principal.role === "owner") {
-		const g = await db
-			.select({ addressId: schema.addressGrants.addressId })
-			.from(schema.addressGrants)
-			.where(eq(schema.addressGrants.userId, principal.userId));
-		grants = new Set(g.map((r) => r.addressId));
-	}
-
+	// 表示されるアドレスはどれも割り当て済み（loadVisibleAddresses が owner も grants で絞る）。
+	// キャッチオールの受け皿も割り当てが要る（FR-19）。
 	const prefRows = await db
 		.select()
 		.from(schema.notificationMailboxPrefs)
@@ -119,16 +111,14 @@ async function loadMailboxes(
 	const notifyCatchAll = await loadNotifyCatchAll(db, principal.userId);
 
 	return rows.map((row, index) => {
-		const assigned = row.isCatchAll || (principal.role === "owner" ? grants.has(row.id) : true);
-		const stored = prefs.get(row.id);
-		const level = stored ?? defaultLevel(row.isCatchAll, assigned, notifyCatchAll);
+		const level = prefs.get(row.id) ?? defaultLevel(row.isCatchAll, true, notifyCatchAll);
 		return {
 			id: row.id,
 			address: row.address,
 			displayName: row.displayName,
 			color: row.color ?? defaultColorFor(index),
 			isCatchAll: row.isCatchAll,
-			assigned,
+			assigned: true,
 			level,
 		};
 	});
@@ -149,6 +139,19 @@ function defaultLevel(isCatchAll: boolean, assigned: boolean, notifyCatchAll: bo
 }
 
 async function loadVisibleAddresses(db: Db, principal: Principal) {
+	// owner は管理者モードでも割り当てたメールボックスだけを通知設定の対象にする（FR-19）。
+	const owned =
+		principal.role === "owner"
+			? (
+					await db
+						.select({ addressId: schema.addressGrants.addressId })
+						.from(schema.addressGrants)
+						.where(eq(schema.addressGrants.userId, principal.userId))
+						.all()
+				).map((g) => g.addressId)
+			: null;
+	const filter =
+		owned === null ? addressFilter(principal, schema.addresses.id) : jsonIdsIn(schema.addresses.id, owned);
 	const rows = await db
 		.select({
 			id: schema.addresses.id,
@@ -158,7 +161,7 @@ async function loadVisibleAddresses(db: Db, principal: Principal) {
 			isCatchAll: schema.addresses.isCatchAll,
 		})
 		.from(schema.addresses)
-		.where(and(addressFilter(principal, schema.addresses.id), isNull(schema.addresses.archivedAt)));
+		.where(and(filter, isNull(schema.addresses.archivedAt)));
 	return rows;
 }
 
@@ -291,7 +294,7 @@ app.put("/mailboxes/:addressId", async (c) => {
 	const principal = c.get("principal");
 	const db = c.get("db");
 	const addressId = c.req.param("addressId");
-	if (!addressSetHas(principal.addressIds, addressId)) throw forbidden("このメールボックスの設定は変更できません");
+	if (!addressSetHas(ownAddresses(principal), addressId)) throw forbidden("このメールボックスの設定は変更できません");
 	const { level } = await readJson(c.req, mailboxLevelInput);
 	// owner は addressIds が all なので、実在しない id でもここまで来て FK 違反の 500 になっていた。
 	const exists = await db.select({ id: schema.addresses.id }).from(schema.addresses).where(eq(schema.addresses.id, addressId)).get();
@@ -677,7 +680,12 @@ async function requireVisibleThread(db: Db, principal: Principal, threadId: stri
 	const [row] = await db
 		.select({ id: schema.threads.id })
 		.from(schema.threads)
-		.where(and(eq(schema.threads.id, threadId), addressFilter(principal, schema.threads.addressId)))
+		.where(
+			and(
+				eq(schema.threads.id, threadId),
+				addressFilter({ ...principal, addressIds: ownAddresses(principal) }, schema.threads.addressId),
+			),
+		)
 		.limit(1);
 	if (!row) throw notFound("スレッドが見つかりません");
 }

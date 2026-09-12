@@ -11,6 +11,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-5 API キー", () => {
@@ -52,7 +53,7 @@ describe("FR-5 API キー", () => {
 	}
 
 	async function createUser(role: "owner" | "member", email: string): Promise<string> {
-		const res = await owner.post("/api/v1/admin/users", {
+		const res = await createUserViaApi(h, owner, {
 			email,
 			name: role === "owner" ? "別オーナー" : "メンバー",
 			role,

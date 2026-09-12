@@ -57,6 +57,13 @@
       "when": 1789194356295,
       "tag": "0007_add_api_key_parent",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1789231438827,
+      "tag": "0008_visibility_and_primary",
+      "breakpoints": true
     }
   ]
 }

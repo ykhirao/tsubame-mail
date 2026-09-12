@@ -27,7 +27,6 @@ export function NotificationMailboxes() {
 	if (!settings) return <Scaffold title="メールボックスごと">{null}</Scaffold>;
 
 	const assigned = settings.mailboxes.filter((m) => m.assigned);
-	const unassigned = settings.mailboxes.filter((m) => !m.assigned);
 
 	const applyAll = async (level: NotificationLevel) => {
 		setBusy(true);
@@ -87,23 +86,6 @@ export function NotificationMailboxes() {
 				))}
 			</Card>
 
-			{unassigned.length > 0 && (
-				<>
-					<h2 className="px-3 text-xs font-medium text-[var(--text-muted)]">
-						割り当てなし（オーナーとして見えるだけ）
-					</h2>
-					<Card>
-						{unassigned.map((m) => (
-							<MailboxRow
-								key={m.id}
-								mailbox={m}
-								catchAllOff={m.isCatchAll && !settings.notify_catch_all}
-								onClick={() => navigate(`/settings/notifications/mailboxes/${m.id}`)}
-							/>
-						))}
-					</Card>
-				</>
-			)}
 		</Scaffold>
 	);
 }

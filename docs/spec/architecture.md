@@ -46,15 +46,16 @@ src/
       messages.ts        [W6（GET / PATCH）]
       outbound.ts        [W3]
       threads.ts         [W6]
-      addresses.ts       [W5] 一覧と署名の変更
+      addresses.ts       [W5] 一覧と署名・非表示の変更
       attachments.ts     [W2]
       webhooks.ts        [W9]
-      me.ts              [W4] 自分の情報・自分のキー（キーの連鎖失効 revokeKeyTree もここ）
+      me.ts              [W4] 自分の情報・自分のキー（キーの連鎖失効 revokeKeyTree もここ）・管理者モード・外部アドレスの登録と確認
       notifications.ts   [W11] 通知設定・ルール・通知欄・会話の通知
       devices.ts         [W11] 購読端末
       push.ts            [W11] VAPID 公開鍵・バッジ
       admin/
-        users.ts         [W4]
+        users.ts         [W4] 作成時のプライマリ割り当てもここ
+        external-email.ts  [W4] owner が他の利用者の外部アドレスを登録する
         api-keys.ts      [W4]
         audit-logs.ts    [W4]
         domains.ts       [W5]
@@ -95,6 +96,7 @@ src/
     maintenance.ts       [W11] cron の監査ログの掃除（400 日）
     cloudflare-api.ts    [W5]
     sender.ts            [W3] EMAIL バインディング。ドメインの送信の無効化の判定もここ
+    verification-mail.ts [W4] 外部アドレスの確認コードの発行・送信・照合（差出人は本人のプライマリ → owner のプライマリ → 送信できる最古のメールボックス）
     webhooks.ts          [W9] 配信行の作成とキュー投入・POST・再試行
   lib/                   id 採番・ページング・パスワード・トークン・検証などの共有ユーティリティ
     id.ts, paging.ts, password.ts, tokens.ts, validate.ts
@@ -132,12 +134,13 @@ docs/                    [W10]
 
 | テーブル | 目的 | 要点 |
 | --- | --- | --- |
-| `users` | 人と AI のアカウント | `role: owner \| member \| agent`, `status`, `password_hash`(agent は null 可), `must_change_password`, `last_login_at` |
-| `sessions` | UI セッション | Cookie `__Host-tsb_session`（精査 #84）。`token_hash` ハッシュ保存、`expires_at`、`user_agent`、`ip` |
+| `users` | 人と AI のアカウント | `role: owner \| member \| agent`, `status`, `password_hash`(agent は null 可), `must_change_password`, `last_login_at`, `external_email`(一意。Gmail などの外部アドレス), `external_verified_at`, `primary_address_id`(一意。本人のメールボックス。member / agent は必ず持つ)。旧 `email` 列は外部アドレスの写し（無い利用者は `<id>@users.invalid`）で、ログインには使わない |
+| `email_verifications` | 外部アドレスの確認コード | `user_id` 主キー（利用者 1 人に 1 行）, `email`, `code_hash`（6 桁のコードの SHA-256）, `attempts`, `expires_at`（30 分）, `created_at`（最後に送った時刻。再送は 60 秒あける） |
+| `sessions` | UI セッション | Cookie `__Host-tsb_session`（精査 #84）。`token_hash` ハッシュ保存、`expires_at`、`user_agent`、`ip`、`admin_mode_until`（owner の管理者モードの期限。FR-19） |
 | `api_keys` | API トークン | `user_id`, `name`, `prefix`, `key_hash`, `scopes[]`, `address_ids[] \| null`, `expires_at`, `revoked_at`, `last_used_at`, `parent_key_id`（API キーで発行したときの親。親の失効で子孫も失効） |
 | `domains` | 接続済みゾーン | `zone_id`(一意), `name`, `zone_name`, `mode: apex \| subdomain`, `routing_status`, `sending_status`, `catch_all_enabled`, `last_error` |
 | `addresses` | 受信アドレス | `domain_id`, `local_part`, `address`(一意), `display_name`, `kind: mailbox \| alias`, `alias_target_id`, `is_catch_all`, `signature`, `color`, `archived_at` |
-| `address_grants` | 権限 | `(user_id, address_id)` 主キー, `level: read \| write` |
+| `address_grants` | 権限 | `(user_id, address_id)` 主キー, `level: read \| write`, `hidden`（本人がまとめた一覧・検索の既定から外す。権限と通知は変えない）。owner もこの表で割り当てたアドレスしか見ない（FR-11 / FR-19） |
 | `threads` | 会話 | `address_id`, `subject`, `last_message_at`, `message_count`, `unread_count` |
 | `messages` | メッセージ | 下記参照 |
 | `attachments` | 添付 | `message_id`, `filename`, `content_type`, `size_bytes`, `content_id`, `is_inline`, `r2_key` |
@@ -211,34 +214,39 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 
 | メソッド | パス | スコープ | 担当 |
 | --- | --- | --- | --- |
-| GET/PATCH | `/v1/me` | スコープ検査無し。自分の情報のみ | W4 |
+| GET/PATCH | `/v1/me` | スコープ検査無し。自分の情報のみ。GET は `externalEmail` / `externalVerified` / `primaryAddressId` / `adminMode` / `adminModeUntil` / `addressIds`（管理者モードなら `"all"`）/ `writableAddressIds` / `ownAddressIds`（自分の割り当て。管理者モードでも変わらない）/ `addresses` を返す | W4 |
+| POST | `/v1/me/admin-mode` | `{ enabled }`。**owner のセッション限定**（member は 403、API キーは owner の admin キーでも 403）。`sessions.admin_mode_until` を今から 1 時間後（`ADMIN_MODE_SECONDS`）に置き、`false` で消す。監査ログ `admin_mode.enter` / `admin_mode.exit` | W4 |
+| POST | `/v1/me/external-email` `/v1/me/external-email/verify` `/v1/me/external-email/resend` | **セッション限定**（API キーは 403）。登録（`{ email }`。未確認に戻して確認コードを送る。他の利用者の外部アドレス・このアプリのアドレスと重なると 409）/ 確認（`{ code }`。6 桁。誤り 5 回か 30 分で行を消して 400）/ 再送（前回から 60 秒以内は `rate_limited`）。送れるドメインが無いときは `{ sent: false, reason }`。監査ログ `user.external_email.set` / `user.external_email.verify` | W4 |
 | GET/POST/DELETE | `/v1/me/api-keys` | 本人のキー。発行は本人の権限の範囲内のみ | W4 |
-| POST | `/v1/auth/login` `/v1/auth/logout` `/v1/auth/bootstrap` | — | W4 |
+| POST | `/v1/auth/login` `/v1/auth/logout` `/v1/auth/bootstrap` | — 。login の `email` はプライマリアドレスか確認済みの外部アドレス（`auth.ts` `findLoginUser`。プライマリがまだ無い利用者＝ドメインを繋ぐ前の最初の owner だけ、未確認の外部アドレスでも入れる）。bootstrap の `email` は外部アドレスとして保存する | W4 |
 | GET | `/v1/auth/session` `/v1/auth/setup-state` | セッション確認 / セットアップ要否 | W4 |
-| GET | `/v1/addresses` | read | W5 |
+| GET | `/v1/addresses` | read。自分に割り当てたアドレス（管理者モードの owner は全部）。各行に `hidden`（割り当ての無いアドレスは false）と `level`（管理者モードで読めるだけのアドレスは `read`） | W5 |
 | PATCH | `/v1/addresses/{id}/signature` | **セッション限定**（API キーは 403）。そのメールボックスに write。監査ログ `address.signature` | W5 |
-| GET | `/v1/messages` | read | W6 |
+| PATCH | `/v1/addresses/{id}/hidden` | `{ hidden }`。自分の `address_grants` の行だけ（割り当てが無ければ 404。管理者モードで読めるだけのアドレスも 404）。API キーでも通る。監査ログ無し | W5 |
+| GET | `/v1/messages` | read。アドレスで絞っていないとき、自分が非表示にしたメールボックスを除く（`includeHidden=true` で含める。`address=` で名指ししたときは非表示でも出す） | W6 |
 | GET | `/v1/messages/{id}` | read | W6 |
 | GET | `/v1/messages/{id}/raw` | read | W2 |
-| PATCH | `/v1/messages/{id}` | read（`status` の変更は send と write 割り当て。受け付ける status は `received` / `trash` のみ） | W6 |
+| PATCH | `/v1/messages/{id}` | read（`status` の変更は send と write 割り当て。受け付ける status は `received` / `trash` のみ）。管理者モードで読めるだけの他人のメールは `isRead` / `isStarred` も 403（`canModify`） | W6 |
 | POST | `/v1/messages` | send。送信を無効にしたドメインからは 409 | W3 |
 | POST | `/v1/messages/{id}/reply` | read かつ send（読めない相手には返信もできないよう、両方を要求する）。無効ドメインは 409 | W3 |
-| GET | `/v1/threads` `/v1/threads/{id}` | read | W6 |
+| GET | `/v1/threads` `/v1/threads/{id}` | read。一覧は `/v1/messages` と同じく非表示を除き、`includeHidden=true` で含める | W6 |
 | GET | `/v1/attachments/{id}` | read | W2 |
 | GET / POST / PATCH / DELETE | `/v1/webhooks`（+ `/{id}`、`/{id}/deliveries`、手動再送 POST `/deliveries/{id}/retry`） | admin。変更系と再送は**範囲を絞ったキーでは 403** | W9 |
-| GET / POST | `/v1/admin/users`（一覧 / 作成） | 一覧は admin。変更系は**セッション限定** | W4 |
-| GET / PATCH / DELETE | `/v1/admin/users/{id}`（+ PUT `/{id}/grants`） | 変更系は**セッション限定** | W4 |
+| GET / POST | `/v1/admin/users`（一覧 / 作成） | 一覧は admin。変更系は**セッション限定**。作成は `primaryAddress` が必須（`{ addressId }` で既存のメールボックスを選ぶか、`{ domainId, localPart, displayName? }` でその場に作る。アーカイブ済み・エイリアスは 400、他人のプライマリは 409）で、write で割り当てる。`email`（外部アドレス）は owner だけ必須、member / agent は省略可（ログインはプライマリで行う）。応答と一覧は `externalEmail` / `externalVerified` / `primaryAddressId` / `primaryAddress` を持つ | W4 |
+| GET / PATCH / DELETE | `/v1/admin/users/{id}`（+ PUT `/{id}/grants`） | 変更系は**セッション限定**。PATCH の `primaryAddressId` は、その人に write で割り当てた（アーカイブされていない）メールボックスだけ（それ以外は 400、他人のプライマリは 409）。grants の PUT は、プライマリを一覧から外しても write のまま残し、`read` に下げる指定は 400 | W4 |
+| PUT | `/v1/admin/users/{id}/external-email` | owner の**セッション限定**。他の利用者の外部アドレスを登録して確認コードを送る（本人の `/v1/me/external-email` と同じ検査）。監査ログ `user.external_email.set` | W4 |
 | GET / POST / DELETE | `/v1/admin/api-keys`（+ `?userId=` 絞り込み / `/{id}`） | admin。発行はキーの範囲に clamp、失効は**範囲を絞ったキーでは 403** | W4 |
 | GET | `/v1/admin/domains`（一覧） `/v1/admin/domains/available` `/v1/admin/domains/{id}` | admin | W5 |
 | POST | `/v1/admin/domains` `/v1/admin/domains/preview` `/v1/admin/domains/{id}/verify` `/v1/admin/domains/{id}/catch-all` `/v1/admin/domains/{id}/sending` | admin。preview 以外は**範囲を絞ったキーでは 403** | W5 |
 | DELETE | `/v1/admin/domains/{id}` | admin。範囲を絞ったキーでは 403 | W5 |
-| GET / POST | `/v1/admin/addresses` `/v1/admin/addresses/{id}` `/v1/admin/addresses/{id}/viewers` | admin。作成は範囲を絞ったキーでは 403 | W5 |
-| PATCH / DELETE | `/v1/admin/addresses/{id}` | admin。範囲を絞ったキーでは 403 | W5 |
+| GET / POST | `/v1/admin/addresses` `/v1/admin/addresses/{id}` `/v1/admin/addresses/{id}/viewers` | admin。作成は範囲を絞ったキーでは 403。作成の `assignToMe: true` で作った owner に write で割り当てる（割り当てないアドレスは誰にも見えない）。プライマリの無い owner が最初に作ったメールボックスは自動でその owner のプライマリになる（write で割り当て）。`viewers` は `address_grants` の利用者だけ（owner も割り当てが要る）で、`email`（外部アドレス。無ければ null）・`level: read \| write`・`isPrimary` | W5 |
+| PATCH / DELETE | `/v1/admin/addresses/{id}` | admin。範囲を絞ったキーでは 403。誰かのプライマリはアーカイブ・エイリアス化・削除できない（409。先にプライマリを変える） | W5 |
 | GET | `/v1/admin/audit-logs`（`targetType` `targetId` `actorId` `action` `limit` `cursor`） | owner のセッションか addressIds を絞っていない admin スコープ | W4 |
 | GET / POST / PATCH / DELETE | `/v1/admin/rules`（+ `/{id}`） | admin。変更系は範囲を絞ったキーでは 403 | W2 |
-| GET | `/v1/openapi.json` | — | W9（未実装。呼ぶと 404） |
+| GET | `/v1/openapi.json` `/v1/openapi` | — （認証無し。JSON と、それを描く HTML） | W9 |
 
-「範囲を絞ったキーでは 403」は `middleware/auth.ts` の `requireUnrestricted`（`via === "api_key"` かつ `addressIds !== "all"` を弾く。精査 #129）。
+「範囲を絞ったキーでは 403」は `middleware/auth.ts` の `requireUnrestricted`（`via === "api_key"` かつ `keyRestricted`＝キーが `address_ids` を持つ、を弾く。精査 #129。
+owner も割り当てでしか見ないので、`addressIds !== "all"` では絞ったキーを見分けられない）。
 「セッション限定」は `requireSession`（#121）。自分のキーの発行・失効（`/v1/me/api-keys`）はセッションか admin スコープのキーに限り、
 仮パスワードのままの利用者は 403（`me.ts` `requireKeyManagement`、#64）。
 
@@ -268,7 +276,8 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 
 `q`（全文）, `address`, `from`, `to`, `subject`, `body`, `since`, `until`,
 `direction`, `status`, `unread`, `starred`, `has_attachment`, `thread`,
-`order`(`received_at`/`relevance`), `limit`(既定 25 / 最大 100), `cursor`。
+`order`(`received_at`/`relevance`), `limit`(既定 25 / 最大 100), `cursor`,
+`includeHidden`（自分が非表示にしたメールボックスも含める。`address` で名指ししたときは不要）。
 
 `q` は簡易演算子を解釈する: `from:foo@bar subject:"見積" since:2026-01-01 has:attachment`。
 演算子は `from:` `to:` `subject:` `body:` `since:` `until:` `is:unread|starred` `has:attachment` `in:<アドレス>`。
@@ -340,17 +349,27 @@ type Principal = {
   role: "owner" | "member" | "agent"
   via: "session" | "api_key"
   scopes: Scope[]          // api_key のとき
-  addressIds: string[] | "all"   // 解決済みの許可アドレス
-  writableAddressIds: string[] | "all"  // addressIds の部分集合（書き込み可）
+  addressIds: string[] | "all"   // 読めるアドレス。"all" は管理者モードの owner だけ
+  writableAddressIds: string[] | "all"  // addressIds の部分集合（送信・status の変更）。管理者モードでも割り当てだけ
+  adminMode?: boolean       // 管理者モードで全アドレスを読めるとき true
+  ownAddressIds?: string[]  // 管理者モードのとき、自分の割り当て（既読などの変更はここだけ）
+  keyRestricted?: boolean   // API キーが address_ids を持つとき true。管理の変更を止める判定に使う
   apiKeyId?: string
   sessionId?: string        // セッションで入ったときだけ。ログアウトで購読を消す
 }
 ```
 
-- owner + session → `"all"`。
-- member/agent → `address_grants` から解決。
+- **owner も member / agent と同じく `address_grants` から解決する**（`resolveUserAddressAccess`。FR-11）。
+  割り当てていないアドレスは owner にも見えない。
+- owner のセッションで `sessions.admin_mode_until` が今より後なら**管理者モード**: `addressIds` だけ `"all"` になり、
+  `writableAddressIds` は割り当てのまま、`ownAddressIds` に割り当てを持つ（FR-19）。期限は毎リクエスト `resolvePrincipal` で見るので、
+  切れた瞬間に戻る。API キーの principal には付かない。
+- 読む・書く・変えるの 3 段（`policy.ts`）: `canRead` は `addressIds`、`canWrite` は `writableAddressIds`、
+  `canModify`（既読・スター・ゴミ箱のような状態の変更）は管理者モードなら `ownAddressIds`、それ以外は `canRead` と同じ。
 - API キー → 上記に加えて `api_keys.address_ids` で**さらに狭める**（積集合）。
   キーはユーザーの権限を超えられない。
+- 非表示（`address_grants.hidden`）は認可ではなく見え方。一覧・検索でアドレスを名指ししていないときだけ、
+  ハンドラが `hiddenAddressIds` を引いて `NOT IN` を足す（`search/sql.ts` `jsonIdsNotIn`）。
 - クエリは必ず `WHERE address_id IN (…)` を伴う。`userId` で絞る実装は禁止。
 
 ## 6. 受信パイプライン（W2）
@@ -437,8 +456,9 @@ type Principal = {
 `processNotify`（`services/notify.ts`）:
 - `received` / `send_failed` はまず対象利用者へ 1 メッセージずつ分ける
   （**Free の 1 実行あたり外部リクエスト上限 50 に収める**。`eligibleUserIds` は
-  owner（全員）＋ そのメールボックスへの `grant` を持つ active 利用者）。
-  送信失敗は `sent_by_user_id` があればその人だけ、無ければ `write` 全員。
+  そのメールボックスへの `grant` を持つ active 利用者（agent を除く）。owner も割り当てが要り、
+  キャッチオールの受け皿も同じ。管理者モードは通知に影響しない）。
+  送信失敗は `sent_by_user_id` があればその人だけ、無ければ `write` 全員（`writeUserIds`。ここも owner の特別扱いは無い）。
 - 利用者ごとに `decide` / `decideSendFailure`（`domain/notify/decide.ts`）で
   `sent / held / digest / dropped / excluded` を決め、`notification_log` に理由つきで記録。
   詳細な判定表は `pwa-notifications.md` の「4. 通知の判定」。

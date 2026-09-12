@@ -24,13 +24,26 @@ async function fixture() {
 }
 
 describe("resolvePrincipal — ロール", () => {
-	it("owner + セッションは全アドレス", async () => {
+	it("owner + セッションは割り当てたアドレスだけ。管理者モードで全アドレスが読め、変更は割り当てだけ（FR-19）", async () => {
+		const { a } = await fixture();
 		const owner = await createUser({ role: "owner", password: "password-1234" });
+		await grant(owner.id, a, "write");
+
 		const p = await resolvePrincipal(db(), { user: owner });
 		expect(p.via).toBe("session");
-		expect(p.addressIds).toBe("all");
-		expect(p.writableAddressIds).toBe("all");
+		expect(p.addressIds).toEqual([a]);
+		expect(p.writableAddressIds).toEqual([a]);
 		expect(p.scopes).toEqual(["read", "send", "admin"]);
+
+		// 管理者モードは読める範囲だけが全アドレスに広がり、変更は割り当てに留まる。
+		const admin = await resolvePrincipal(db(), {
+			user: owner,
+			adminModeUntil: new Date(Date.now() + 3600_000),
+		});
+		expect(admin.addressIds).toBe("all");
+		expect(admin.adminMode).toBe(true);
+		expect(admin.ownAddressIds).toEqual([a]);
+		expect(admin.writableAddressIds).toEqual([a]);
 	});
 
 	it("member は grants から解決され、read grant では書けない", async () => {
@@ -69,6 +82,8 @@ describe("resolvePrincipal — API キーは権限を狭める方向にしか効
 	it("owner のキーでも addressIds があれば all にならない", async () => {
 		const { a, b } = await fixture();
 		const owner = await createUser({ role: "owner", password: "password-1234" });
+		await grant(owner.id, a, "write");
+		await grant(owner.id, b, "write");
 
 		const p = await resolvePrincipal(db(), {
 			user: owner,
@@ -157,8 +172,12 @@ describe("集合とクエリ補助", () => {
 
 	it("addressFilter は all のとき undefined、それ以外は IN 条件", async () => {
 		const owner = await createUser({ role: "owner", password: "password-1234" });
-		const ownerPrincipal = await resolvePrincipal(db(), { user: owner });
-		expect(addressFilter(ownerPrincipal, schema.messages.addressId)).toBeUndefined();
+		// 全アドレスを読めるのは管理者モードの owner だけ（FR-19）。
+		const admin = await resolvePrincipal(db(), {
+			user: owner,
+			adminModeUntil: new Date(Date.now() + 3600_000),
+		});
+		expect(addressFilter(admin, schema.messages.addressId)).toBeUndefined();
 
 		const narrowed = await resolvePrincipal(db(), {
 			user: owner,

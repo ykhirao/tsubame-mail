@@ -10,6 +10,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-12 メンバー自身の API キー", () => {
@@ -21,7 +22,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 	let memberId: string;
 
 	async function createMember(email: string, grants: { addressId: string; level: string }[]) {
-		const created = await owner.post("/api/v1/admin/users", { email, name: email, role: "member" });
+		const created = await createUserViaApi(h, owner, { email, name: email, role: "member" });
 		const temp = created.body.temporaryPassword as string;
 		await owner.put(`/api/v1/admin/users/${created.body.id}/grants`, { grants });
 

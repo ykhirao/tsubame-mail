@@ -119,7 +119,7 @@ export function AddressDetailPage() {
 								description="所有者は全アドレスを、それ以外は割り当て（read / write）に従います"
 							/>
 							{viewers.length === 0 ? (
-								<EmptyState message="割り当てられた利用者はいません（owner のみ閲覧できます）。" />
+								<EmptyState message="割り当てられた利用者はいません。誰の受信箱にも出ません（管理者モードでだけ読めます）。" />
 							) : (
 								<div className="overflow-x-auto">
 									<table className="w-full min-w-[420px]">
@@ -143,14 +143,11 @@ export function AddressDetailPage() {
 													</td>
 													<td className={tdCls}>{v.email}</td>
 													<td className={tdCls}>
-														<Badge
-															color={v.level === "owner" ? "purple" : v.level === "write" ? "green" : "gray"}
-														>
-															{v.level === "owner"
-																? "所有者"
-																: v.level === "write"
-																	? "書き込み可"
-																	: "読み取り可"}
+														{v.isPrimary && (
+															<span className="mr-1"><Badge color="purple">プライマリ</Badge></span>
+														)}
+														<Badge color={v.level === "write" ? "green" : "gray"}>
+															{v.level === "write" ? "書き込み可" : "読み取り可"}
 														</Badge>
 													</td>
 												</TableRow>

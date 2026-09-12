@@ -1,7 +1,7 @@
 import { Link, Outlet, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
-import { AddressesApi, NotificationsApi } from "@/ui/lib/api";
+import { AddressesApi, NotificationsApi, useIncludeHidden, setIncludeHidden } from "@/ui/lib/api";
 import type { MyAddress } from "@/shared/contracts/addresses";
 import { getTheme, setTheme, type Theme } from "@/ui/lib/theme";
 import { AddMemberDialog } from "@/ui/components/AddMemberDialog";
@@ -12,6 +12,8 @@ import { useLayoutPref } from "@/ui/lib/viewPrefs";
 import { useServiceWorkerNavigate } from "@/ui/lib/useServiceWorkerNavigate";
 import { Inbox } from "@/ui/routes/Inbox";
 import { ThreadDetail } from "@/ui/routes/ThreadDetail";
+import { AdminModeBanner } from "@/ui/components/AdminModeBanner";
+import { AdminModeToggle } from "@/ui/components/AdminModeToggle";
 
 const icon = "h-5 w-5";
 const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" } as const;
@@ -91,11 +93,17 @@ function MailboxSwitcher({
 	addresses,
 	selected,
 	onSelect,
+	includeHidden,
+	onToggleIncludeHidden,
+	onToggleHidden,
 	flexible = false,
 }: {
 	addresses: MyAddress[];
 	selected: string;
 	onSelect: (id: string) => void;
+	includeHidden: boolean;
+	onToggleIncludeHidden: () => void;
+	onToggleHidden: (mailbox: MyAddress) => void;
 	flexible?: boolean;
 }) {
 	const [open, setOpen] = useState(false);
@@ -152,40 +160,65 @@ function MailboxSwitcher({
 						<span>すべてのメールボックス</span>
 						{totalUnread > 0 && <span className="text-xs text-[var(--text-muted)]">{totalUnread}</span>}
 					</button>
+					{!selected && (
+						<label className="flex w-full items-center gap-2 px-4 py-1.5 text-sm text-[var(--text-muted)]">
+							<input
+								type="checkbox"
+								checked={includeHidden}
+								onChange={onToggleIncludeHidden}
+								className="h-4 w-4 accent-[var(--accent)]"
+							/>
+							<span>非表示も表示</span>
+						</label>
+					)}
 					<div className="my-1 border-t border-[var(--line-soft)]" />
 					{addresses.map((a) => (
-						<button
-							key={a.id}
-							type="button"
-							onClick={() => {
-								onSelect(a.id);
-								setOpen(false);
-							}}
-							className={`flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-sm hover:bg-[var(--surface-hover)] ${
-								a.id === selected ? "bg-[var(--surface-selected)] text-[var(--text-on-selected)]" : ""
-							}`}
-						>
+						<div key={a.id} className={`flex w-full items-center gap-1 px-2 py-1 ${a.hidden ? "opacity-70" : ""}`}>
+							<button
+								type="button"
+								onClick={() => {
+									onSelect(a.id);
+									setOpen(false);
+								}}
+								className={`flex flex-1 min-w-0 items-center justify-between gap-3 rounded-lg px-2 py-1 text-left text-sm hover:bg-[var(--surface-hover)] ${
+									a.id === selected ? "bg-[var(--surface-selected)] text-[var(--text-on-selected)]" : ""
+								}`}
+							>
 							<span className="flex min-w-0 items-center gap-2">
-								<span
-									className="inline-block h-2.5 w-[15px] shrink-0 rounded-full"
-									style={{ background: a.color }}
-								/>
-								<span className="min-w-0">
-								<span className="inline-flex items-center gap-1.5">
-									<span className="block truncate">{a.address}</span>
-									{a.isCatchAll && <CatchAllBadge />}
-								</span>
-								{a.displayName && (
-									<span className="block truncate text-xs text-[var(--text-muted)]">
-										{a.displayName}
+									<span
+										className="inline-block h-2.5 w-[15px] shrink-0 rounded-full"
+										style={{ background: a.color }}
+									/>
+									<span className="min-w-0">
+										<span className="inline-flex items-center gap-1.5">
+											<span className="block truncate">{a.address}</span>
+											{a.isCatchAll && <CatchAllBadge />}
+											{a.hidden && (
+												<span className="shrink-0 rounded bg-[var(--line-soft)] px-1 text-[10px] text-[var(--text-muted)]">
+													非表示
+												</span>
+											)}
+										</span>
+										{a.displayName && (
+											<span className="block truncate text-xs text-[var(--text-muted)]">
+												{a.displayName}
+											</span>
+										)}
 									</span>
-								)}
 								</span>
-							</span>
-							{a.unreadCount > 0 && (
-								<span className="shrink-0 text-xs text-[var(--text-muted)]">{a.unreadCount}</span>
-							)}
-						</button>
+								{a.unreadCount > 0 && (
+									<span className="shrink-0 text-xs text-[var(--text-muted)]">{a.unreadCount}</span>
+								)}
+							</button>
+							<button
+								type="button"
+								title={a.hidden ? "表示する" : "非表示にする"}
+								onClick={() => onToggleHidden(a)}
+								className="shrink-0 rounded-lg px-2 py-1 text-xs text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+							>
+								{a.hidden ? "表示する" : "非表示にする"}
+							</button>
+						</div>
 					))}
 					{addresses.length === 0 && (
 						<p className="px-4 py-2 text-sm text-[var(--text-muted)]">
@@ -328,6 +361,19 @@ export function AppLayout() {
 		if (window.location.pathname !== "/") navigate({ pathname: "/", search: next.toString() });
 	};
 
+	const includeHidden = useIncludeHidden();
+	const toggleIncludeHidden = () => setIncludeHidden(!includeHidden);
+	const toggleHidden = async (mailbox: MyAddress) => {
+		const next = !mailbox.hidden;
+		// 先に画面へ反映し、失敗したら戻す。切り替えの応答を待たせない。
+		setAddresses((as) => as.map((x) => (x.id === mailbox.id ? { ...x, hidden: next } : x)));
+		try {
+			await AddressesApi.setHidden(mailbox.id, next);
+		} catch {
+			setAddresses((as) => as.map((x) => (x.id === mailbox.id ? { ...x, hidden: !next } : x)));
+		}
+	};
+
 	const handleLogout = async () => {
 		setLoggingOut(true);
 		await logout();
@@ -392,6 +438,11 @@ export function AppLayout() {
 							</div>
 					<div className="my-1 border-t border-[var(--line-soft)]" />
 					{me?.role === "owner" && (
+						<div className="px-4 py-2">
+							<AdminModeToggle />
+						</div>
+					)}
+					{me?.role === "owner" && (
 						<button
 							type="button"
 							onClick={() => {
@@ -435,6 +486,7 @@ export function AppLayout() {
 
 	return (
 		<div className="flex h-screen flex-col bg-[var(--surface-sunken)]">
+			<AdminModeBanner />
 			{isMobile ? (
 				<header className="flex h-16 shrink-0 items-center gap-1.5 px-3">
 					<button
@@ -445,9 +497,17 @@ export function AppLayout() {
 					>
 						<MenuIcon />
 					</button>
-					<div className="min-w-0 flex-1 self-center">
-						<MailboxSwitcher addresses={addresses} selected={address} onSelect={selectAddress} flexible />
-					</div>
+						<div className="min-w-0 flex-1 self-center">
+							<MailboxSwitcher
+								addresses={addresses}
+								selected={address}
+								onSelect={selectAddress}
+								includeHidden={includeHidden}
+								onToggleIncludeHidden={toggleIncludeHidden}
+								onToggleHidden={toggleHidden}
+								flexible
+							/>
+						</div>
 					<Link
 						to="/notifications"
 						aria-label="通知"
@@ -479,7 +539,14 @@ export function AppLayout() {
 					Tsubame
 				</Link>
 
-				<MailboxSwitcher addresses={addresses} selected={address} onSelect={selectAddress} />
+				<MailboxSwitcher
+					addresses={addresses}
+					selected={address}
+					onSelect={selectAddress}
+					includeHidden={includeHidden}
+					onToggleIncludeHidden={toggleIncludeHidden}
+					onToggleHidden={toggleHidden}
+				/>
 
 				<form
 					onSubmit={onSearch}

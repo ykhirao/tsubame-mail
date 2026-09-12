@@ -10,6 +10,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 import { createFakeCloudflare } from "../../tests/domains-helpers";
 
@@ -75,7 +76,7 @@ describe("FR-18 管理画面の詳細と監査ログ", () => {
 	}
 
 	async function createMember(email: string, password: string): Promise<string> {
-		const res = await owner.post("/api/v1/admin/users", {
+		const res = await createUserViaApi(h, owner, {
 			email,
 			name: "メンバー",
 			role: "member",
@@ -102,7 +103,8 @@ describe("FR-18 管理画面の詳細と監査ログ", () => {
 
 		const detail = await owner.get(`/api/v1/admin/users/${memberId}`);
 		expect(detail.status).toBe(200);
-		expect(detail.body.grants).toHaveLength(3);
+		// プライマリは一覧に書かなくても write で残る（FR-4-5）ので 1 件多い。
+		expect(detail.body.grants).toHaveLength(Object.keys(ids).length + 1);
 		const returnedIds = (detail.body.grants as { addressId: string }[]).map((g) => g.addressId);
 		for (const id of Object.values(ids)) expect(returnedIds).toContain(id);
 	});

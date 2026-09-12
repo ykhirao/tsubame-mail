@@ -2,9 +2,10 @@
 
 管理 API（domains / addresses / rules / webhooks / users / api-keys）の変更操作と
 端末（push devices）の登録・削除、利用者自身の API キー発行・失効、メールボックスの署名の変更、
-オーナー作成（bootstrap）は `audit_logs` テーブルに記録される。誰が・いつ・何に対して・IP 何から操作したかを
-後から追えるようにするためのもので、配信メッセージ本体の内容（本文など）は記録しない。
+外部アドレスの登録・確認、管理者モードの出入り、オーナー作成（bootstrap）は `audit_logs` テーブルに記録される。
+誰が・いつ・何に対して・IP 何から操作したかを後から追えるようにするためのもので、配信メッセージ本体の内容（本文など）は記録しない。
 記録するのは `src/domain/access/policy.ts` の `recordAudit`。記録に失敗しても本処理は落とさない。
+メールボックスの非表示（`PATCH /v1/addresses/{id}/hidden`）は見え方の設定なので記録しない。
 
 ## 記録される項目
 
@@ -28,7 +29,8 @@
 | `domain.catchall` | catch-all 変更 | `name`, `zoneId`, `enabled` |
 | `domain.sending` | Email Sending の有効・無効の切り替え | `name`, `zoneId`, `enabled` |
 | `domain.verify` | 確認の再実行 | `name`, `zoneId`, `routingStatus`, `sendingStatus` |
-| `address.create` | アドレス作成 | `address`, `localPart`, `domainId`, `kind`, `aliasTargetId`, `isCatchAll` |
+| `address.create` | アドレス作成（`POST /admin/addresses` と、ユーザー作成でプライマリをその場で作ったときの両方） | `address`, `localPart`, `domainId`, `kind`, `aliasTargetId`, `isCatchAll`（`assignToMe` と最初のメールボックスの自動プライマリは出ない） |
+| `address.assign` | 作ったアドレスを作った owner に割り当てた（`assignToMe`、または最初のアドレスのプライマリ化） | `address`, `userId`, `level`, `primary` |
 | `address.update` | アドレス変更 | `address`, `kind`, `aliasTargetId`, `isCatchAll`, `archived` |
 | `address.signature` | 署名の変更（write 権限の利用者が設定画面から。API キーでは 403） | `address`, `before` / `after`（文字数。本文は残さない） |
 | `address.delete` | アドレス削除 | `address`, `domainId`, `kind` |
@@ -41,17 +43,21 @@
 | `webhook.retry` | 手動再送（`target_id` は webhook の id） | `deliveryId`, `attempt` |
 | `device.register` | 端末の登録（再登録の上書きも含む） | `name`, `platform`（endpoint・キーは含まない） |
 | `device.delete` | 端末の削除 | `name` |
-| `user.create` | 利用者・エージェント作成 | `email`, `role` |
-| `user.update` | 利用者・エージェント変更 | `name`, `role`, `status`, `passwordChanged`, `revokedDescendantKeys`（パスワード変更・無効化で、その人のキーから他の利用者向けに発行され連鎖で失効したキー） |
+| `user.create` | 利用者・エージェント作成 | `email`（外部アドレス。無ければ undefined）, `role`, `primaryAddressId` |
+| `user.update` | 利用者・エージェント変更 | `name`, `role`, `status`, `passwordChanged`, `revokedDescendantKeys`（パスワード変更・無効化で、その人のキーから他の利用者向けに発行され連鎖で失効したキー）。プライマリの変更（`primaryAddressId`）もこの action だが meta には出ない |
 | `user.delete` | 利用者・エージェント削除 | `email`, `role`, `revokedDescendantKeys`（その人のキーから発行され、連鎖で失効したキー） |
 | `user.grants.replace` | アドレス権限の一括差し替え | `grants` |
+| `user.external_email.set` | 外部アドレスの登録・差し替え（本人 `POST /me/external-email`、または owner `PUT /admin/users/{id}/external-email`。`actor_id` で見分ける） | `email`, `sent`（確認メールを送れたか） |
+| `user.external_email.verify` | 外部アドレスの確認（本人が確認コードを入れた） | `email` |
+| `admin_mode.enter` / `admin_mode.exit` | 管理者モードに入った・出た（owner のセッションだけ。`target_id` は本人） | `until`（期限の Unix 秒。exit は null）。期限切れで自動的に切れたときは `exit` が残らない |
 | `api_key.create` | API キー発行（利用者自身・管理画面） | `name`, `scopes`, `addressIds`, `apiKeyId`（発行に使ったキー。セッションなら null）。管理画面はさらに `userId`, `expiresAt` |
 | `api_key.revoke` | API キー失効（利用者自身・管理画面） | `apiKeyId`（自分で失効）/ `userId`, `name`（管理画面）、`descendants`（連鎖で失効した子孫のキー） |
 | `auth.bootstrap` | オーナー作成（初回セットアップ） | `email` |
 
-`target_type` は `domain` / `address` / `rule` / `webhook` / `device` / `user` / `api_key`。`user.*` と `auth.bootstrap` は `user`、`api_key.*` は `api_key` を指す。
+`target_type` は `domain` / `address` / `rule` / `webhook` / `device` / `user` / `api_key`。`user.*`・`admin_mode.*`・`auth.bootstrap` は `user`、`api_key.*` は `api_key` を指す。
 再発行（差し替え）は「旧キーの `api_key.revoke` + 新キーの `api_key.create`」の 2 行になる。
-利用者自身のパスワード変更（`PATCH /v1/me`）とログイン・ログアウトは記録しない。
+利用者自身のパスワード変更（`PATCH /v1/me`）とログイン・ログアウト、確認メールの再送（`POST /me/external-email/resend`）、
+管理者モードで**読んだ**メールは記録しない。
 
 ## API で読む
 

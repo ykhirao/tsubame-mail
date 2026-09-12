@@ -19,10 +19,16 @@ import type { AddressSet } from "@/domain/access/policy";
 import { createApiKeyBody } from "@/shared/contracts/api-keys";
 import { paginationQuery } from "@/shared/contracts/common";
 import type { Principal, Scope } from "@/shared/contracts/common";
-import { updateMeBody } from "@/shared/contracts/users";
+import { adminModeBody, updateMeBody } from "@/shared/contracts/users";
 import { forbidden, invalidRequest, notFound, unauthorized } from "@/shared/errors";
 import { clientIp, getPrincipal, requireAuth } from "../middleware/auth";
 import type { AppEnv } from "../types";
+import { setExternalEmailBody, verifyExternalEmailBody } from "@/shared/contracts/external-email";
+import {
+	registerExternalEmail,
+	resendExternalEmail,
+	verifyExternalEmail,
+} from "@/services/verification-mail";
 
 const app = new Hono<AppEnv>();
 
@@ -54,7 +60,9 @@ app.get("/", async (c) => {
 	const [user] = await db
 		.select({
 			id: schema.users.id,
-			email: schema.users.email,
+			email: schema.users.externalEmail,
+			externalVerifiedAt: schema.users.externalVerifiedAt,
+			primaryAddressId: schema.users.primaryAddressId,
 			name: schema.users.name,
 			role: schema.users.role,
 			status: schema.users.status,
@@ -67,10 +75,22 @@ app.get("/", async (c) => {
 	if (!user) throw unauthorized();
 
 	const addresses = await listAccessibleAddresses(db, principal);
+	const [session] = principal.adminMode && principal.sessionId
+		? await db
+				.select({ adminModeUntil: schema.sessions.adminModeUntil })
+				.from(schema.sessions)
+				.where(eq(schema.sessions.id, principal.sessionId))
+				.limit(1)
+		: [];
 
 	return c.json({
 		id: user.id,
 		email: user.email,
+		externalEmail: user.email,
+		externalVerified: user.externalVerifiedAt !== null,
+		primaryAddressId: user.primaryAddressId,
+		adminMode: principal.adminMode === true,
+		adminModeUntil: unixSeconds(session?.adminModeUntil ?? null),
 		name: user.name,
 		role: user.role,
 		status: user.status,
@@ -82,8 +102,34 @@ app.get("/", async (c) => {
 		/** "all" ならアドレス無制限（owner かつキーの絞り込み無し）。 */
 		addressIds: principal.addressIds,
 		writableAddressIds: principal.writableAddressIds,
+		/** 自分に割り当てたアドレス。管理者モードでも変わらない（既読などを変えられる範囲）。 */
+		ownAddressIds: principal.ownAddressIds ?? principal.addressIds,
 		addresses,
 	});
+});
+
+// 管理者モードは画面のログインにだけ持つ。読める範囲が全アドレスに広がるので、入った・出たを必ず記録し、1 時間で切る（FR-19）。
+export const ADMIN_MODE_SECONDS = 60 * 60;
+
+app.post("/admin-mode", async (c) => {
+	const principal = getPrincipal(c);
+	if (principal.role !== "owner") throw forbidden("管理者モードはオーナーだけが使えます");
+	if (principal.via !== "session" || !principal.sessionId) {
+		throw forbidden("管理者モードは画面のログインからだけ切り替えられます");
+	}
+	const { enabled } = await readJson(c.req, adminModeBody);
+	const db = c.get("db");
+	const until = enabled ? new Date(Date.now() + ADMIN_MODE_SECONDS * 1000) : null;
+	await db.update(schema.sessions).set({ adminModeUntil: until }).where(eq(schema.sessions.id, principal.sessionId));
+	await recordAudit(db, {
+		actorId: principal.userId,
+		action: enabled ? "admin_mode.enter" : "admin_mode.exit",
+		targetType: "user",
+		targetId: principal.userId,
+		meta: { until: unixSeconds(until) },
+		ip: clientIp(c),
+	});
+	return c.json({ adminMode: enabled, adminModeUntil: unixSeconds(until) });
 });
 
 app.patch("/", async (c) => {
@@ -145,6 +191,63 @@ app.patch("/", async (c) => {
 	});
 });
 
+// 外部アドレスは本人の資格情報（ログイン先）なので、セッションだけに許す（API キーでは 403）。
+function requireMeSession(principal: Principal): void {
+	if (principal.via !== "session") {
+		throw forbidden("外部アドレスの設定は画面からログインして行ってください");
+	}
+}
+
+app.post("/external-email", async (c) => {
+	const principal = getPrincipal(c);
+	requireMeSession(principal);
+	const body = await readJson(c.req, setExternalEmailBody);
+	const db = c.get("db");
+	const result = await registerExternalEmail(db, c.env, principal.userId, body.email);
+	await recordAudit(db, {
+		actorId: principal.userId,
+		action: "user.external_email.set",
+		targetType: "user",
+		targetId: principal.userId,
+		meta: { email: body.email.trim().toLowerCase(), sent: result.sent },
+		ip: clientIp(c),
+	});
+	return c.json(result);
+});
+
+app.post("/external-email/verify", async (c) => {
+	const principal = getPrincipal(c);
+	requireMeSession(principal);
+	const body = await readJson(c.req, verifyExternalEmailBody);
+	const db = c.get("db");
+	const email = await verifyExternalEmail(db, principal.userId, body.code);
+	await recordAudit(db, {
+		actorId: principal.userId,
+		action: "user.external_email.verify",
+		targetType: "user",
+		targetId: principal.userId,
+		meta: { email },
+		ip: clientIp(c),
+	});
+	return c.json({ verified: true, email });
+});
+
+app.post("/external-email/resend", async (c) => {
+	const principal = getPrincipal(c);
+	requireMeSession(principal);
+	const db = c.get("db");
+	const result = await resendExternalEmail(db, c.env, principal.userId);
+	await recordAudit(db, {
+		actorId: principal.userId,
+		action: "user.external_email.resend",
+		targetType: "user",
+		targetId: principal.userId,
+		meta: { sent: result.sent },
+		ip: clientIp(c),
+	});
+	return c.json(result);
+});
+
 app.get("/api-keys", async (c) => {
 	const principal = getPrincipal(c);
 	const db = c.get("db");
@@ -173,7 +276,7 @@ app.post("/api-keys", async (c) => {
 	const addressIds = clampAddressIds(
 		principal.addressIds,
 		body.addressIds ?? null,
-		principal.via === "api_key",
+		principal.via === "api_key" && !!principal.keyRestricted,
 	);
 	if (addressIds) await assertAddressesExist(db, addressIds);
 	const expiresAt = await clampExpiresAt(db, principal, body.expiresAt);
@@ -221,7 +324,7 @@ app.delete("/api-keys/:id", async (c) => {
 	// 他人のキーは「見つからない」で返す（存在を漏らさない）。
 	if (!key) throw notFound("キーが見つかりません");
 	// 範囲を絞ったキーが漏れても、持ち主の他のキーまで止められないようにする。自分と自分の子孫だけ（#145）。
-	if (principal.via === "api_key" && principal.addressIds !== "all" && principal.apiKeyId) {
+	if (principal.via === "api_key" && principal.keyRestricted && principal.apiKeyId) {
 		if (id !== principal.apiKeyId && !(await isDescendantKey(db, principal.apiKeyId, id))) {
 			throw forbidden("範囲を絞った API キーでは、そのキーと、そのキーから発行したキーしか失効できません");
 		}

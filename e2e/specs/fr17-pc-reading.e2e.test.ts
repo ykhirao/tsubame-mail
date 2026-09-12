@@ -89,6 +89,8 @@ describe("FR-17 PC の読み進め", () => {
 	});
 
 	scenario("FR-17-3", "まとめて既読が複数スレッドに効く（API で確かめる）", async () => {
+		// seedDomain が owner に割り当てを付けるので、先に owner を作る。
+		const owner = await loginAsOwner(h);
 		await seedDomain(h, { addresses: ["ai"] });
 		for (let i = 0; i < 3; i++) {
 			const raw = mime({
@@ -101,7 +103,6 @@ describe("FR-17 PC の読み進め", () => {
 			await deliverEmail(h, { from: `sender${i}@ext.example.jp`, to: "ai@mail.tsubame.test", raw });
 		}
 		await drainQueues(h);
-		const owner = await loginAsOwner(h);
 		const list = await owner.get("/api/v1/threads");
 		expect(list.body.data.length).toBe(3);
 		for (const t of list.body.data) expect(t.unreadCount).toBeGreaterThan(0);
@@ -120,6 +121,8 @@ describe("FR-17 PC の読み進め", () => {
 	});
 
 	scenario("FR-17-3", "まとめてゴミ箱が複数スレッドを一覧から消す（API で確かめる）", async () => {
+		// seedDomain が owner に割り当てを付けるので、先に owner を作る。
+		const owner = await loginAsOwner(h);
 		await seedDomain(h, { addresses: ["ai"] });
 		for (let i = 0; i < 3; i++) {
 			const raw = mime({
@@ -132,7 +135,6 @@ describe("FR-17 PC の読み進め", () => {
 			await deliverEmail(h, { from: `sender${i}@ext.example.jp`, to: "ai@mail.tsubame.test", raw });
 		}
 		await drainQueues(h);
-		const owner = await loginAsOwner(h);
 		const list = await owner.get("/api/v1/threads");
 
 		// UI の「ゴミ箱へ」と同じ手順: 各会話の最新 1 通をゴミ箱に移す。

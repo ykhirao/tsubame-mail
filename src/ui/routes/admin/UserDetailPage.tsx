@@ -13,7 +13,10 @@ import {
 	EmptyState,
 	ErrorBanner,
 	formatDateTime,
+	Label,
+	Modal,
 	Page,
+	Select,
 	TableRow,
 	tdCls,
 	thCls,
@@ -37,6 +40,71 @@ function roleBadge(role: AdminUser["role"]): BadgeColor {
 	}
 }
 
+function PrimaryModal({
+	user,
+	addresses,
+	onClose,
+	onSaved,
+}: {
+	user: AdminUserDetail;
+	addresses: AdminAddress[];
+	onClose: () => void;
+	onSaved: () => void;
+}) {
+	const [selected, setSelected] = useState<string>(user.primaryAddressId ?? "");
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState("");
+
+	// プライマリにできるのは write で割り当てた、アーカイブされていないメールボックスだけ。
+	const writableIds = new Set(user.grants.filter((g) => g.level === "write").map((g) => g.addressId));
+	const options = addresses.filter(
+		(a) => a.kind === "mailbox" && a.archivedAt === null && writableIds.has(a.id),
+	);
+
+	const save = async () => {
+		setError("");
+		setBusy(true);
+		try {
+			await api.patch(`/api/v1/admin/users/${user.id}`, { primaryAddressId: selected });
+			onSaved();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "プライマリの更新に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<Modal title="プライマリを変更" onClose={onClose}>
+			<ErrorBanner message={error} onDismiss={() => setError("")} />
+			<div className="space-y-4">
+				<div className="text-sm text-[var(--text-muted)]">
+					プライマリはこの人が主に使うメールボックスです。write で割り当てたメールボックスだけを選べます。
+				</div>
+				<div>
+					<Label>プライマリにするメールボックス</Label>
+					<Select value={selected} onChange={(e) => setSelected(e.target.value)}>
+						<option value="">選択してください</option>
+						{options.map((a) => (
+							<option key={a.id} value={a.id}>
+								{a.address}
+							</option>
+						))}
+					</Select>
+				</div>
+				<div className="flex justify-end gap-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button onClick={save} disabled={busy || !selected}>
+						保存する
+					</Button>
+				</div>
+			</div>
+		</Modal>
+	);
+}
+
 function keyStatus(k: ApiKeySummary): { label: string; color: BadgeColor } {
 	if (k.revokedAt != null) return { label: "失効", color: "red" };
 	if (k.expiresAt != null && k.expiresAt * 1000 < Date.now()) return { label: "期限切れ", color: "yellow" };
@@ -50,6 +118,7 @@ export function UserDetailPage() {
 	const [keys, setKeys] = useState<ApiKeySummary[]>([]);
 	const [error, setError] = useState("");
 	const [grantOpen, setGrantOpen] = useState(false);
+	const [primaryOpen, setPrimaryOpen] = useState(false);
 	const [loaded, setLoaded] = useState(false);
 
 	useEffect(() => {
@@ -96,12 +165,34 @@ export function UserDetailPage() {
 						<Card>
 							<CardHeader
 								title={user.name}
-								description={user.email}
-								action={<Button variant="secondary" onClick={() => setGrantOpen(true)}>権限を編集</Button>}
+								description={user.externalEmail ?? "外部メール未設定"}
+								action={
+									<div className="flex gap-2">
+										<Button variant="secondary" onClick={() => setPrimaryOpen(true)}>
+											プライマリを変更
+										</Button>
+										<Button variant="secondary" onClick={() => setGrantOpen(true)}>権限を編集</Button>
+									</div>
+								}
 							/>
 							<DetailList>
 								<DetailItem label="名前">{user.name}</DetailItem>
-								<DetailItem label="メールアドレス">{user.email}</DetailItem>
+								<DetailItem label="外部メール">
+									<div className="space-y-1">
+										<div>{user.externalEmail ?? "—"}</div>
+										{user.externalEmail && (
+											<Badge color={user.externalVerified ? "green" : "yellow"}>
+												{user.externalVerified ? "確認済み" : "未確認"}
+											</Badge>
+										)}
+									</div>
+								</DetailItem>
+								<DetailItem label="プライマリ">
+									{user.primaryAddress ?? "—"}
+									{!user.primaryAddressId && (
+										<span title="プライマリ未設定" className="ml-1 text-[var(--warning)]">⚠</span>
+									)}
+								</DetailItem>
 								<DetailItem label="ロール"><Badge color={roleBadge(user.role)}>{roleLabels[user.role]}</Badge></DetailItem>
 								<DetailItem label="状態">
 									<Badge color={user.status === "active" ? "green" : "red"}>
@@ -129,7 +220,12 @@ export function UserDetailPage() {
 											<TableRow><td colSpan={2} className={`${tdCls} text-[var(--text-muted)]`}>割り当てられたアドレスはありません。</td></TableRow>
 										) : user.grants.map((g) => (
 											<TableRow key={g.addressId}>
-												<td className={`${tdCls} font-medium text-[var(--text)]`}>{g.address ?? "—"}</td>
+												<td className={`${tdCls} font-medium text-[var(--text)]`}>
+													{g.address ?? "—"}
+													{g.addressId === user.primaryAddressId && (
+														<span className="ml-1"><Badge color="purple">プライマリ</Badge></span>
+													)}
+												</td>
 												<td className={tdCls}><Badge color={g.level === "write" ? "green" : "blue"}>{g.level}</Badge></td>
 											</TableRow>
 										))}
@@ -193,6 +289,19 @@ export function UserDetailPage() {
 						addresses={addresses}
 						onClose={() => setGrantOpen(false)}
 						onSaved={() => setGrantOpen(false)}
+					/>
+				)}
+
+				{loaded && user && primaryOpen && (
+					<PrimaryModal
+						user={user}
+						addresses={addresses}
+						onClose={() => setPrimaryOpen(false)}
+						onSaved={async () => {
+							setPrimaryOpen(false);
+							const detail = await api.get<AdminUserDetail>(`/api/v1/admin/users/${id}`);
+							setUser(detail);
+						}}
 					/>
 				)}
 			</Page>

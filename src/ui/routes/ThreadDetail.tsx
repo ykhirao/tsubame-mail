@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import type { MessageDetail } from "@/shared/contracts/messages";
 import { AttachmentApi, MessagesApi, ThreadsApi, AddressesApi } from "@/ui/lib/api";
+import { useAuth, type MeWithAdminMode } from "@/ui/lib/auth";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
 import { hasRemoteImages, MessageHtml } from "@/ui/components/MessageHtml";
@@ -55,7 +56,16 @@ const DotsIcon = () => (
 	</svg>
 );
 
+/** 管理者モードで読めるだけの他人のメールは、自動既読も含む状態の変更ができない。 */
+function canModify(me: MeWithAdminMode | null, addressId: string | null): boolean {
+	if (!me || !addressId) return false;
+	if (!me.adminMode) return true;
+	const own = me.ownAddressIds;
+	return own === "all" || (own ?? []).includes(addressId);
+}
+
 export function ThreadDetail() {
+	const { me } = useAuth();
 	const { id } = useParams();
 	const navigate = useNavigate();
 	const isMobile = useIsMobile();
@@ -73,6 +83,7 @@ export function ThreadDetail() {
 	const goThread = (tid: string) => navigate(threadHref(tid));
 	const [messages, setMessages] = useState<MessageDetail[] | null>(null);
 	const [subject, setSubject] = useState<string | null>(null);
+	const [addressId, setAddressId] = useState<string | null>(null);
 	const [notFound, setNotFound] = useState(false);
 	const [hasOlder, setHasOlder] = useState(false);
 	const [olderCursor, setOlderCursor] = useState<string | null>(null);
@@ -111,15 +122,18 @@ export function ThreadDetail() {
 				if (!alive) return;
 				setSubject(t.subject);
 				setMessages(t.messages);
+				setAddressId(t.addressId);
 				setHasOlder(t.hasOlder);
 				setOlderCursor(t.olderCursor);
 				setOlderCount(t.olderCount);
 				setStarred(t.messages.at(-1)?.isStarred ?? false);
 				setExpandedIds(new Set());
 				const unread = t.messages.filter((m) => !m.isRead);
-				void Promise.all(unread.map((m) => MessagesApi.patch(m.id, { isRead: true }))).then(
-					() => alive && markLocalRead(t.messages),
-				);
+				if (canModify(me, t.addressId)) {
+					void Promise.all(unread.map((m) => MessagesApi.patch(m.id, { isRead: true }))).then(
+						() => alive && markLocalRead(t.messages),
+					);
+				}
 			})
 			.catch(() => alive && setNotFound(true));
 		return () => {
@@ -187,6 +201,7 @@ export function ThreadDetail() {
 
 	const replyTarget =
 		messages.filter((m) => m.direction === "inbound").at(-1) ?? messages.at(-1);
+	const modifiable = canModify(me, addressId);
 
 	return (
 		<article className="card w-full">
@@ -239,31 +254,35 @@ export function ThreadDetail() {
 					<h1 className="line-clamp-2 min-w-0 flex-1 text-sm font-bold leading-tight text-[var(--text)]">
 						{subject?.trim() || "（件名なし）"}
 					</h1>
-					<button
-						type="button"
-						onClick={() => void toggleStar()}
-						aria-label={starred ? "スターを外す" : "スターを付ける"}
-						className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
-					>
-						<svg
-							className="h-5 w-5"
-							viewBox="0 0 24 24"
-							fill={starred ? "var(--warning)" : "none"}
-							stroke={starred ? "var(--warning)" : "currentColor"}
-							strokeWidth="1.8"
-							strokeLinejoin="round"
+					{modifiable && (
+						<button
+							type="button"
+							onClick={() => void toggleStar()}
+							aria-label={starred ? "スターを外す" : "スターを付ける"}
+							className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
 						>
-							<path d="m12 4 2.4 5 5.6.8-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-.8z" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						onClick={() => setMenuOpen(true)}
-						aria-label="その他の操作"
-						className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
-					>
-						<DotsIcon />
-					</button>
+							<svg
+								className="h-5 w-5"
+								viewBox="0 0 24 24"
+								fill={starred ? "var(--warning)" : "none"}
+								stroke={starred ? "var(--warning)" : "currentColor"}
+								strokeWidth="1.8"
+								strokeLinejoin="round"
+							>
+								<path d="m12 4 2.4 5 5.6.8-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-.8z" />
+							</svg>
+						</button>
+					)}
+					{modifiable && (
+						<button
+							type="button"
+							onClick={() => setMenuOpen(true)}
+							aria-label="その他の操作"
+							className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--text)] transition-colors hover:bg-[var(--surface-hover)]"
+						>
+							<DotsIcon />
+						</button>
+					)}
 				</header>
 			)}
 

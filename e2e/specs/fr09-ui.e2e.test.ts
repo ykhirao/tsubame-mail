@@ -11,6 +11,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 // new タブで開く振る舞いの根拠をソースの形で固定する（fr15 と同じ流儀）。
@@ -194,7 +195,7 @@ describe("FR-9 UI", () => {
 		const infoId = seeded.addressIds.info!;
 		const hishoId = seeded.addressIds.hisho!;
 
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email: "m@tsubame.test",
 			name: "メンバー",
 			role: "member",

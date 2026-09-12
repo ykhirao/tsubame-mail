@@ -77,7 +77,8 @@ app.post("/", async (c) => {
 	// 絞られた admin キーから全アドレス・全スコープ・無期限のキーが作れてしまうのを塞ぐ。
 	if (principal.via === "api_key") {
 		scopes = clampScopes(principal.scopes, scopes);
-		addressIds = clampAddressIds(principal.addressIds, addressIds, true);
+		// 絞っていないキーの範囲は持ち主の割り当てではなく「制限なし」。持ち主の割り当てで凍結すると、他の利用者向けのキーを壊す。
+		addressIds = clampAddressIds(principal.keyRestricted ? principal.addressIds : "all", addressIds, true);
 		expiresAt = await clampExpiresAt(db, principal, body.expiresAt);
 	}
 

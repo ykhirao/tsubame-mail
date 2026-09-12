@@ -180,6 +180,29 @@ describe("processNotify", () => {
 		expect(log?.deviceCount).toBe(1);
 	});
 
+	it("割り当ての無い owner にはキャッチオールの新着を通知しない（割り当てれば届く）", async () => {
+		const addressId = (await seedDomain(h, { addresses: ["recruit"] })).addressIds["recruit"]!;
+		await getDb(h.env).update(schema.addresses).set({ isCatchAll: true }).where(eq(schema.addresses.id, addressId));
+		const ownerId = "usr_owner";
+		await addUser(h, { userId: ownerId, role: "owner" });
+		await addDevice(h, ownerId);
+		const sends = await enableVapid(h);
+
+		const first = await addMessage(h, { addressId });
+		await processNotify({ kind: "notify", event: "received", messageId: first }, h.env, fakeCtx);
+		// 利用者ごとに分ける段階（eligibleUserIds）でも owner を対象にしない。
+		expect(h.pending).toHaveLength(0);
+		expect(sends).toHaveLength(0);
+
+		await getDb(h.env)
+			.insert(schema.addressGrants)
+			.values({ userId: ownerId, addressId, level: "write" });
+		const second = await addMessage(h, { addressId });
+		await processNotify({ kind: "notify", event: "received", messageId: second }, h.env, fakeCtx);
+		await drainOutbound(h);
+		expect(sends).toHaveLength(1);
+	});
+
 	it("判定の前に利用者が読んで既読になっていても、ルール由来でなければ送る", async () => {
 		const addressId = (await seedDomain(h, { addresses: ["info"] })).addressIds["info"]!
 		const userId = "usr_member";

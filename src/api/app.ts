@@ -15,6 +15,7 @@ import threadRoutes from "./v1/threads";
 import { attachmentsRouter, rawRouter } from "./v1/attachments";
 import { rulesRouter } from "./v1/admin/rules";
 import adminUserRoutes from "./v1/admin/users";
+import adminExternalEmailRoutes from "./v1/admin/external-email";
 import adminApiKeyRoutes from "./v1/admin/api-keys";
 import webhookRoutes from "./v1/webhooks";
 import addressRoutes from "./v1/addresses";
@@ -171,6 +172,7 @@ export function createApp() {
 	app.route("/api/v1/threads", threadRoutes);
 	app.route("/api/v1/attachments", attachmentsRouter);
 	app.route("/api/v1", rawRouter);
+	app.route("/api/v1/admin/users", adminExternalEmailRoutes);
 	app.route("/api/v1/admin/users", adminUserRoutes);
 	app.route("/api/v1/admin/api-keys", adminApiKeyRoutes);
 	app.route("/api/v1/admin/rules", rulesRouter);

@@ -17,15 +17,20 @@ import { conflict, invalidRequest, notFound } from "@/shared/errors";
 import { clientIp, getPrincipal, requireOwner, requireSession } from "../../middleware/auth";
 import type { AppEnv } from "../../types";
 import { revokeKeyTree, revokeKeysIssuedBy } from "../me";
+import { createAddress } from "./addresses";
 
 const app = new Hono<AppEnv>();
 
 app.use("*", requireOwner);
 
-function serializeUser(row: typeof schema.users.$inferSelect) {
+function serializeUser(row: typeof schema.users.$inferSelect, primaryAddress: string | null) {
 	return {
 		id: row.id,
-		email: row.email,
+		email: row.externalEmail,
+		externalEmail: row.externalEmail,
+		externalVerified: row.externalVerifiedAt !== null,
+		primaryAddressId: row.primaryAddressId,
+		primaryAddress,
 		name: row.name,
 		role: row.role,
 		status: row.status,
@@ -39,6 +44,12 @@ async function loadUser(db: AppEnv["Variables"]["db"], id: string) {
 	const [row] = await db.select().from(schema.users).where(eq(schema.users.id, id)).limit(1);
 	if (!row) throw notFound("ユーザーが見つかりません");
 	return row;
+}
+
+async function primaryAddressOf(db: AppEnv["Variables"]["db"], primaryAddressId: string | null) {
+	if (!primaryAddressId) return null;
+	const addr = await db.query.addresses.findFirst({ where: eq(schema.addresses.id, primaryAddressId) });
+	return addr?.address ?? null;
 }
 
 async function loadGrants(db: AppEnv["Variables"]["db"], userId: string) {
@@ -75,27 +86,95 @@ app.get("/", async (c) => {
 		.orderBy(asc(schema.users.createdAt), asc(schema.users.id))
 		.limit(limit + 1);
 	const page = toPage(rows, limit);
-	return c.json({ data: page.rows.map(serializeUser), next_cursor: page.next_cursor });
+	const primaryIds = page.rows.map((r) => r.primaryAddressId).filter((id): id is string => id !== null);
+	const primaryAddrs = primaryIds.length
+		? await db
+				.select({ id: schema.addresses.id, address: schema.addresses.address })
+				.from(schema.addresses)
+				.where(jsonIdsIn(schema.addresses.id, [...new Set(primaryIds)]))
+		: [];
+	const primaryOf = new Map(primaryAddrs.map((a) => [a.id, a.address]));
+	return c.json({
+		data: page.rows.map((r) => serializeUser(r, r.primaryAddressId ? (primaryOf.get(r.primaryAddressId) ?? null) : null)),
+		next_cursor: page.next_cursor,
+	});
 });
 
 app.get("/:id", async (c) => {
 	const db = c.get("db");
 	const user = await loadUser(db, c.req.param("id"));
-	return c.json({ ...serializeUser(user), grants: await loadGrants(db, user.id) });
+	const primaryAddress = await primaryAddressOf(db, user.primaryAddressId);
+	return c.json({
+		...serializeUser(user, primaryAddress),
+		grants: await loadGrants(db, user.id),
+	});
 });
+
+// 同時に同じプライマリ・外部アドレスで作られると一意制約で落ちる。500 ではなく 409 にする。
+async function insertUniquely(run: () => Promise<unknown>): Promise<void> {
+	try {
+		await run();
+	} catch (err) {
+		const text = String((err as { cause?: unknown })?.cause ?? err);
+		if (text.includes("UNIQUE")) throw conflict("そのプライマリか外部アドレスは、別のユーザーが使っています");
+		throw err;
+	}
+}
 
 app.post("/", requireSession, async (c) => {
 	const principal = getPrincipal(c);
 	const body = await readJson(c.req, createUserBody);
 	const db = c.get("db");
 
-	const email = body.email.trim().toLowerCase();
-	const [existing] = await db
-		.select({ id: schema.users.id })
-		.from(schema.users)
-		.where(eq(schema.users.email, email))
-		.limit(1);
-	if (existing) throw conflict("そのメールアドレスは既に使われています");
+	const email = body.email?.trim().toLowerCase();
+	if (email) {
+		// 外部アドレスは他の利用者の外部アドレス・どのアドレスとも重ならない（FR-4-5）。
+		const [existing] = await db
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(eq(schema.users.externalEmail, email))
+			.limit(1);
+		if (existing) throw conflict("そのメールアドレスは既に使われています");
+		const [existingAddress] = await db
+			.select({ id: schema.addresses.id })
+			.from(schema.addresses)
+			.where(eq(schema.addresses.address, email))
+			.limit(1);
+		if (existingAddress) throw conflict("そのメールアドレスはこのアプリのアドレスと重なっています");
+	}
+
+	const primary = body.primaryAddress;
+	let primaryAddressId: string;
+	if ("addressId" in primary) {
+		const addr = await db.query.addresses.findFirst({
+			where: eq(schema.addresses.id, primary.addressId),
+		});
+		if (!addr) throw invalidRequest("指定したアドレスが見つかりません");
+		if (addr.kind !== "mailbox") throw invalidRequest("プライマリにはメールボックスを選んでください");
+		if (addr.archivedAt !== null) throw invalidRequest("アーカイブ済みのアドレスはプライマリにできません");
+		const [holder] = await db
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(eq(schema.users.primaryAddressId, addr.id))
+			.limit(1);
+		if (holder) throw conflict("そのアドレスは別のユーザーのプライマリです");
+		if (email === addr.address) throw conflict("プライマリと外部アドレスを同じにできません");
+		primaryAddressId = addr.id;
+	} else {
+		// アドレスを作ってから失敗するとアドレスと Cloudflare のルールが残るので、作る前に確かめられるものは確かめる。
+		const domain = await db.query.domains.findFirst({ where: eq(schema.domains.id, primary.domainId) });
+		if (domain && email === `${primary.localPart}@${domain.name}`.toLowerCase()) {
+			throw conflict("プライマリと外部アドレスを同じにできません");
+		}
+		const created = await createAddress(c, {
+			domainId: primary.domainId,
+			localPart: primary.localPart,
+			displayName: primary.displayName,
+			kind: "mailbox",
+			isCatchAll: false,
+		});
+		primaryAddressId = created.row.id;
+	}
 
 	const id = newId("user");
 
@@ -105,14 +184,23 @@ app.post("/", requireSession, async (c) => {
 	const plain = body.password ?? temporaryPassword;
 	const passwordHash = isAgent ? null : await hashPassword(plain as string);
 
-	await db.insert(schema.users).values({
+	await insertUniquely(() => db.insert(schema.users).values({
 		id,
-		email,
+		email: email ?? `${id}@users.invalid`,
+		externalEmail: email ?? null,
+		primaryAddressId,
 		name: body.name,
 		passwordHash,
 		role: body.role,
 		status: "active",
 		mustChangePassword: temporaryPassword !== null,
+	}));
+
+	// プライマリは write で割り当てる（FR-4-5）。
+	await db.insert(schema.addressGrants).values({
+		userId: id,
+		addressId: primaryAddressId,
+		level: "write",
 	});
 
 	await recordAudit(db, {
@@ -120,15 +208,13 @@ app.post("/", requireSession, async (c) => {
 		action: "user.create",
 		targetType: "user",
 		targetId: id,
-		meta: { email, role: body.role },
+		meta: { email, role: body.role, primaryAddressId },
 		ip: clientIp(c),
 	});
 
 	// 仮パスワードはここでしか返らない。保存しているのはハッシュだけ。
-	return c.json(
-		{ ...serializeUser(await loadUser(db, id)), temporaryPassword },
-		201,
-	);
+	const primaryAddress = await primaryAddressOf(db, primaryAddressId);
+	return c.json({ ...serializeUser(await loadUser(db, id), primaryAddress), temporaryPassword }, 201);
 });
 
 app.patch("/:id", requireSession, async (c) => {
@@ -152,6 +238,34 @@ app.patch("/:id", requireSession, async (c) => {
 		patch.mustChangePassword = true;
 	}
 	if (body.role === "agent") patch.passwordHash = null;
+	if (body.primaryAddressId !== undefined) {
+		const primaryId = body.primaryAddressId;
+		const addr = await db.query.addresses.findFirst({
+			where: eq(schema.addresses.id, primaryId),
+		});
+		if (!addr || addr.kind !== "mailbox" || addr.archivedAt !== null) {
+			throw invalidRequest("プライマリには、アーカイブされていないメールボックスを指定してください");
+		}
+		const grantRow = await db.query.addressGrants.findFirst({
+			where: and(eq(schema.addressGrants.userId, id), eq(schema.addressGrants.addressId, primaryId)),
+		});
+		if (!grantRow || grantRow.level !== "write") {
+			throw invalidRequest("その人に write で割り当てたアドレスだけをプライマリにできます");
+		}
+		const [holder] = await db
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(eq(schema.users.primaryAddressId, primaryId))
+			.limit(1);
+		if (holder && holder.id !== id) throw conflict("そのアドレスは別のユーザーのプライマリです");
+		const [external] = await db
+			.select({ id: schema.users.id })
+			.from(schema.users)
+			.where(eq(schema.users.externalEmail, addr.address))
+			.limit(1);
+		if (external) throw conflict("そのアドレスは利用者の外部アドレスとして使われています");
+		patch.primaryAddressId = primaryId;
+	}
 
 	// この PATCH が owner から降ろす／無効化する可能性がある変更かどうかは、
 	// リクエストボディだけで決まる（"owner のまま" の role 指定や name だけの更新は対象外）。
@@ -201,12 +315,14 @@ app.patch("/:id", requireSession, async (c) => {
 			role: body.role,
 			status: body.status,
 			passwordChanged: body.password !== undefined,
+			primaryAddressId: body.primaryAddressId,
 			revokedDescendantKeys,
 		},
 		ip: clientIp(c),
 	});
 
-	return c.json(serializeUser(await loadUser(db, id)));
+	const updated = await loadUser(db, id);
+	return c.json(serializeUser(updated, await primaryAddressOf(db, updated.primaryAddressId)));
 });
 
 app.delete("/:id", requireSession, async (c) => {
@@ -261,6 +377,16 @@ app.put("/:id/grants", requireSession, async (c) => {
 	for (const g of grants) merged.set(g.addressId, g);
 	const wanted = [...merged.values()];
 
+	// プライマリは常に write で割り当てる（FR-4-5）。一覧に無ければ write のまま残し、read に下げる指定だけを 400 にする。
+	const currentPrimary = user.primaryAddressId;
+	if (currentPrimary) {
+		const primaryGrant = merged.get(currentPrimary);
+		if (primaryGrant && primaryGrant.level !== "write") {
+			throw invalidRequest("プライマリのアドレスは read に下げられません。先にプライマリを変えてください");
+		}
+		if (!primaryGrant) wanted.push({ addressId: currentPrimary, level: "write" });
+	}
+
 	if (wanted.length > 0) {
 		const found = await db
 			.select({ id: schema.addresses.id })
@@ -271,15 +397,26 @@ app.put("/:id/grants", requireSession, async (c) => {
 		if (missing.length > 0) throw invalidRequest(`存在しないアドレスです: ${missing.join(", ")}`);
 	}
 
+	// 全部入れ直すので、本人が決めた非表示（見え方の設定）を引き継ぐ。
+	const hiddenBefore = new Set(
+		(
+			await db
+				.select({ addressId: schema.addressGrants.addressId })
+				.from(schema.addressGrants)
+				.where(and(eq(schema.addressGrants.userId, id), eq(schema.addressGrants.hidden, true)))
+		).map((r) => r.addressId),
+	);
 	await db.delete(schema.addressGrants).where(eq(schema.addressGrants.userId, id));
 	if (wanted.length > 0) {
-		// 1 文に全件の 3 列積むとバインドが 100 を超える（#57）。30 件=90 バインドずつに割る。
-		const CHUNK = 30;
+		// 1 文に全件積むとバインドが 100 を超える（#57）。drizzle は既定値のある列（hidden）もバインドするので 1 行 4 個、20 件=80 個ずつに割る。
+		const CHUNK = 20;
 		const insertBatches: any[] = [];
 		for (let i = 0; i < wanted.length; i += CHUNK) {
 			insertBatches.push(
 				db.insert(schema.addressGrants).values(
-					wanted.slice(i, i + CHUNK).map((g) => ({ userId: id, addressId: g.addressId, level: g.level })),
+					wanted
+						.slice(i, i + CHUNK)
+						.map((g) => ({ userId: id, addressId: g.addressId, level: g.level, hidden: hiddenBefore.has(g.addressId) })),
 				),
 			);
 		}

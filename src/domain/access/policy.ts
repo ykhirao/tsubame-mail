@@ -32,6 +32,8 @@ export type ResolvePrincipalOptions = {
 	user: PrincipalUser;
 	apiKey?: PrincipalApiKey | null;
 	sessionId?: string;
+	/** セッションの管理者モードの期限。owner のセッションで、今より後なら全アドレスを読める。 */
+	adminModeUntil?: Date | null;
 };
 
 export function intersectAddressSets(a: AddressSet, b: AddressSet): AddressSet {
@@ -50,13 +52,11 @@ export type UserAddressAccess = {
 	writable: AddressSet;
 };
 
-/** API キーの絞り込みは含まない。キー発行時の上限の検査にも使う。 */
+/** API キーの絞り込みと管理者モードは含まない。owner も割り当てたアドレスだけ（FR-11 / FR-19）。 */
 export async function resolveUserAddressAccess(
 	db: Db,
 	user: PrincipalUser,
 ): Promise<UserAddressAccess> {
-	if (user.role === "owner") return { readable: "all", writable: "all" };
-
 	const grants = await db
 		.select({ addressId: schema.addressGrants.addressId, level: schema.addressGrants.level })
 		.from(schema.addressGrants)
@@ -76,13 +76,17 @@ export async function resolvePrincipal(
 	const apiKey = opts.apiKey ?? null;
 
 	if (!apiKey) {
+		const adminMode =
+			opts.user.role === "owner" && !!opts.adminModeUntil && opts.adminModeUntil.getTime() > Date.now();
 		return {
 			userId: opts.user.id,
 			role: opts.user.role,
 			via: "session",
 			scopes: [...ALL_SCOPES],
-			addressIds: base.readable,
+			// 管理者モードで広がるのは読む範囲だけ。送信や既読などの変更は割り当てたアドレスに留める。
+			addressIds: adminMode ? "all" : base.readable,
 			writableAddressIds: base.writable,
+			...(adminMode ? { adminMode: true, ownAddressIds: base.readable as string[] } : {}),
 			...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
 		};
 	}
@@ -96,6 +100,7 @@ export async function resolvePrincipal(
 		addressIds: intersectAddressSets(base.readable, limit),
 		writableAddressIds: intersectAddressSets(base.writable, limit),
 		apiKeyId: apiKey.id,
+		...(apiKey.addressIds !== null ? { keyRestricted: true } : {}),
 	};
 }
 
@@ -107,6 +112,17 @@ export function normalizeScopes(raw: unknown): Scope[] {
 
 export function canRead(principal: Principal, addressId: string): boolean {
 	return addressSetHas(principal.addressIds, addressId);
+}
+
+/** 自分に割り当てたアドレス。管理者モードで読めるだけのアドレスは含めない（自分の設定を書ける範囲。FR-19）。 */
+export function ownAddresses(principal: Principal): AddressSet {
+	return principal.adminMode ? (principal.ownAddressIds ?? []) : principal.addressIds;
+}
+
+/** 既読・スター・移動のような状態の変更。管理者モードで読めるだけの他人のメールは変えない（FR-19）。 */
+export function canModify(principal: Principal, addressId: string): boolean {
+	if (principal.adminMode) return (principal.ownAddressIds ?? []).includes(addressId);
+	return canRead(principal, addressId);
 }
 
 export function canWrite(principal: Principal, addressId: string): boolean {

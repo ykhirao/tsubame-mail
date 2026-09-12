@@ -125,6 +125,11 @@ describe("FR-14 メールボックスの色", () => {
 			localPart: "ai",
 		});
 		const color = created.body.data.color;
+		// owner にも割り当てないと横断表示に出ない（FR-11）。
+		const me = await owner.get("/api/v1/me");
+		await owner.put(`/api/v1/admin/users/${me.body.id}/grants`, {
+			grants: [{ addressId: created.body.data.id, level: "write" }],
+		});
 
 		await deliverEmail(h, {
 			from: "a@ext.jp",

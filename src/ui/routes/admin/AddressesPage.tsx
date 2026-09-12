@@ -208,6 +208,7 @@ export function CreateAddressModal({
 	const [kind, setKind] = useState<"mailbox" | "alias">("mailbox");
 	const [aliasTargetId, setAliasTargetId] = useState("");
 	const [isCatchAll, setIsCatchAll] = useState(false);
+	const [assignToMe, setAssignToMe] = useState(false);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 
@@ -226,6 +227,7 @@ export function CreateAddressModal({
 				kind,
 				aliasTargetId: kind === "alias" ? aliasTargetId : undefined,
 				isCatchAll,
+				assignToMe: kind === "mailbox" && assignToMe ? true : undefined,
 			});
 			onCreated();
 		} catch (e) {
@@ -311,6 +313,24 @@ export function CreateAddressModal({
 						)}
 					</span>
 				</label>
+
+				{kind === "mailbox" && (
+					<label className="flex items-start gap-2 text-sm text-[var(--text)]">
+						<Checkbox
+							checked={assignToMe}
+							onChange={(e) => setAssignToMe(e.target.checked)}
+							className="mt-0.5"
+						/>
+						<span>
+							自分（作成したオーナー）に write で割り当てる
+						</span>
+					</label>
+				)}
+
+				<Notice tone="info">
+					割り当てた人にだけメールボックスが見えます。割り当てないアドレスは誰にも見えないので、
+					必要なら上のチェックで自分に割り当ててください。最初のメールボックスは自動で自分のプライマリになります。
+				</Notice>
 
 				<div className="flex justify-end gap-2 pt-2">
 					<Button variant="secondary" onClick={onClose}>
@@ -404,16 +424,17 @@ export function EditAddressModal({
 					<Label>見られる人</Label>
 					{viewers.length === 0 ? (
 						<p className="text-sm text-[var(--text-muted)]">
-							割り当てられた利用者はいません（owner のみ閲覧できます）。
+							割り当てられた利用者はいません。誰の受信箱にも出ません（管理者モードでだけ読めます）。
 						</p>
 					) : (
-						<ul className="space-y-1 text-sm text-[var(--text)]">
+					<ul className="space-y-1 text-sm text-[var(--text)]">
 							{viewers.map((v) => (
 								<li key={v.userId} className="flex flex-wrap items-center gap-2">
 									<span className="font-medium">{v.name}</span>
 									<span className="text-[var(--text-muted)]">{v.email}</span>
-									<Badge color={v.level === "owner" ? "purple" : v.level === "write" ? "green" : "gray"}>
-										{v.level === "owner" ? "所有者" : v.level === "write" ? "書き込み可" : "読み取り可"}
+									{v.isPrimary && <Badge color="purple">プライマリ</Badge>}
+									<Badge color={v.level === "write" ? "green" : "gray"}>
+										{v.level === "write" ? "書き込み可" : "読み取り可"}
 									</Badge>
 								</li>
 							))}

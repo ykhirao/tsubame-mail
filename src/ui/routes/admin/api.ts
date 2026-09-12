@@ -191,17 +191,22 @@ export interface AdminAddress {
 	createdAt: number;
 }
 
-/** owner は全アドレスを見られるため全員、それ以外は grants の読み書き。 */
+/** 見られるのは owner を除き grants で割り当てた人だけ。level はそのアドレスでの権限。 */
 export interface AddressViewer {
 	userId: string;
 	name: string;
 	email: string;
-	level: "owner" | "read" | "write";
+	level: "read" | "write";
+	isPrimary: boolean;
 }
 
 export interface AdminUser {
 	id: string;
-	email: string;
+	email: string | null;
+	externalEmail: string | null;
+	externalVerified: boolean;
+	primaryAddressId: string | null;
+	primaryAddress: string | null;
 	name: string;
 	role: Role;
 	status: "active" | "disabled";

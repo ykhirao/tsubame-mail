@@ -6,6 +6,7 @@ import {
 	loginAsOwner,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 // UI の実装をソースの形で確かめる（fr09 / fr15 / fr17 と同じ流儀）。
@@ -40,7 +41,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		id: string;
 		temporaryPassword: string;
 	}> {
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email: EXISTING_EMAIL,
 			name: "仮パスワードのメンバー",
 			role: "member",
@@ -115,7 +116,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 	});
 
 	scenario("FR-13-4", "パスワードを変えると、その利用者の全セッションを落とす", async () => {
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email: EXISTING_EMAIL,
 			name: "メンバー",
 			role: "member",
@@ -167,7 +168,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 	});
 
 	scenario("FR-13-1", "agent はパスワードを持たず、仮パスワードも発行されない", async () => {
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email: "agent@tsubame.test",
 			name: "エージェント",
 			role: "agent",
@@ -185,7 +186,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 	});
 
 	scenario("FR-13-4", "パスワードを変えると発行済みの API キーも全失効し、そのキーで 401 になる", async () => {
-		const created = await owner.post("/api/v1/admin/users", {
+		const created = await createUserViaApi(h, owner, {
 			email: EXISTING_EMAIL,
 			name: "メンバー",
 			role: "member",

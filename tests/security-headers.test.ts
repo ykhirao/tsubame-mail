@@ -6,7 +6,7 @@ import { createApp } from "@/api/app";
 import { buildSrcDoc, hasRemoteImages } from "@/ui/components/MessageHtml";
 import headersFile from "../public/_headers?raw";
 import { applyMigrations } from "./helpers/migrate";
-import { createUser, createDomain, createAddress, createApiKeyFor } from "./auth-helpers";
+import { createUser, createDomain, createAddress, createApiKeyFor, grant } from "./auth-helpers";
 
 async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
 	return createApp().fetch(new Request(`https://tsubame.test${path}`, init), env, createExecutionContext());
@@ -135,6 +135,8 @@ describe("生 MIME の配信は attachment（#49）", () => {
 		const owner = await createUser({ role: "owner" });
 		const domainId = await createDomain();
 		const addressId = await createAddress(domainId, "a");
+		// 生 MIME は割り当てたアドレスだけ読める（owner も割り当てが要る）。
+		await grant(owner.id, addressId, "write");
 		const { token } = await createApiKeyFor({ userId: owner.id, scopes: ["read"], addressIds: null });
 
 		const db = getDb(env);

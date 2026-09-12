@@ -192,11 +192,7 @@ export async function loadUserForDecide(
 }
 
 export async function eligibleUserIds(db: Db, addressId: string): Promise<string[]> {
-	const owners = await db
-		.select({ id: schema.users.id })
-		.from(schema.users)
-		.where(and(eq(schema.users.role, "owner"), eq(schema.users.status, "active")))
-		.all();
+	// owner も割り当てたアドレスだけを対象にする（FR-19）。管理者モードは通知に影響しない。
 	const grantees = await db
 		.select({ id: schema.users.id })
 		.from(schema.users)
@@ -209,17 +205,11 @@ export async function eligibleUserIds(db: Db, addressId: string): Promise<string
 		)
 		.where(and(eq(schema.users.status, "active"), ne(schema.users.role, "agent")))
 		.all();
-	const ids = new Set<string>([...owners.map((o) => o.id), ...grantees.map((g) => g.id)]);
-	return [...ids];
+	return grantees.map((g) => g.id);
 }
 
 /** sentByUserId が null の送信失敗は、そのアドレスに write を持つ全員に知らせる。 */
 export async function writeUserIds(db: Db, addressId: string): Promise<string[]> {
-	const owners = await db
-		.select({ id: schema.users.id })
-		.from(schema.users)
-		.where(and(eq(schema.users.role, "owner"), eq(schema.users.status, "active")))
-		.all();
 	const writers = await db
 		.select({ id: schema.users.id })
 		.from(schema.users)
@@ -233,6 +223,5 @@ export async function writeUserIds(db: Db, addressId: string): Promise<string[]>
 		)
 		.where(and(eq(schema.users.status, "active"), ne(schema.users.role, "agent")))
 		.all();
-	const ids = new Set<string>([...owners.map((o) => o.id), ...writers.map((g) => g.id)]);
-	return [...ids];
+	return writers.map((g) => g.id);
 }

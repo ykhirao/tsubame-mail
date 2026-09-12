@@ -13,7 +13,7 @@ import {
 	type AnyColumn,
 	type SQL,
 } from "drizzle-orm";
-import { addresses, messages, threads } from "@/db/schema";
+import { addresses, addressGrants, messages, threads } from "@/db/schema";
 import type { Db } from "@/db/client";
 import type { Principal } from "@/shared/contracts/common";
 import type { MessageDirection, MessageStatus } from "@/shared/contracts/messages";
@@ -31,6 +31,8 @@ export type MessageListFilters = {
 	direction?: MessageDirection;
 	status?: MessageStatus;
 	threadId?: string;
+	/** アドレスで絞っていないときに除外する、自分で非表示にしたメールボックスの id。 */
+	hiddenIds?: string[];
 };
 
 export type MessageListParams = {
@@ -153,7 +155,12 @@ function buildMessageConditions(
 		conds.push(jsonIdsIn(messages.addressId, principal.addressIds));
 	}
 	const s = filters.search;
-	if (filters.addressId) conds.push(eq(messages.addressId, filters.addressId));
+	// アドレスで名指ししたときは hidden でも出す。絞っていないときだけ自分の非表示を除く。
+	if (filters.addressId) {
+		conds.push(eq(messages.addressId, filters.addressId));
+	} else if (filters.hiddenIds?.length) {
+		conds.push(jsonIdsNotIn(messages.addressId, filters.hiddenIds));
+	}
 	if (filters.direction) conds.push(eq(messages.direction, filters.direction));
 	if (filters.status) {
 		conds.push(eq(messages.status, filters.status));
@@ -240,6 +247,22 @@ export async function resolveMailboxId(
 	return id;
 }
 
+export function jsonIdsNotIn(column: AnyColumn, ids: string[]): SQL {
+	if (ids.length === 0) return sql`1`;
+	// jsonIdsIn と同じ JSON 1 本の形で、バインド変数が id の数に比例しないようにする（#57）。
+	return sql`${column} not in (select value from json_each(${JSON.stringify(ids)}))`;
+}
+
+/** この利用者が grants で非表示にしたメールボックスの id。 */
+export async function hiddenAddressIds(db: Db, userId: string): Promise<string[]> {
+	const rows = await db
+		.select({ addressId: addressGrants.addressId })
+		.from(addressGrants)
+		.where(and(eq(addressGrants.userId, userId), eq(addressGrants.hidden, true)))
+		.all();
+	return rows.map((r) => r.addressId);
+}
+
 export async function getMessage(
 	db: Db,
 	principal: Principal,
@@ -283,6 +306,8 @@ export type ThreadListParams = {
 	view?: ThreadView;
 	/** 既定 false。true でゴミ箱しか持たないスレッドも返す。 */
 	includeTrash?: boolean;
+	/** アドレスで絞っていないときに除外する、自分で非表示にしたメールボックスの id。 */
+	hiddenIds?: string[];
 };
 
 const threadColumns = {
@@ -302,7 +327,11 @@ export async function queryThreads(
 	if (params.principal.addressIds !== "all") {
 		conds.push(jsonIdsIn(threads.addressId, params.principal.addressIds));
 	}
-	if (params.addressId) conds.push(eq(threads.addressId, params.addressId));
+	if (params.addressId) {
+		conds.push(eq(threads.addressId, params.addressId));
+	} else if (params.hiddenIds?.length) {
+		conds.push(jsonIdsNotIn(threads.addressId, params.hiddenIds));
+	}
 	if (params.cursor) {
 		const cur = decodeCursor(params.cursor);
 		if (!cur) throw invalidRequest("カーソルが不正です");

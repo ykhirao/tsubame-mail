@@ -198,6 +198,8 @@ npx wrangler d1 export tsubame --remote --output ./backup-$(date +%Y%m%d).sql
 - [ ] D1 バックアップが最新
 - [ ] `CF_API_TOKEN` に未使用の権限が付いていないか（最小権限の維持）
 - [ ] 監査ログ（`GET /api/v1/admin/audit-logs`）に覚えのない管理操作が無い。400 日で消えるので、長く残すなら書き出す（`docs/ops/audit-log.md`）
+- [ ] 監査ログの `admin_mode.enter` に覚えのないものが無い（owner のセッションが取られると全員のメールが読める）
+- [ ] プライマリ未設定（`⚠`）の member / agent と、未確認のまま止まっている外部アドレスが増えていない（第 8 節）
 
 ---
 
@@ -207,4 +209,55 @@ npx wrangler d1 export tsubame --remote --output ./backup-$(date +%Y%m%d).sql
 2. キューが詰まっていないか → 第 2 節
 3. 送信なら `outbound_jobs` → 第 3 節
 4. 受信が来ないなら Email Routing ルールの宛先 Worker（`tsubame` か）と DNS → `docs/ops/cutover.md`
-5. それでも分からなければ DB / ログを統合担当に相談
+5. 「届いているのに画面に出ない」なら、そのアドレスが自分に割り当たっているか（第 8 節）。owner でも割り当てが要る
+6. それでも分からなければ DB / ログを統合担当に相談
+
+---
+
+## 8. 見る範囲・割り当て・プライマリ（`0008` の後）
+
+owner も含めて、**自分に割り当てたアドレスのメールしか見えない**（FR-11）。全部を読むのは管理者モード（画面のアカウントメニュー。1 時間で切れ、
+入った・出たが監査ログ `admin_mode.enter` / `exit` に残る。読めるだけで、送信・既読・ゴミ箱は自分の割り当てだけ）。
+`0008_visibility_and_primary` を流した直後の変化は `docs/ops/deployment.md` §5.3。
+
+### 8.1 デプロイ後にオーナーが自分に割り当て直す
+
+`0008` は「誰にも割り当てていないアドレス」だけを owner に割り当てる。他の人に割り当て済みだったアドレスは owner から消えているので、要るものを足す。
+
+1. 何が自分から消えたかを見る（誰かに割り当て済みで、自分には無いアドレス）:
+   ```bash
+   npx wrangler d1 execute DB --config wrangler.local.jsonc --remote --command \
+     "SELECT a.address FROM addresses a WHERE a.archived_at IS NULL AND EXISTS (SELECT 1 FROM address_grants g WHERE g.address_id = a.id) AND NOT EXISTS (SELECT 1 FROM address_grants g JOIN users u ON u.id = g.user_id WHERE g.address_id = a.id AND u.role = 'owner') ORDER BY a.address;"
+   ```
+2. 画面: 管理 → ユーザー → 自分 → 権限を編集 → 要るアドレスに `write`（読むだけなら `read`）→ 保存。
+   API なら `PUT /api/v1/admin/users/{自分の id}/grants`（セッション限定。今の割り当てに足す形で全件を渡す。プライマリは外しても write で残る）。
+3. 通知が要るメールボックスは、割り当てた後に 設定 → 通知 → メールボックスごと で確かめる（割り当てが無い間は通知の対象外）。
+
+新しく作るアドレスは、作成画面の「自分（作成したオーナー）に write で割り当てる」を付けないと誰にも見えない。
+
+### 8.2 プライマリの無い member / agent を見つける
+
+member / agent はプライマリアドレス（本人のメールボックス。ログインにも使う）が必須だが、`0008` は `write` のメールボックスが無い人には付けられない。
+管理 → ユーザー の一覧で名前の横に `⚠`（プライマリ未設定）が出る。SQL なら:
+
+```console
+SELECT id, name, role, external_email, external_verified_at
+FROM users
+WHERE primary_address_id IS NULL AND role IN ('member', 'agent') AND status = 'active';
+```
+
+付け方: ユーザーの詳細 → 権限を編集 でメールボックスを `write` で割り当て → 「プライマリを変更」で選ぶ（`PATCH /api/v1/admin/users/{id}` の `primaryAddressId`）。
+メールボックスが無ければ先に作る（アドレス作成、または「ユーザーを作成」の「この場で新しいアドレスを作る」と同じ形）。
+プライマリの無い人は、移行で確認済みになった外部アドレスでログインできるので急がないが、外部アドレスも無い agent は影響が無い（API キーで動く）。
+
+### 8.3 外部アドレスとログイン
+
+- ログインに使えるのは **プライマリアドレス** か **確認済みの外部アドレス**。`0008` で写した既存のログイン用アドレスは確認済み。
+- 外部アドレスを登録し直すと未確認に戻り、確認するまでそのアドレスでは入れない（プライマリでは入れる）。
+  確認メールは送信が有効なドメインのメールボックスから出る。無ければ `sent: false` で、ドメインの送信を有効にしてから設定画面で「確認メールを送り直す」。
+- owner が代わりに登録できる: ユーザーの詳細ではなく API `PUT /api/v1/admin/users/{id}/external-email`（セッション限定）。コードは本人のアドレスに届く。
+- 未確認のまま止まっている人:
+  ```console
+  SELECT id, name, external_email FROM users WHERE external_email IS NOT NULL AND external_verified_at IS NULL;
+  ```
+- 旧 `users.email` 列は外部アドレスの写し（無い人は `<id>@users.invalid`）。SQL で見るときは `external_email` を使う。

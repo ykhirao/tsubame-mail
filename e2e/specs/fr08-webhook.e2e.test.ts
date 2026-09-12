@@ -14,6 +14,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 import { hmacHex } from "@/services/webhooks";
 
@@ -52,6 +53,25 @@ describe("FR-8 Webhook", () => {
 		expect(res.status).toBe(201);
 		return res.body;
 	}
+
+	scenario("FR-8-6", "owner は自分に割り当てていないアドレスも Webhook の対象にでき、その新着も届く", async () => {
+		const { getDb } = await import("@/db/client");
+		const { addressGrants } = await import("@/db/schema");
+		await getDb(h.env).delete(addressGrants).where(eq(addressGrants.addressId, hitoId));
+		expect((await owner.get("/api/v1/addresses")).body.data.map((a: { id: string }) => a.id)).not.toContain(hitoId);
+
+		const calls = stubWebhookFetch(200);
+		await createWebhook({ addressIds: [hitoId] });
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "hito@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "hito@mail.tsubame.test", subject: "割り当て外" }),
+		});
+		await drainQueues(h);
+
+		expect(calls).toHaveLength(1);
+		expect(JSON.parse(calls[0]!.body).message.subject).toBe("割り当て外");
+	});
 
 	scenario(["FR-8-1", "FR-8-5"], "対象アドレス・対象イベントに一致する webhook にだけ POST が飛ぶ", async () => {
 		await createWebhook({
@@ -326,7 +346,7 @@ describe("FR-8 Webhook", () => {
 	});
 
 	async function memberAndKeyedOwner(): Promise<[Client, Client]> {
-		const memberCreate = await owner.post("/api/v1/admin/users", {
+		const memberCreate = await createUserViaApi(h, owner, {
 			email: "member@tsubame.test",
 			name: "メンバー",
 			role: "member",

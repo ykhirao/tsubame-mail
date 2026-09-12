@@ -9,6 +9,7 @@ import {
 	seedDomain,
 	type Client,
 	type Harness,
+	createUserViaApi,
 } from "../harness";
 
 describe("FR-10 添付と生 MIME", () => {
@@ -101,7 +102,7 @@ describe("FR-10 添付と生 MIME", () => {
 			expect(rawRes.body).toContain("Message-ID: <att-0001@tsubame.test>");
 			expect(rawRes.body).toContain(attachmentContent);
 
-			const userRes = await owner.post("/api/v1/admin/users", {
+			const userRes = await createUserViaApi(h, owner, {
 				email: "bot@tsubame.test",
 				name: "見積ボット",
 				role: "agent",

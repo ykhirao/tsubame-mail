@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router";
 import type { MessageListItem } from "@/shared/contracts/messages";
-import { MessagesApi } from "@/ui/lib/api";
+import { MessagesApi, useIncludeHidden } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
 import { formatDate } from "@/ui/lib/format";
@@ -13,6 +13,7 @@ const OPERATORS = ["from:", "subject:", "since:2026-01-01", "is:unread", "has:at
 
 export function Search() {
 	const isMobile = useIsMobile();
+	const includeHidden = useIncludeHidden();
 	const [params, setParams] = useSearchParams();
 	const q = params.get("q") ?? "";
 	const hasQuery = params.get("q") != null;
@@ -36,7 +37,7 @@ export function Search() {
 				setNextCursor(null);
 			}
 			try {
-				const res = await MessagesApi.list({ q: term || undefined, limit: PAGE, cursor });
+				const res = await MessagesApi.list({ q: term || undefined, limit: PAGE, cursor, ...(includeHidden ? { includeHidden: "true" as const } : {}) });
 				if (cursor) {
 					setResults((prev) => [...prev, ...res.data]);
 					setNextCursor(res.next_cursor);
@@ -51,7 +52,7 @@ export function Search() {
 				setLoadingMore(false);
 			}
 		},
-		[params],
+		[params, includeHidden],
 	);
 
 	useEffect(() => {

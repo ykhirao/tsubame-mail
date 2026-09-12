@@ -16,6 +16,7 @@ import {
 	queryThreadMessages,
 	attachmentsForMessage,
 	resolveMailboxId,
+	hiddenAddressIds,
 	toUnix,
 } from "@/domain/search/sql";
 import { jsonIdsIn, requireScope } from "@/domain/access/policy";
@@ -70,10 +71,16 @@ routes.get("/", async (c) => {
 		}
 		addressId = id;
 	}
+	// アドレスで名指ししていないときだけ、自分の非表示のメールボックスを既定から除く。
+	const hiddenIds =
+		addressId === undefined && q.includeHidden !== true
+			? await hiddenAddressIds(db, principal.userId)
+			: undefined;
 
 	const { rows, nextCursor } = await queryThreads(db, {
 		principal,
 		addressId,
+		hiddenIds,
 		view: q.view,
 		limit: q.limit,
 		cursor: q.cursor,

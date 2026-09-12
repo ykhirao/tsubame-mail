@@ -5,7 +5,7 @@ import type { Db } from "@/db/client";
 import type { AppEnv } from "@/api/types";
 import { readJson } from "@/lib/validate";
 import { forbidden, invalidRequest, notFound } from "@/shared/errors";
-import { canWrite, requireScope } from "@/domain/access/policy";
+import { canModify, canWrite, requireScope } from "@/domain/access/policy";
 import {
 	messageListQuery,
 	messagePatch,
@@ -28,6 +28,7 @@ import {
 	attachmentsForMessage,
 	resolveMailboxId,
 	toUnix,
+	hiddenAddressIds,
 	type MessageRow,
 } from "@/domain/search/sql";
 
@@ -128,10 +129,15 @@ routes.get("/", async (c) => {
 		const body: MessageListResponse = { data: [], next_cursor: null };
 		return c.json(body);
 	}
+	// アドレスで名指ししていないときだけ、自分の非表示のメールボックスを既定から除く。
+	const hiddenIds =
+		addressId === undefined && q.includeHidden !== true
+			? await hiddenAddressIds(db, principal.userId)
+			: undefined;
 
 	const { rows, nextCursor } = await queryMessages(db, {
 		principal,
-		filters: { search, addressId, direction: q.direction, status: q.status, threadId: q.thread },
+		filters: { search, addressId, direction: q.direction, status: q.status, threadId: q.thread, hiddenIds },
 		order: q.order,
 		limit: q.limit,
 		cursor: q.cursor,
@@ -182,6 +188,9 @@ routes.patch("/:id", async (c) => {
 
 	const cur = await getMessage(db, principal, id, { includeTrash: true });
 	if (!cur) throw notFound("メッセージが見つかりません");
+	if (!canModify(principal, cur.addressId)) {
+		throw forbidden("管理者モードで読んでいるだけのメールは変更できません");
+	}
 	if (p.status !== undefined) {
 		requireScope(principal, "send");
 		if (!canWrite(principal, cur.addressId)) {

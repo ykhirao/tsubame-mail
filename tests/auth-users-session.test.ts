@@ -41,7 +41,7 @@ describe("#121 ユーザー管理の変更系は Cookie セッションの owner
 	});
 
 	it("POST で owner を新規作成できない（キーは 403、セッションは 201）", async () => {
-		const body = { email: "new-owner@example.test", name: "新オーナー", role: "owner", password: "pw-1234567890" };
+		const body = { email: "new-owner@example.test", name: "新オーナー", role: "owner", password: "pw-1234567890", primaryAddress: { addressId } };
 
 		expect((await request(app, "/api/v1/admin/users", { bearer: key.token, ...json(body) })).status).toBe(403);
 		expect((await request(app, "/api/v1/admin/users", { cookie, ...json(body) })).status).toBe(201);

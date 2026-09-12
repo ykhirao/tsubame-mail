@@ -20,7 +20,7 @@ export const localPart = z
 	.max(64)
 	.regex(/^[a-z0-9._+-]+$/, "ローカル部に使えない文字が含まれています");
 
-const displayName = z
+export const displayName = z
 	.string()
 	.trim()
 	.max(120)
@@ -36,6 +36,8 @@ const addressFields = {
 	isCatchAll: z.boolean().default(false),
 	signature: z.string().max(2000).optional(),
 	color: hexColor.optional(),
+	/** true なら作った owner に write で割り当てる。割り当てないアドレスは誰にも見えない。 */
+	assignToMe: z.boolean().optional(),
 };
 
 const requireAliasTarget = <T extends { kind: AddressKind; aliasTargetId?: string }>(v: T) =>
@@ -101,15 +103,23 @@ export const myAddress = z.object({
 	signature: z.string().nullable().optional(),
 	unreadCount: z.number(),
 	archived: z.boolean(),
+	/** 自分（grants）で非表示にしたメールボックス。割り当ての無いアドレスは false。 */
+	hidden: z.boolean(),
 });
 export type MyAddress = z.infer<typeof myAddress>;
+
+export const updateMyHiddenInput = z.object({ hidden: z.boolean() });
+export type UpdateMyHiddenInput = z.infer<typeof updateMyHiddenInput>;
 
 /** そのアドレスを「見られる人」。所有者は全員、それ以外は grants の利用者。 */
 export const addressViewer = z.object({
 	userId: z.string(),
 	name: z.string(),
-	email: z.string(),
-	level: z.enum(["owner", "read", "write"]),
+	/** 外部アドレス。まだ登録していない利用者は null。 */
+	email: z.string().nullable(),
+	level: z.enum(["read", "write"]),
+	/** このアドレスがその人のプライマリか。 */
+	isPrimary: z.boolean(),
 });
 export type AddressViewer = z.infer<typeof addressViewer>;
 
