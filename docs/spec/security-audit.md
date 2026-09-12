@@ -5,14 +5,32 @@
 
 - 解決済みの指摘は消した。#1〜#120 の再現・対応・再検査の記録は `git show 84eb932:docs/spec/security-audit.md`、
   #121〜#126・#129 はその対応のコミット（`git log --grep '#121'` など）にある。コードのコメントにある「#n」「精査 #n」はその番号。
-- 番号は通しで、**次に振る番号は #140**。
+- 番号は通しで、**次に振る番号は #142**。
 - 進め方（対応 → 再検査 → 次の精査）は `.agents/skills/security-audit/SKILL.md`。「この文書を進めて」と言われたらそれに従う。
 
 ## 1. 対応予定
 
 ### 直すもの
 
-今は無い。
+| # | 深刻度 | 内容 | 場所 |
+| --- | --- | --- | --- |
+| 140 | 低 | `spam_verdict` の `suspicious` が実機では出ない。しきい値 5 以上のスコアのメールは Worker まで届かない（実証済み） | `domain/mail/parse.ts` `spamVerdictFromScore` |
+
+- **#140** 2026-09-12 に test ドメインへ送って `X-CF-SpamH-Score` を集めた。Gmail から 0、Cloudflare Email Sending 経由の普通のメールは内容によらず 1、
+  GTUBE の文字列が 2、スパム語を並べた平文が 3、IP 直書きの `.exe` へのリンクが 4。スパム語・トラッキング画像・`.exe` リンクを全部入れた HTML は
+  2 回送って 2 回とも Worker に届かなかった（Email Sending の送信は成功を返す）。尺度は 0 から始まる小さな整数で、5 以上は Cloudflare の手前で落ちるらしい。
+  直し方: しきい値を 3 以上に下げる（3 と 4 を `suspicious`、2 以下を `clean`）。1 通ずつの観測なので、実運用で値が集まったら見直す。
+
+### 設計判断が要るもの
+
+| # | 深刻度 | 内容 | 場所 |
+| --- | --- | --- | --- |
+| 141 | 低 | 本文の HTML のリンクを押すと、リンク先のページがメール本文の iframe の中に開く（実証済み・Chrome 152） | `ui/components/MessageHtml.tsx` |
+
+- **#141** iframe は `sandbox="allow-same-origin"` だけなので、`<a>` のナビゲーションは iframe 自身の中で起きる（`target="_blank"` は popups が無いので開かない）。
+  開いたページは sandbox を引き継ぐのでスクリプトもフォーム送信も動かず、親の画面にも触れない。ただ外部のページが tsubame の画面の中に表示されるので、
+  偽のログイン画面を本文の一部に見せる余地は残る（送信はできない）。新しいタブで開くなら `allow-popups allow-popups-to-escape-sandbox` と
+  `<base target="_blank">` が要り、sandbox を緩める判断になる。
 
 ## 2. デプロイ時に要る作業
 
@@ -40,8 +58,12 @@
   Cloudflare を通らない経路（テストのひな形・将来の別の受け口）では偽の ARC で接ぎ木できる（#127）。
 - 受信の接ぎ木は、Cloudflare が一番上に足したヘッダのまとまり（CF ブロック）の認証結果で DMARC pass か From のドメインの DKIM pass を要求する（#127）。
   DMARC も DKIM も無い小さなドメインの正規の返信は新しいスレッドになる（受け入れた副作用）。Cloudflare が ARC も Authentication-Results も付けなかったメールは未認証扱い。
-- `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 5 以上で `suspicious`、未満で `clean`、無ければ null（#128）。しきい値は仮置きで、`spam` は出さない。
-  尺度が分かったら `parse.ts` `spamVerdictFromScore` の 1 か所を直す。
+- `spam_verdict` は CF ブロックの `X-CF-SpamH-Score` が 5 以上で `suspicious`、未満で `clean`、無ければ null（#128）。`spam` は出さない。
+  実機で見えた値は 0〜4 で、5 以上は届かない（#140 で直す）。
+- CF ブロックの並びは、実機の 10 通（Cloudflare Email Sending 経由と Gmail から）で必ず `Received` → `ARC-Seal` → `ARC-Message-Signature` →
+  `ARC-Authentication-Results` → `Received-SPF` → `Authentication-Results` → `X-CF-SpamH-Score` だった。
+- 受け取りの Worker が例外を投げると、Email Routing は一時失敗を返し、送信側が再送する（#24。実機で確認）。Cloudflare Email Sending は
+  約 26 秒・38 秒・71 秒・135 秒・605 秒と間隔を広げて、Gmail は 6 分後に送り直してきた。キューへの投入が落ち続ける間、同じメールが何度も来る。
 
 ### 送信
 
@@ -52,6 +74,10 @@
 - 非 ASCII の添付ファイル名は RFC 2231 で送るので、それを読まない古い MUA では化ける（#119）。
 - 送信の直前に差出人の行が消えていれば送る（アドレスの削除はメッセージごと消える前提）（#67）。To が無く Cc / Bcc だけの送信は受けない（#80）。
 - 送信に失敗した行は `failed` として残る（#90）。
+- `sent` は Cloudflare Email Sending が受け付けたという意味で、届いたことではない。スパムと判定されたメールや、ルーティングのルールが反映される前の宛先へのメールは、
+  `sent` のまま黙って届かないことを実機で見た（#140 の検証中）。
+- Cloudflare Email Sending も Email Routing も、998 文字を超えるヘッダ行（5,014 文字まで試した）を拒否も折り返しもせずそのまま通す（#34 / #66）。
+  送信側は 998 以内に収めているので実害は無いが、Cloudflare に上限を任せることはできない。
 
 ### 表示
 
@@ -59,6 +85,8 @@
   Chrome の実機で確かめただけ。インライン SVG は表示されず、`<plaintext>` を含む本文は常に空。
 - ゴミ箱のメッセージの添付と生 MIME は `?includeTrash=true` を付けたときだけ読める（#116）。本体と同じく、付ければ読めるのは意図どおり。
 - CSP に `sandbox` は付けていない（添付のダウンロードを止めるブラウザがあるため）（#6）。
+- 本文のリンクを押した瞬間（pointerdown）に、Chrome はリンク先の DNS 解決と TCP 接続を始める。押したまま外へずらしてクリックを取り消しても接続は起きる。
+  表示しただけ・ホバーしただけでは起きない（Chrome 152 で確認）。漏れるのは IP と「押しかけた」ことで、画像の表示を許可したときより狭い。
 
 ### 認証・キー
 
@@ -88,7 +116,8 @@
 ### ドメイン・Cloudflare
 
 - subdomain モードの切断は、名前の完全一致と DKIM のホスト名だけを消す。従来消していた `*.<name>` のメール用レコードは残る（消さない側に倒した）（#60）。
-- `verifyDomain` / `previewDomain` のページ上限（最大 41 往復）はそのまま（#93）。
+- `verifyDomain` / `previewDomain` のページ上限（最大 41 往復）はそのまま（#93）。Cloudflare API の上限は利用者ごとに 5 分で 1,200 回で、
+  応答の `ratelimit` / `ratelimit-policy` ヘッダで確かめた（1 回の検証で最大 3% ほど使う）。
 - `CF_ACCOUNT_ID` が未設定だとドメイン接続が動かない（必須として文書化）（#94）。
 - 監査ログは 400 日で消える（#95。`docs/ops/audit-log.md`）。それより長く残すには書き出して別に保管する。
 
@@ -96,6 +125,8 @@
 
 - `npm ci` は install script を持つ依存（`workerd`・`esbuild`・`core-js-pure`・`fsevents`）を全部実行する。絞っていない（#96）。
 - `0004` の `'rebuild'` はバッチ無しの全件再構築で、手順で扱っている（#112）。
+- ローカル開発（`http://localhost` / `http://127.0.0.1`）には Safari ではログインできない。Safari 26.6 は `Secure` 付きの Cookie を http では保存しない
+  （`__Host-` に限らない）。Chrome・Firefox・Brave は保存する（#84）。
 
 ## 4. 再発しやすい型
 
@@ -117,13 +148,10 @@
 
 ## 5. 未確認（実機でしか確かめられないもの）
 
-- `X-CF-SpamH-Score` の尺度（#128。2 通のうち 1 通にだけ付き、値は `1`）。Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127。#6740）。CF ブロックの並びがいつも同じか（2 通では同じ）。
-- Email Routing が `INBOUND_QUEUE.send` の失敗を送信側の再送に変えるか（#24）。
-- 998 文字を超えるヘッダ行を Cloudflare Email Sending が拒否するか、中継 MTA がどう扱うか（#34 / #66。送信側は 998 以内に収めている）。
-- Cloudflare の `catch_all` が実機でもゾーンに 1 本であること（#85 / #117 の前提。fake CF と仕様の記述に基づく）。Cloudflare API の実レート制限と 429 の挙動（#93）。
-- 25MB のメールのパースが Workers の 128MB メモリに収まるか。
-- ログインの応答時間から、遠隔でアドレスの存在を判別できるか（#26。ローカルでは差が出ない）。
-- 最後のオーナー保護（#54）の D1 上での同時実行。
-- `Zone Settings – Edit` 権限が実際に要るか（対応する呼び出しが `cfEndpoints` に無い。過剰権限の可能性）。
-- `__Host-` の Cookie がローカル開発（`http://localhost`）で Chrome 以外のブラウザでも受け付けられるか（#84）。
-- `<a>` を押した瞬間の Chrome の投機的 preconnect（クリック時点の漏えいなので、画像を許可するのと同程度）。
+2026-09-12 に実機で確かめた分は消した（結果は「3.」と #140 / #141、問題が無かったものはそのコミットメッセージ）。残りは次のとおり。
+
+- Cloudflare の `Authentication-Results` が欠けるのがどんなメールか（#127。#6740）。Gmail から直接送ったメールと Cloudflare Email Sending 経由のメールには
+  必ず付いていた。#6740 は Gmail の自動転送の例で、確かめるには Gmail 側に転送の設定が要る。
+- Cloudflare API の 429 の挙動（#93）。上限の値はヘッダで分かったが、429 を踏むと利用者の API 全体（ダッシュボードを含む）が最大 5 分止まるので踏んでいない。
+- 998 文字を超えるヘッダ行を、Cloudflare の外の中継 MTA（Gmail など）がどう扱うか（#34 / #66。Cloudflare の中は素通しと確認済み）。
+- スコア 5 以上のメールが落ちるのが Email Sending 側か Email Routing 側か（#140。どちらでも Worker には届かない）。

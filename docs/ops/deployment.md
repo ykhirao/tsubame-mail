@@ -98,6 +98,9 @@ Cloudflare ダッシュボード → *My Profile → API Tokens → Create Token
 | Zone | Zone Settings – **Edit** |
 | Zone | Zone – **Read** |
 
+`Zone Settings – Edit` は Email Routing の有効化・無効化と MX などの DNS の作成に要る（Cloudflare の API 仕様でこの 3 つはこの権限だけを受け付ける）。
+削ると独自ドメインの接続が失敗する。
+
 Zone リソースは **最初に使う 1 ゾーンだけ**に限定する。
 ドメインを増やすたびにこの Zone リソースの範囲を広げ直す必要がある
 （詳細は `docs/ops/operations.md` の「新しいドメインを足すとき」参照）。
