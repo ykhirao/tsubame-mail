@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { getDb } from "@/db/client";
 import { addresses, webhooks, webhookDeliveries } from "@/db/schema";
 import { conflict, invalidRequest, notFound } from "@/shared/errors";
@@ -240,17 +240,31 @@ webhookRoutes.post("/deliveries/:id/retry", requireUnrestricted, async (c) => {
 	const webhook = await db.select().from(webhooks).where(eq(webhooks.id, delivery.webhookId)).get();
 	if (!webhook) throw notFound("Webhook が見つかりません");
 	if (!webhook.enabled) throw conflict("無効化した Webhook の配信は再送できません");
-	if (delivery.status !== "failed") {
-		throw conflict("failed の配信のみ再送できます");
-	}
 
-	// failed → pending を条件付きで更新して取り分ける。同時 2 回では片方だけが取れる。
+	// 条件付き更新で取り分け、同時に投げた 2 回目は 409 になる。claim の直後は next_retry_at が
+	// 今なのですぐには再送対象にならず、30 分経って止まった pending はまた再送できる（#69 / B-20）。
+	// next_retry_at が null の pending は初回の POST 中なので、作成から 30 分経つまで待つ。
+	const retryableBefore = new Date(Date.now() - 1800 * 1000);
 	const claimed = await db
 		.update(webhookDeliveries)
-		.set({ status: "pending" })
-		.where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.status, "failed")))
+		.set({ status: "pending", nextRetryAt: new Date() })
+		.where(
+			and(
+				eq(webhookDeliveries.id, deliveryId),
+				or(
+					eq(webhookDeliveries.status, "failed"),
+					and(
+						eq(webhookDeliveries.status, "pending"),
+						or(
+							lt(webhookDeliveries.nextRetryAt, retryableBefore),
+							and(isNull(webhookDeliveries.nextRetryAt), lt(webhookDeliveries.createdAt, retryableBefore)),
+						),
+					),
+				),
+			),
+		)
 		.returning();
-	if (claimed.length === 0) throw conflict("この配信は別の操作で処理されています");
+	if (claimed.length === 0) throw conflict("この配信は今は再送できません");
 
 	// runDelivery は pending かつ attempt が与えた値以上だと「次の試行をキューに投入」する
 	// ので、この再送を実際に POST させるには attempt を 1 繰り上げて渡す必要がある。

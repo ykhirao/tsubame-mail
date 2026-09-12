@@ -161,4 +161,30 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect([200, 204]).toContain(del.status);
 		expect((await keyClient.get("/api/v1/me")).status).toBe(401);
 	});
+
+	scenario("FR-12", "失効したキーと同じ設定で再発行でき、新しいキーは同じ範囲で動く", async () => {
+		const body = { name: "再発行", scopes: ["read"], addressIds: [mineId] };
+
+		const first = await member.post("/api/v1/me/api-keys", body);
+		expect(first.status).toBe(201);
+		const oldClient = createClient(h);
+		oldClient.useKey(first.body.token as string);
+		expect((await oldClient.get("/api/v1/messages?limit=10")).status).toBe(200);
+
+		const del = await member.del(`/api/v1/me/api-keys/${first.body.id}`);
+		expect([200, 204]).toContain(del.status);
+		expect((await oldClient.get("/api/v1/messages?limit=10")).status).toBe(401);
+
+		const second = await member.post("/api/v1/me/api-keys", body);
+		expect(second.status).toBe(201);
+
+		const newClient = createClient(h);
+		newClient.useKey(second.body.token as string);
+		expect((await newClient.get("/api/v1/messages?limit=10")).status).toBe(200);
+
+		const all = await owner.get("/api/v1/messages?limit=50");
+		const othersMessage = all.body.data.find((m: { addressId: string }) => m.addressId === othersId);
+		// 新しいキーも同じ範囲（mineId だけ）で届かない相手は読めない。
+		expect((await newClient.get(`/api/v1/messages/${othersMessage.id}`)).status).toBe(404);
+	});
 });

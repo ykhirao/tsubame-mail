@@ -20,6 +20,12 @@ function assertCanAccess(addressIds: string[] | "all", addressId: string): void 
 	}
 }
 
+function assertNotTrashed(status: string, req: { query: (k: string) => string | undefined }): void {
+	if (status === "trash" && req.query("includeTrash") !== "true") {
+		throw notFound("見つかりません");
+	}
+}
+
 // 型は送信者が MIME に書いた値なので、そのまま返すと攻撃者の text/html や SVG を
 // このアプリのオリジンから配ることになる。ブラウザが開いても害の無い型だけを通す。
 const SAFE_CONTENT_TYPES = new Set([
@@ -47,6 +53,7 @@ attachmentsRouter.get("/:id", async (c) => {
 
 	const msg = await db.select().from(messages).where(eq(messages.id, att.messageId)).get();
 	if (!msg) throw notFound("添付が見つかりません");
+	assertNotTrashed(msg.status, c.req);
 	assertCanAccess(principal.addressIds, msg.addressId);
 
 	const obj = await getAttachment(c.env, att.r2Key);
@@ -71,6 +78,7 @@ rawRouter.get("/messages/:id/raw", async (c) => {
 		.where(eq(messages.id, c.req.param("id")))
 		.get();
 	if (!msg?.rawR2Key) throw notFound("メッセージが見つかりません");
+	assertNotTrashed(msg.status, c.req);
 	assertCanAccess(principal.addressIds, msg.addressId);
 
 	const obj = await getRaw(c.env, msg.rawR2Key);

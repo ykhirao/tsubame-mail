@@ -35,7 +35,7 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
     {
       "id": "adr_...",
       "address": "ai@m.example.com",
-      "level": "write",       // read | write | owner
+      "level": "write",       // read | write（owner も write）
       "unreadCount": 3
     }
   ],
@@ -44,6 +44,9 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
 ```
 
 `level` が `read` のアドレスからは送信できない。
+
+この一覧の既定は**100 件**（最大 200）、カーソルページング対応（`limit` / `cursor`）。
+件数が多くて先頭しか見えないときは `limit` で広げて辿る。
 
 ## 3. メールを読む
 
@@ -83,7 +86,8 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/messages/msg_...
 | `limit` | 既定 25 / 最大 100 |
 | `cursor` | `next_cursor` をそのまま渡す |
 
-`q` の演算子: `from:foo@bar subject:"見積" since:2026-01-01 添付`
+`q` の演算子: `from:` `to:` `subject:` `body:` `since:` `until:` `is:unread` `is:starred` `has:attachment` `in:<アドレス>`。
+例: `from:foo@bar subject:"見積" since:2026-01-01 has:attachment`。それ以外の語は全文検索（最大 500 文字・10 語）。
 
 個別パラメータは `q` 内の同名条件より優先される。
 
@@ -129,6 +133,14 @@ curl -X POST https://<host>/api/v1/messages/msg_.../reply \
 宛先は省略するとサーバが決める（`replyAll: true` なら元の To / Cc も含む）。
 引用はサーバが付ける。`read` と `send` の両方のスコープが要る。
 
+**返信は `subject` / `bcc` を受け付けない**（件名と宛先の隠蔽は元メールに従い、サーバが決める）。
+指定しても無視される。
+
+### inReplyTo
+
+`POST /v1/messages` に `inReplyTo` を渡すと、そのメッセージに返信として紐づき、
+スレッドを継ぐ（`References` / `In-Reply-To` ヘッダを付けて送る）。
+
 ### 添付
 
 `base64` で埋め込む。
@@ -154,7 +166,7 @@ curl -X POST https://<host>/api/v1/messages/msg_.../reply \
 | 本文 + 件名の合計 | 1.5MB |
 | 添付 1 件 | 20MB |
 | 添付の合計 | 25MB / 50 件 |
-| 件名 | 998 文字 |
+| 件名 | 600 バイト（日本語で約 200 文字）。超えると 400 |
 
 件名・宛先に**改行は入れられない**（MIME ヘッダに入るため弾かれる）。
 
@@ -171,7 +183,8 @@ curl -X PATCH https://<host>/api/v1/messages/msg_... \
 `sent` や `queued` は送信パイプラインの内部状態なので書き込めない。
 
 **一覧は既定でゴミ箱を除く。** ゴミ箱だけを見たいときは `?status=trash` を明示する
-（`status` を指定するとその状態だけに絞られる）。単体取得は `?includeTrash=true`。
+（`status` を指定するとその状態だけに絞られる）。単体取得・スレッドは既定でゴミ箱を除き、
+含めるなら `?includeTrash=true` を付ける。
 
 ## 6. スレッド
 
@@ -181,6 +194,27 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/threads/thr_...
 ```
 
 会話単位で見たいときはこちら。`messageCount` / `unreadCount` が付く。
+
+スレッド詳細のレスポンスは直近のメッセージだけを含む（`hasOlder` / `olderCursor` 付き）。
+**古いメッセージまで遡る**には `olderCursor` を `?before=` に渡して繰り返す。
+ゴミ箱に入れたメッセージも含めたいときは `?includeTrash=true`。
+
+```bash
+curl -H "Authorization: Bearer tsb_..." \
+  "https://<host>/api/v1/threads/thr_...?before=<olderCursor>"
+```
+
+### 添付と生 MIME の取得
+
+添付は `GET /v1/attachments/{id}`、受信したままの元メール（生 MIME）は
+`GET /v1/messages/{id}/raw` で取る。
+どちらも `Content-Disposition: attachment` 付きで返るので、ブラウザや CLI では保存に落ちる。
+ゴミ箱のメッセージのものは `?includeTrash=true` を付けないと 404 になる。
+
+```bash
+curl -H "Authorization: Bearer tsb_..." -OJ https://<host>/api/v1/attachments/att_...
+curl -H "Authorization: Bearer tsb_..." -OJ https://<host>/api/v1/messages/msg_.../raw
+```
 
 ## 7. エラー
 

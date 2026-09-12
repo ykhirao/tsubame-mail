@@ -528,7 +528,8 @@ describe("配信履歴 API", () => {
 	});
 
 	// #42: 手動再送が status を見ずに実行すると、success を再送して受け手に二重に届いたり、
-	// pending を再送してチェーンが並走したりする。failed 以外は 409 で止める。
+	// pending を再送してチェーンが並走したりする。success と次回再試行が未来の pending は 409 で止める。
+	// 未来の再試行予約が残っている pending には手元で POST を重ねてはいけないので 409 のまま。
 	it.each(["success", "pending"] as const)(
 		"status が %s の配信は再送すると 409 になり fetch も呼ばれない",
 		async (status) => {
@@ -543,6 +544,7 @@ describe("配信履歴 API", () => {
 				addressIds: null,
 			});
 			const deliveryId = newId("delivery");
+			const futureRetry = status === "pending" ? new Date(Date.now() + 3600 * 1000) : undefined;
 			await db.insert(webhookDeliveries).values({
 				id: deliveryId,
 				webhookId,
@@ -550,6 +552,7 @@ describe("配信履歴 API", () => {
 				status,
 				httpStatus: status === "success" ? 200 : null,
 				attempt: 1,
+				...(!futureRetry ? {} : { nextRetryAt: futureRetry }),
 			});
 
 			const token = await ownerToken();
@@ -636,6 +639,85 @@ describe("手動再送の claim（#69）", () => {
 			.where(eq(webhookDeliveries.id, deliveryId))
 			.get();
 		expect(after!.status).toBe("success");
+	});
+});
+
+describe("待機中の配信の手動再送（B-20）", () => {
+	useCleanState();
+
+	async function seedPendingDelivery(opts: { nextRetryAt: Date | null; createdAt?: Date }) {
+		const db = getDb(env);
+		const webhookId = newId("webhook");
+		await db.insert(webhooks).values({
+			id: webhookId,
+			name: "h",
+			url: "https://ok.example/h",
+			secret: "s",
+			events: ["message.received"],
+			addressIds: null,
+		});
+		const deliveryId = newId("delivery");
+		await db.insert(webhookDeliveries).values({
+			id: deliveryId,
+			webhookId,
+			event: "message.received",
+			status: "pending",
+			error: "ECONNREFUSED",
+			attempt: 1,
+			nextRetryAt: opts.nextRetryAt,
+			...(opts.createdAt ? { createdAt: opts.createdAt } : {}),
+		});
+		return deliveryId;
+	}
+
+	it("queue を失って 1 時間前の再試行予約で止まった pending は再送で success になる", async () => {
+		const deliveryId = await seedPendingDelivery({ nextRetryAt: new Date(Date.now() - 3600 * 1000) });
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { status: string; attempt: number };
+		expect(body.status).toBe("success");
+		expect(body.attempt).toBe(2);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("初回の POST 中（next_retry_at が null）の pending は、作成から 30 分経つまで 409", async () => {
+		const deliveryId = await seedPendingDelivery({ nextRetryAt: null });
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(409);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("next_retry_at が null のまま 1 時間止まった pending は再送できる", async () => {
+		const deliveryId = await seedPendingDelivery({
+			nextRetryAt: null,
+			createdAt: new Date(Date.now() - 3600 * 1000),
+		});
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("next_retry_at が未来の pending は 409 で fetch されない", async () => {
+		const deliveryId = await seedPendingDelivery({ nextRetryAt: new Date(Date.now() + 3600 * 1000) });
+		const token = await ownerToken();
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const res = await call(`/api/v1/webhooks/deliveries/${deliveryId}/retry`, token, { method: "POST" });
+		expect(res.status).toBe(409);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
 

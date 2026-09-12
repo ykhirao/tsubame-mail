@@ -597,4 +597,48 @@ describe("handleScheduled", () => {
 		await handleScheduled({ scheduledTime: Date.now() } as unknown as ScheduledController, h.env, fakeCtx);
 		expect((await getDb(h.env).select().from(schema.pushDevices).where(eq(schema.pushDevices.id, deviceId)).get())).toBeUndefined();
 	});
+
+	// inArray は id 数だけバインド変数を積み D1 の 100 個上限を越えるので、
+	// jsonIdsIn に替えて 150 件の掃除でも cron 全体を壊さないか見る（#57）。
+	it("digest 150 行（利用者 150 人、各 1 件）を 1 回で空にする（VAPID 無し）", async () => {
+		const db = getDb(h.env);
+		const addressId = (await seedDomain(h, { addresses: ["info"] })).addressIds["info"]!;
+		for (let i = 0; i < 150; i++) {
+			const userId = `usr_member_${i}`;
+			await addUser(h, { userId, role: "member" });
+			const messageId = await addMessage(h, { addressId });
+			await db.insert(schema.notificationDigests).values({
+				id: `${userId}_digest`,
+				userId,
+				dueAt: new Date(Date.now() - 1000),
+				messageIds: [messageId],
+			});
+		}
+
+		await handleScheduled({ scheduledTime: Date.now() } as unknown as ScheduledController, h.env, fakeCtx);
+
+		expect((await db.select().from(schema.notificationDigests).all())).toHaveLength(0);
+	});
+
+	it("1 人の digest に messageIds 150 件でも例外を出さず空にする", async () => {
+		const db = getDb(h.env);
+		const addressId = (await seedDomain(h, { addresses: ["info"] })).addressIds["info"]!;
+		const userId = "usr_member";
+		await addUser(h, { userId, role: "member", addressId, level: "read" });
+		await addDevice(h, userId);
+		const sends = await enableVapid(h);
+		const messageIds: string[] = [];
+		for (let i = 0; i < 150; i++) messageIds.push(await addMessage(h, { addressId }));
+		await db.insert(schema.notificationDigests).values({
+			id: newId("digest"),
+			userId,
+			dueAt: new Date(Date.now() - 1000),
+			messageIds,
+		});
+
+		await handleScheduled({ scheduledTime: Date.now() } as unknown as ScheduledController, h.env, fakeCtx);
+
+		expect(sends.filter((s) => s.method === "POST")).toHaveLength(1);
+		expect((await db.select().from(schema.notificationDigests).all())).toHaveLength(0);
+	});
 });

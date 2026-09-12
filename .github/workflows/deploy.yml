@@ -1,5 +1,5 @@
 # Deploy — 手動実行（workflow_dispatch）のみ。自動デプロイはしない。
-# CI と同じ検証を通してから scripts/deploy.sh で本番に書き込む。
+# tsc → vitest → build を通してから scripts/deploy.sh（--skip-build）で本番に書き込む。
 name: Deploy
 
 on:

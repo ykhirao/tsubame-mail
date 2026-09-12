@@ -415,6 +415,39 @@ export async function verifyDomain(params: {
 	};
 }
 
+export type EnableSendingResult = {
+	domainId: string;
+	name: string;
+	sendingStatus: "disabled" | "pending" | "active" | "error";
+	sending: SendingDnsState;
+	lastError: string | null;
+};
+
+/** 接続時に enableSending: false で繋いだドメインを後から有効化する。 */
+export async function enableSending(params: {
+	db: Db;
+	api: CloudflareApi;
+	domain: { id: string; name: string; zoneId: string; zoneName: string };
+}): Promise<EnableSendingResult> {
+	const { db, api, domain } = params;
+	const zone = { id: domain.zoneId, name: domain.zoneName };
+	let sendingStatus: "disabled" | "pending" | "active" | "error" = "pending";
+	let sending: SendingDnsState = { spf: false, dkim: false, dmarc: false };
+	let lastError: string | null = null;
+	try {
+		await api.enableEmailSending(zone, domain.name);
+		// ステータス API は当てにならないので、実際のレコードから読む（接続時と同じ）。
+		const records = await api.listDnsRecords(zone);
+		sending = readSendingDnsState(records, domain.name);
+		sendingStatus = sendingStatusOf(sending);
+	} catch (err) {
+		sendingStatus = "error";
+		lastError = err instanceof Error ? err.message : String(err);
+	}
+	await db.update(domains).set({ sendingStatus, lastError }).where(eq(domains.id, domain.id));
+	return { domainId: domain.id, name: domain.name, sendingStatus, sending, lastError };
+}
+
 export type CatchAllResult = {
 	domainId: string;
 	enabled: boolean;

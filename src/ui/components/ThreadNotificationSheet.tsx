@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { MailboxNotification, NotificationLevel } from "@/shared/contracts/notifications";
+import type { MailboxNotification, NotificationLevel, NotificationSettings } from "@/shared/contracts/notifications";
 import { NotificationsApi } from "@/ui/lib/api";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
 
@@ -17,7 +17,11 @@ const CloseIcon = () => (
 	</svg>
 );
 
-function explanation(level: NotificationLevel | undefined): string {
+function explanation(level: NotificationLevel | undefined, mailbox: MailboxNotification | undefined, settings: NotificationSettings | null): string {
+	if (settings && !settings.enabled) return "通知全体がオフの設定のため、この会話も通知されません";
+	if (settings && settings.paused_until && settings.paused_until * 1000 > Date.now())
+		return "一時停止中のため、この会話も通知されません";
+	if (mailbox?.isCatchAll && settings && !settings.notify_catch_all) return "キャッチオールは通知しない設定です";
 	switch (level) {
 		case "new_thread":
 			return "新しい会話だけ通知する設定のため、この会話の返信は通知されません";
@@ -43,6 +47,7 @@ export function ThreadNotificationSheet({
 	const isMobile = useIsMobile();
 	const [mode, setMode] = useState<"follow" | "mute" | null | undefined>(undefined);
 	const [mailboxes, setMailboxes] = useState<MailboxNotification[]>([]);
+	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 
 	useEffect(() => {
 		let alive = true;
@@ -52,6 +57,7 @@ export function ThreadNotificationSheet({
 				if (!alive) return;
 				setMode(t.mode);
 				setMailboxes(s.mailboxes);
+				setSettings(s);
 			} catch {
 				if (alive) setMode(null);
 			}
@@ -78,7 +84,7 @@ export function ThreadNotificationSheet({
 			line:
 				mode === undefined
 					? "確認中…"
-					: explanation(level),
+					: explanation(level, mailbox, settings),
 		},
 		{ key: "follow", title: "返信を毎回通知", line: "この会話の返信を毎回通知します（フォロー）" },
 		{ key: "mute", title: "この会話は通知しない", line: "この会話の返信を通知しません（ミュート）" },

@@ -46,6 +46,14 @@ app.get("/", async (c) => {
 	return c.json({ data: page.rows.map(serializeKey), next_cursor: page.next_cursor });
 });
 
+app.get("/:id", async (c) => {
+	const id = c.req.param("id");
+	const db = c.get("db");
+	const [key] = await db.select().from(schema.apiKeys).where(eq(schema.apiKeys.id, id)).limit(1);
+	if (!key) throw notFound("キーが見つかりません");
+	return c.json(serializeKey(key));
+});
+
 app.post("/", async (c) => {
 	const principal = getPrincipal(c);
 	const body = await readJson(c.req, adminCreateApiKeyBody);

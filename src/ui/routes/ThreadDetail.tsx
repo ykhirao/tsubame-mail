@@ -329,7 +329,7 @@ export function ThreadDetail() {
 											{formatDateTime(m.receivedAt)}
 											{m.direction === "inbound" && (
 												<a
-													href={AttachmentApi.rawUrl(m.id)}
+													href={`${AttachmentApi.rawUrl(m.id)}${includeTrash ? "?includeTrash=true" : ""}`}
 													download
 													title="受信したままの元のメール（.eml）を保存する"
 													className="hover:text-[var(--text)] hover:underline"
@@ -386,7 +386,7 @@ export function ThreadDetail() {
 
 									{m.attachments.length > 0 && (
 										<div className="mt-3">
-											<Attachments attachments={m.attachments} />
+											<Attachments attachments={m.attachments} includeTrash={includeTrash} />
 										</div>
 									)}
 								</div>

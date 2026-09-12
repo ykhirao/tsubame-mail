@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, vi } from "vitest";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import worker from "@/worker";
 import type { AnyQueueMessage } from "@/services/queue";
+import { eq } from "drizzle-orm";
 import { scenario } from "../registry";
 import {
 	createClient,
@@ -208,6 +209,37 @@ describe("FR-8 Webhook", () => {
 		expect(list.body.next_cursor).toBeNull();
 		expect(list.body.data[0].secret).toBeUndefined();
 		expect(list.body.data[0].id).toBe(created.id);
+	});
+
+	scenario("FR-8", "再送予約を過ぎた pending 配信を API から再送できる（B-20）", async () => {
+		await createWebhook({ url: "https://hook.example.com/tsubame" });
+		stubWebhookFetch(500);
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		// 受信だけ処理して、配信は pending（次回再試行予約つき）で止める。
+		await processOne(h);
+
+		const { getDb } = await import("@/db/client");
+		const { webhookDeliveries } = await import("@/db/schema");
+		const db = getDb(h.env);
+		const [pendingRow] = await db.select().from(webhookDeliveries).all();
+		expect(pendingRow!.status).toBe("pending");
+
+		// キューのメッセージを失って予約だけが過去に取り残された状態を再現する。
+		await db
+			.update(webhookDeliveries)
+			.set({ nextRetryAt: new Date(Date.now() - 3600 * 1000) })
+			.where(eq(webhookDeliveries.id, pendingRow!.id));
+
+		const calls = stubWebhookFetch(200);
+		const res = await owner.post(`/api/v1/webhooks/deliveries/${pendingRow!.id}/retry`);
+		expect(res.status).toBe(200);
+		expect((res.body as { status: string }).status).toBe("success");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.url).toBe("https://hook.example.com/tsubame");
 	});
 
 	async function memberAndKeyedOwner(): Promise<[Client, Client]> {

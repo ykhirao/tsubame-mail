@@ -132,6 +132,40 @@ describe("FR-10 添付と生 MIME", () => {
 		},
 	);
 
+	scenario("FR-10", "ゴミ箱のメッセージの添付と生 MIME は includeTrash 無しでは 404", async () => {
+		await seedDomain(h, { addresses: ["ai"] });
+		const aiAddr = "ai@mail.tsubame.test";
+
+		const raw = multipartMime({
+			from: "torihiki@ext.example.jp",
+			to: aiAddr,
+			subject: "ゴミ箱に入れる資料",
+			attachment: { filename: "資料.txt", contentType: "text/plain", content: "中身" },
+		});
+
+		await deliverEmail(h, { from: "torihiki@ext.example.jp", to: aiAddr, raw });
+		await drainQueues(h);
+
+		const list = await owner.get("/api/v1/messages?limit=10");
+		const msg = list.body.data[0];
+		const patched = await owner.patch(`/api/v1/messages/${msg.id}`, { status: "trash" });
+		expect(patched.status).toBe(200);
+
+		const detail = await owner.get(`/api/v1/messages/${msg.id}?includeTrash=true`);
+		const attId = detail.body.attachments[0].id;
+
+		const deniedAtt = await owner.get(`/api/v1/attachments/${attId}`);
+		expect(deniedAtt.status).toBe(404);
+		const deniedRaw = await owner.get(`/api/v1/messages/${msg.id}/raw`);
+		expect(deniedRaw.status).toBe(404);
+
+		const allowedAtt = await owner.get(`/api/v1/attachments/${attId}?includeTrash=true`);
+		expect(allowedAtt.status).toBe(200);
+		expect(allowedAtt.body).toContain("中身");
+		const allowedRaw = await owner.get(`/api/v1/messages/${msg.id}/raw?includeTrash=true`);
+		expect(allowedRaw.status).toBe(200);
+	});
+
 	scenario("FR-10", "送信者が HTML や SVG と名乗る添付は、ブラウザが描画しない型で返す", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";

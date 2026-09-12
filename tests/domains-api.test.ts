@@ -336,6 +336,75 @@ describe("POST /admin/domains/:id/verify と DELETE", () => {
 	});
 });
 
+describe("POST /admin/domains/:id/sending", () => {
+	it("enableSending: false で繋いだドメインを有効化すると pending か active になる", async () => {
+		const id = await seedDomain("dom_send_off", "mail.send-off.example.com");
+		await getTestDb().update(domains).set({ sendingStatus: "disabled" }).where(eq(domains.id, id));
+
+		const res = await callJson(adminDomains(), `/${id}/sending`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: true }),
+		});
+
+		expect(res.status).toBe(200);
+		expect(["pending", "active"]).toContain(res.json.data.sendingStatus);
+		const row = await getTestDb().query.domains.findFirst({ where: eq(domains.id, id) });
+		expect(row?.sendingStatus).toBe(res.json.data.sendingStatus);
+		// 有効化で Email Sending の subdomain を 1 つ作る
+		expect(fake.find((r) => r.method === "POST" && /email\/sending\/subdomains$/.test(r.path))).toHaveLength(1);
+	});
+
+	it("enabled: false で sending_status を disabled に戻す（DNS は消さない）", async () => {
+		const id = await seedDomain("dom_send_off2", "mail.send-off2.example.com");
+		await getTestDb().update(domains).set({ sendingStatus: "active" }).where(eq(domains.id, id));
+		fake.dnsRecords.push(
+			{ id: "s-spf", type: "TXT", name: "mail.send-off2.example.com", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+			{ id: "s-dkim", type: "TXT", name: "cf-bounce._domainkey.mail.send-off2.example.com", content: "v=DKIM1; p=AAA" },
+		);
+
+		const res = await callJson(adminDomains(), `/${id}/sending`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: false }),
+		});
+
+		expect(res.status).toBe(200);
+		expect(res.json.data.sendingStatus).toBe("disabled");
+		const row = await getTestDb().query.domains.findFirst({ where: eq(domains.id, id) });
+		expect(row?.sendingStatus).toBe("disabled");
+		expect(fake.dnsRecords.some((r) => r.id === "s-spf")).toBe(true);
+		expect(fake.dnsRecords.some((r) => r.id === "s-dkim")).toBe(true);
+	});
+
+	it("監査ログに domain.sending を記録する", async () => {
+		const id = await seedDomain("dom_send_audit", "mail.send-audit.example.com");
+		await getTestDb().update(domains).set({ sendingStatus: "disabled" }).where(eq(domains.id, id));
+
+		await callJson(adminDomains(), `/${id}/sending`, {
+			method: "POST",
+			body: JSON.stringify({ enabled: true }),
+		});
+
+		const rows = await getTestDb().select().from(auditLogs).all();
+		expect(rows.find((r) => r.targetId === id && r.action === "domain.sending")).toBeTruthy();
+	});
+});
+
+describe("GET /admin/domains/:id", () => {
+	it("配下のアドレスを返す", async () => {
+		const id = await seedDomain("dom_detail", "mail.detail.example.com");
+		await getTestDb().insert(addresses).values({
+			id: "adr_detail",
+			domainId: id,
+			localPart: "inbox",
+			address: "inbox@mail.detail.example.com",
+		});
+
+		const res = await callJson(adminDomains(), `/${id}`);
+		expect(res.status).toBe(200);
+		expect(res.json.data.addresses[0].address).toBe("inbox@mail.detail.example.com");
+	});
+});
+
 describe("管理系ルータの門（#31）", () => {
 	it.each([
 		["domains", adminDomainRoutes],

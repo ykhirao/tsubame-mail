@@ -51,14 +51,34 @@ npx wrangler queues info tsubame-outbound
 - **`tsubame-outbound` が詰まる**: 送信が失敗し続けている（`outbound_jobs` が `failed` /
   `queued` のまま増える）。次節を参照。
 
-再試行回数を超えるとメッセージはキューから落ちる。`wrangler.jsonc` の
-`queues.consumers[].max_retries` が再試行上限。
+再試行回数を超えるとメッセージは DLQ（`tsubame-inbound-dlq` / `tsubame-outbound-dlq`）に落ちる。
+`wrangler.jsonc` の `queues.consumers[].max_retries` が再試行上限、`dead_letter_queue` が送り先。
+DLQ まで落ちた場合は次節の手順で内容を確認する。
 
-### 2.3 メッセージが落ちた/手動再投入が必要なとき
+### 2.3 メッセージが落ちた/DLQ の見方・再投入
 
-基本は落ちたメッセージの再投入は行わず、`wrangler tail` のエラー内容を元に原因を直して
-再度受信が来るのを待つ。送信ジョブだけは失敗を `outbound_jobs` で管理しているので
-（次節）、再試行をその仕組みに委ねる。
+DLQ に滞留していないかは `npx wrangler queues info <dlq>` の遅延・滞留数で見る。
+
+```bash
+npx wrangler queues info tsubame-inbound-dlq
+npx wrangler queues info tsubame-outbound-dlq
+```
+
+- **受信の DLQ（`tsubame-inbound-dlq`）**: 落ちたメッセージの `rawKey` には、送信側で
+  先に R2（`tsubame-mail` の `raw/`）へ置いた**生 MIME の場所**だけが入っている。中身そのものは
+  R2 に残るので、`rawKey` を控えて `src/services/queue.ts` の `InboundQueueMessage`
+  （`kind: "inbound"` / `addressId` / `rawKey` / `envelope` / `receivedAt`）の形で
+  `wrangler queues message put tsubame-inbound ...` から積み直す。原因を取り除いてから積めば
+  コンシューマが通常処理する。
+- **送信の DLQ（`tsubame-outbound-dlq`）**: 送信のキュー本体（`tsubame-outbound`）には
+  `outbound.send`（`jobId` / `messageId`）だけが入り、送るべき MIME は残っていない。
+  落ちた原因を直したあと、該当メールはアプリの作成画面（または `POST /api/v1/messages`）から
+  **作り直して送る**。`outbound_jobs` 行を `queued` に戻しても再送の引き金にはならない
+  （再配達は OUTBOUND キューをコンシューマが拾うことで起きる。第 3 節参照）。
+
+基本的に落ちたメッセージの単純な再投入はせず、`wrangler tail` のエラー内容を元に原因を直して
+再度受信が来るのを待つ。DLQ が空になるまで原因を直せないときだけ、上の手順で積み直す。
+送信ジョブの失敗は `outbound_jobs` で管理しているので（次節）、再試行をその仕組みに委ねる。
 
 ---
 

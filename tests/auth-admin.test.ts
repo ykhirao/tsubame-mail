@@ -353,6 +353,37 @@ describe("POST /v1/admin/api-keys", () => {
 	});
 });
 
+describe("GET /v1/admin/api-keys/:id", () => {
+	it("単体取得は prefix・scopes・addressIds・lastUsedAt を返し、token や keyHash は含まない", async () => {
+		const cookie = await ownerCookie();
+		const domainId = await createDomain();
+		const addr = await createAddress(domainId, "detail");
+		const agent = await createUser({ role: "agent", email: "detail@example.test" });
+		await grant(agent.id, addr, "write");
+
+		const keyRes = await request(app, "/api/v1/admin/api-keys", {
+			...json({ userId: agent.id, name: "詳細", scopes: ["read", "send"], addressIds: [addr] }),
+			cookie,
+		});
+		const key = (await keyRes.json()) as { id: string; token: string };
+
+		const res = await request(app, `/api/v1/admin/api-keys/${key.id}`, { cookie });
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Record<string, unknown>;
+		expect(body.prefix).toBe(key.token.slice(0, 12));
+		expect(body.scopes).toEqual(["read", "send"]);
+		expect(body.addressIds).toEqual([addr]);
+		expect(body.lastUsedAt).toBeNull();
+		expect(body.token).toBeUndefined();
+		expect(JSON.stringify(body)).not.toContain("keyHash");
+	});
+
+	it("存在しないキーは 404", async () => {
+		const cookie = await ownerCookie();
+		expect((await request(app, "/api/v1/admin/api-keys/apiKey_nope", { cookie })).status).toBe(404);
+	});
+});
+
 describe("/v1/me/api-keys は自分のキーだけ", () => {
 	it("他人のキーは削除できない（404）", async () => {
 		await ownerCookie();

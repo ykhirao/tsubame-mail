@@ -1,7 +1,8 @@
 # 監査ログ
 
-管理 API（domains / addresses / rules / webhooks / api-keys / users）の変更操作と
-端末（push devices）の登録・削除は `audit_logs` テーブルに記録される。誰が・いつ・何に対して・IP 何から操作したかを
+管理 API（domains / addresses / rules / webhooks / users）の変更操作と
+端末（push devices）の登録・削除、利用者自身の API キー発行・失効、オーナー作成（bootstrap）は
+`audit_logs` テーブルに記録される。誰が・いつ・何に対して・IP 何から操作したかを
 後から追えるようにするためのもので、配信メッセージ本体の内容（本文など）は記録しない。
 
 ## 記録される項目
@@ -30,13 +31,33 @@
 | `address.delete` | アドレス削除 | `address`, `domainId`, `kind` |
 | `rule.create` | ルール作成 | `name`, `scope`, `domainId` / `addressId`, `action`, `target` |
 | `rule.update` | ルール更新 | `name`, `scope`, `action`, `target` |
-| `rule.delete` | ルール削除 | `name`, `scope` |
+| `rule.delete` | ルール削除 | `name` |
 | `webhook.create` | webhook 作成 | `name`, `url`, `events`, `addressIds`, `enabled`（secret は含まない） |
 | `webhook.update` | webhook 更新 | `name`, `url`（secret は含まない） |
 | `webhook.delete` | webhook 削除 | `name` |
 | `webhook.retry` | 手動再送 | `deliveryId`, `attempt` |
 | `device.register` | 端末の登録（再登録の上書きも含む） | `name`, `platform`（endpoint・キーは含まない） |
 | `device.delete` | 端末の削除 | `name` |
+| `user.create` | 利用者・エージェント作成 | `email`, `role` |
+| `user.update` | 利用者・エージェント変更 | `name`, `role`, `status`, `passwordChanged` |
+| `user.delete` | 利用者・エージェント削除 | `email`, `role` |
+| `user.grants.replace` | アドレス権限の一括差し替え | `grants` |
+| `api_key.create` | 利用者自身の API キー発行 | `name`, `scopes`, `addressIds`, `apiKeyId` |
+| `api_key.revoke` | 利用者自身の API キー失効 | `apiKeyId` |
+| `auth.bootstrap` | オーナー作成（初回セットアップ） | `email` |
+
+`target_type` は `user` / `api_key` も持ち、`user.*` と `auth.bootstrap` は `user`、`api_key.*` は `api_key` を指す。
+
+## API で読む
+
+owner のセッションか、`addressIds` を絞っていない admin スコープの API キーで
+`GET /v1/admin/audit-logs` を叩くと、新しい順に読める。クエリ: `targetType` / `targetId` /
+`actorId` / `action` / `limit`（既定 50）/ `cursor`。レスポンスは `{ data, next_cursor }`。
+
+```bash
+curl -s "$HOST/api/v1/admin/audit-logs?action=user.create&limit=20" \
+  -H "Authorization: Bearer tsb_..."
+```
 
 ## 見る
 

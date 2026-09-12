@@ -1,6 +1,7 @@
-import { and, asc, eq, inArray, lt, lte, sql } from "drizzle-orm";
+import { and, asc, eq, lt, lte, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
 import type { Db } from "@/db/client";
+import { jsonIdsIn } from "@/domain/access/policy";
 import { newId } from "@/lib/id";
 import { decide, decideSendFailure, filterDevices } from "@/domain/notify/decide";
 import type { Decision, NotificationPrefs } from "@/domain/notify/decide";
@@ -480,7 +481,7 @@ export async function handleScheduled(
 	}
 	const digestIds = due.filter((r) => !failed.has(r.userId)).map((r) => r.id);
 	if (digestIds.length > 0) {
-		await db.delete(schema.notificationDigests).where(inArray(schema.notificationDigests.id, digestIds));
+		await db.delete(schema.notificationDigests).where(jsonIdsIn(schema.notificationDigests.id, digestIds));
 	}
 
 	const DAY = 86400000;

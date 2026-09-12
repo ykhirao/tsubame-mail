@@ -64,6 +64,24 @@ const WebhooksPage = lazyWithRetry(() =>
 const RulesPage = lazyWithRetry(() =>
 	import("@/ui/routes/admin").then((m) => ({ default: m.RulesPage })),
 );
+const ApiKeyDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.ApiKeyDetailPage })),
+);
+const UserDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.UserDetailPage })),
+);
+const DomainDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.DomainDetailPage })),
+);
+const AddressDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.AddressDetailPage })),
+);
+const RuleDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.RuleDetailPage })),
+);
+const WebhookDetailPage = lazyWithRetry(() =>
+	import("@/ui/routes/admin").then((m) => ({ default: m.WebhookDetailPage })),
+);
 const NotificationWelcome = lazyWithRetry(() =>
 	import("@/ui/routes/welcome/notifications").then((m) => ({ default: m.NotificationWelcome })),
 );
@@ -159,6 +177,12 @@ function RoutesRoot() {
 						<Route path="/admin/api-keys" element={<Page><ApiKeysPage /></Page>} />
 						<Route path="/admin/webhooks" element={<Page><WebhooksPage /></Page>} />
 						<Route path="/admin/rules" element={<Page><RulesPage /></Page>} />
+						<Route path="/admin/api-keys/:id" element={<Page><ApiKeyDetailPage /></Page>} />
+						<Route path="/admin/users/:id" element={<Page><UserDetailPage /></Page>} />
+						<Route path="/admin/domains/:id" element={<Page><DomainDetailPage /></Page>} />
+						<Route path="/admin/addresses/:id" element={<Page><AddressDetailPage /></Page>} />
+						<Route path="/admin/rules/:id" element={<Page><RuleDetailPage /></Page>} />
+						<Route path="/admin/webhooks/:id" element={<Page><WebhookDetailPage /></Page>} />
 					</Route>
 				</Route>
 			</Route>

@@ -6,6 +6,7 @@ import { addresses, domains } from "@/db/schema";
 import { cleanupDomain, cleanupFailureNote } from "@/domain/domains/cleanup";
 import {
 	CATCH_ALL_WARNING,
+	enableSending,
 	zoneHasOtherCatchAll,
 	emailWorkerName,
 	previewDomain,
@@ -27,6 +28,7 @@ import {
 	createDomainInput,
 	deleteDomainQuery,
 	previewDomainInput,
+	sendingInput,
 } from "@/shared/contracts/domains";
 import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
 
@@ -318,6 +320,54 @@ app.post("/:id/catch-all", requireUnrestricted, async (c) => {
 	});
 
 	return c.json({ data: result, warning: CATCH_ALL_WARNING });
+});
+
+app.post("/:id/sending", requireUnrestricted, async (c) => {
+	const domain = await loadDomain(c, c.req.param("id"));
+	const input = await readJson(c.req, sendingInput);
+	const api = createCloudflareApi(c.env);
+	const db = c.get("db");
+
+	let result: {
+		domainId: string;
+		name: string;
+		sendingStatus: "disabled" | "pending" | "active" | "error";
+		sending: { spf: boolean; dkim: boolean; dmarc: boolean };
+		lastError: string | null;
+	};
+	if (input.enabled) {
+		result = await enableSending({
+			db,
+			api,
+			domain: {
+				id: domain.id,
+				name: domain.name,
+				zoneId: domain.zoneId,
+				zoneName: domain.zoneName,
+			},
+		});
+	} else {
+		// DNS は消さない（cleanup の方針どおり）。DB の状態だけ disabled に戻す。
+		await db.update(domains).set({ sendingStatus: "disabled", lastError: null }).where(eq(domains.id, domain.id));
+		result = {
+			domainId: domain.id,
+			name: domain.name,
+			sendingStatus: "disabled",
+			sending: { spf: false, dkim: false, dmarc: false },
+			lastError: null,
+		};
+	}
+
+	await recordAudit(db, {
+		actorId: getPrincipal(c).userId,
+		action: "domain.sending",
+		targetType: "domain",
+		targetId: domain.id,
+		meta: { name: domain.name, zoneId: domain.zoneId, enabled: input.enabled },
+		ip: clientIp(c),
+	});
+
+	return c.json({ data: result });
 });
 
 app.post("/:id/verify", requireUnrestricted, async (c) => {

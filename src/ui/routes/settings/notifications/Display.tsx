@@ -47,7 +47,10 @@ export function NotificationDisplaySettings() {
 	const display = DISPLAYS.find((d) => d.value === settings.display) ?? DISPLAYS[0]!;
 
 	return (
-		<Scaffold title="表示とまとめ方" summary={`${display.label} / 同じ会話は 1 件`}>
+		<Scaffold
+			title="表示とまとめ方"
+			summary={settings.group_by_thread ? `${display.label} / 同じ会話は 1 件` : display.label}
+		>
 			<BackLink to="/settings/notifications" label="通知設定へ戻る" />
 
 			<div className="card p-4">

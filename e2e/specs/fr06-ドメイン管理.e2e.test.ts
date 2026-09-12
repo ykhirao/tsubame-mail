@@ -94,4 +94,31 @@ describe("FR-6 ドメイン管理", () => {
 		expect(res.body.error.message).toContain("CF_API_TOKEN のスコープに");
 		expect(res.body.error.message).toContain("追加してください");
 	});
+
+	scenario("FR-6", "Email Sending を接続後にドメインごとに有効化できる", async () => {
+		const res = await owner.post("/api/v1/admin/domains", {
+			name: "mail.example.com",
+			enableSending: false,
+		});
+		expect(res.status).toBe(201);
+		expect(res.body.data.sendingStatus).toBe("disabled");
+
+		const list = await owner.get("/api/v1/admin/domains");
+		const domainId = list.body.data[0].id;
+
+		const enable = await owner.post(`/api/v1/admin/domains/${domainId}/sending`, {
+			enabled: true,
+		});
+		expect(enable.status).toBe(200);
+		expect(["pending", "active"]).toContain(enable.body.data.sendingStatus);
+
+		const detail = await owner.get(`/api/v1/admin/domains/${domainId}`);
+		expect(["pending", "active"]).toContain(detail.body.data.sendingStatus);
+
+		const disable = await owner.post(`/api/v1/admin/domains/${domainId}/sending`, {
+			enabled: false,
+		});
+		expect(disable.status).toBe(200);
+		expect(disable.body.data.sendingStatus).toBe("disabled");
+	});
 });

@@ -377,6 +377,34 @@ describe("dry-run と通知欄 feed", () => {
 		expect(res.status).toBe(200);
 	});
 
+	it("受信 60 通で dry-run は直近 50 件だけ返す", async () => {
+		const { owner, addressId } = await seedOwnerWithAddresses(1);
+		const d = db();
+		for (let i = 0; i < 60; i++) {
+			await d.insert(schema.messages).values({
+				id: `msg_${i}`,
+				addressId,
+				direction: "inbound",
+				status: "received",
+				fromAddr: "taro@example.com",
+				toAddr: "inbox@example.com",
+				subject: `件名 ${i}`,
+				textBody: "本文",
+				hasAttachments: false,
+				isRead: false,
+				receivedAt: new Date(1_700_000_000_000 + i * 1000),
+			});
+		}
+		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
+		const res = await app.request(
+			"/api/v1/me/notifications/dry-run",
+			{ method: "POST", headers: { "content-type": "application/json" }, body: "" },
+		);
+		expect(res.status).toBe(200);
+		const data = (await res.json()) as { data: unknown[] };
+		expect(data.data).toHaveLength(50);
+	});
+
 	it("端末の直列化は push 鍵（p256dh / auth）を含まない（#134）", () => {
 		const row = {
 			id: "dev_1",

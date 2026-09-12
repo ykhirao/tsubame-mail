@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link, useLocation } from "react-router";
 import type { AdminAddress, AddressViewer, DomainSummary } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
@@ -79,7 +80,12 @@ function AddressTable({
 									/>
 								</td>
 								<td className={tdCls}>
-									<span className="font-medium text-[var(--text)]">{a.address}</span>
+									<Link
+										to={`/admin/addresses/${a.id}`}
+										className="font-medium text-[var(--accent)] hover:underline"
+									>
+										{a.address}
+									</Link>
 									{a.isCatchAll && (
 										<span className="ml-2">
 											<Badge color="yellow">キャッチオール</Badge>
@@ -136,7 +142,12 @@ function AddressTable({
 									className="h-11 w-11 shrink-0 rounded-full border border-[var(--line)]"
 									style={{ background: a.color ?? defaultColorFor(i) }}
 								/>
-								<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{a.address}</span>
+								<Link
+									to={`/admin/addresses/${a.id}`}
+									className="min-w-0 flex-1 font-medium text-[var(--accent)] hover:underline"
+								>
+									{a.address}
+								</Link>
 								{a.isCatchAll && (
 									<Badge color="yellow">キャッチオール</Badge>
 								)}
@@ -180,7 +191,7 @@ function AddressTable({
 	);
 }
 
-function CreateAddressModal({
+export function CreateAddressModal({
 	domains,
 	existing,
 	onClose,
@@ -314,7 +325,7 @@ function CreateAddressModal({
 	);
 }
 
-function EditAddressModal({
+export function EditAddressModal({
 	address,
 	existing,
 	onClose,
@@ -498,10 +509,58 @@ function EditAddressModal({
 	);
 }
 
+export function DeleteAddressModal({
+	address,
+	onClose,
+	onDeleted,
+}: {
+	address: AdminAddress;
+	onClose: () => void;
+	onDeleted: (note: string | null) => void;
+}) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState("");
+
+	const remove = async () => {
+		setBusy(true);
+		setError("");
+		try {
+			const res = await api.del<{ note: string | null }>(
+				`/api/v1/admin/addresses/${address.id}`,
+			);
+			onDeleted(res.note);
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "アドレスの削除に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<Modal title="アドレスを削除" onClose={onClose}>
+			<div className="space-y-4">
+				<ErrorBanner message={error} onDismiss={() => setError("")} />
+				<Notice tone="info">
+					<strong>{address.address}</strong> を削除します。Cloudflare 側のルーティングルールも削除されます。
+				</Notice>
+				<div className="flex justify-end gap-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button variant="danger" onClick={remove} disabled={busy}>
+						削除する
+					</Button>
+				</div>
+			</div>
+		</Modal>
+	);
+}
+
 export function AddressesPage() {
+	const location = useLocation();
 	const [addresses, setAddresses] = useState<AdminAddress[]>([]);
 	const [domains, setDomains] = useState<DomainSummary[]>([]);
-	const [error, setError] = useState("");
+	const [error, setError] = useState<string>((location.state as { note?: string | null } | null)?.note ?? "");
 	const [showCreate, setShowCreate] = useState(false);
 	const [editTarget, setEditTarget] = useState<AdminAddress | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<AdminAddress | null>(null);
@@ -534,21 +593,6 @@ export function AddressesPage() {
 	useEffect(() => {
 		load();
 	}, [load]);
-
-	const confirmDelete = async () => {
-		if (!deleteTarget) return;
-		setError("");
-		try {
-			const res = await api.del<{ note: string | null }>(
-				`/api/v1/admin/addresses/${deleteTarget.id}`,
-			);
-			if (res.note) setError(res.note);
-			setDeleteTarget(null);
-			await load();
-		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "アドレスの削除に失敗しました");
-		}
-	};
 
 	return (
 		<AdminGate>
@@ -597,21 +641,15 @@ export function AddressesPage() {
 				)}
 
 				{deleteTarget && (
-					<Modal title="アドレスを削除" onClose={() => setDeleteTarget(null)}>
-						<div className="space-y-4">
-							<Notice tone="info">
-								<strong>{deleteTarget.address}</strong> を削除します。Cloudflare 側のルーティングルールも削除されます。
-							</Notice>
-							<div className="flex justify-end gap-2">
-								<Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-									キャンセル
-								</Button>
-								<Button variant="danger" onClick={confirmDelete}>
-									削除する
-								</Button>
-							</div>
-						</div>
-					</Modal>
+					<DeleteAddressModal
+						address={deleteTarget}
+						onClose={() => setDeleteTarget(null)}
+						onDeleted={(note) => {
+							setDeleteTarget(null);
+							if (note) setError(note);
+							load();
+						}}
+					/>
 				)}
 			</Page>
 		</AdminGate>

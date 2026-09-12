@@ -19,6 +19,7 @@ import webhookRoutes from "./v1/webhooks";
 import addressRoutes from "./v1/addresses";
 import adminDomainRoutes from "./v1/admin/domains";
 import adminAddressRoutes from "./v1/admin/addresses";
+import adminAuditLogRoutes from "./v1/admin/audit-logs";
 import notificationRoutes, { threadNotificationRouter } from "./v1/notifications";
 import deviceRoutes from "./v1/devices";
 import pushRoutes from "./v1/push";
@@ -158,6 +159,7 @@ export function createApp() {
 	app.route("/api/v1/addresses", addressRoutes);
 	app.route("/api/v1/admin/domains", adminDomainRoutes);
 	app.route("/api/v1/admin/addresses", adminAddressRoutes);
+	app.route("/api/v1/admin/audit-logs", adminAuditLogRoutes);
 
 	app.all("/api/*", (c) =>
 		c.json({ error: { code: "not_found", message: "エンドポイントがありません" } }, 404),

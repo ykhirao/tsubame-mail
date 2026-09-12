@@ -184,7 +184,7 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 
 **応答の揃え方**
 - [ ] 権限外の id が 403 ではなく 404 を返すか（存在の推測を防ぐ意図的な挙動）。
-      **返信経路だけ 403 を返していないか** → `messages.ts` / `attachments.ts`（404）と `outbound.ts` reply（`forbidden`）
+      返信経路も 404 に揃えてある（403 は「読めるが書けない」ときだけ） → `messages.ts` / `attachments.ts` / `outbound.ts` reply
 - [ ] 一覧で「権限外のアドレスを指定」したとき、空ではなくエラーになって存在を漏らしていないか → `sql.ts` `resolveMailboxId`
 
 **メンバーと owner の境界**
@@ -227,7 +227,7 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
       Unicode / punycode、`+タグ`）。正規化は 1 か所か → `address.ts` `normalizeAddress` / `baseAddressOf`
 - [ ] catch-all が実在アドレスを覆い隠さないか。既定で無効か → `resolve.ts`、`provision.ts` `setCatchAll`
 - [ ] エイリアスの連鎖（alias → alias）を作れないか → `admin/addresses.ts` POST / PATCH
-- [ ] アーカイブ済みアドレス宛の扱いを決めているか（今は普通に届く） → `resolve.ts`（`archivedAt` を見ない）
+- [ ] アーカイブ済みアドレス宛の扱いが崩れていないか（実在しないのと同じに扱い、catch-all があればそこへ落ちる。精査 #37 / #62） → `resolve.ts` `resolveIncoming`
 - [ ] ドメインルールの `deliver` / `forward` の `target` が、そのドメインの外や存在しない id を指せることを許容しているか
       → `admin/rules.ts`（検証無し）、`resolve.ts`
 
@@ -434,8 +434,8 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
       → `shared/errors.ts` `ApiError.toJSON`、`lib/validate.ts`（zod の issues をそのまま返す）
 
 **監査ログ**
-- [ ] owner の管理操作のうち**記録されていないもの**を列挙したか。今は users / grants / api-keys / bootstrap だけで、
-      webhooks・rules・domains（接続・切断・catch-all）・addresses は記録が無い
+- [ ] owner の管理操作のうち**記録されていないもの**を列挙したか。記録する action の一覧は `docs/ops/audit-log.md`。
+      新しい変更系のエンドポイントを足したら `recordAudit` と一覧の両方に足す
       → `grep -rn "recordAudit" src/api`
 - [ ] 記録の失敗で本処理を落とさないか → `policy.ts` `recordAudit`
 - [ ] 監査ログにシークレット・パスワード・仮パスワードを書いていないか → 各 `recordAudit` の `meta`
@@ -452,13 +452,14 @@ S-3 / S-5 の「意味」の検証とは別に、入口ごとの**上限**をこ
 
 | 入口 | 上限が要るもの | 今どこで決まるか |
 | --- | --- | --- |
-| 受信 | メール全体（`rawSize`）、添付 1 件、添付の個数、MIME のパート数・入れ子、`text_body` / `html_body` / `snippet` の長さ（D1 の 1 行上限） | 無し（精査 #5） |
-| 送信 API | リクエストボディ、宛先数、本文長、添付 1 件と合計（base64 でメモリに載る）、`inReplyTo` 等の長さ | `contracts/send.ts`（無し） |
-| 検索 API | `limit`、`q` の語数、`%` の数 | `paginationQuery`（`limit` のみ） |
-| 認証 API | KDF の回数、ログイン試行、bootstrap 試行 | `LOGIN_RATE_LIMIT`（login のみ） |
-| 管理 API | 一覧のページング、`localParts` の個数、ルール数 | `contracts/domains.ts`（`localParts` のみ） |
-| キュー | 再試行回数、DLQ の有無、1 メッセージの処理時間 | `wrangler.jsonc` `max_retries`（DLQ 無し） |
-| Webhook | 再送回数、タイムアウト、同時配信数 | `webhooks.ts` |
+| 受信 | メール全体（`rawSize`）、添付 1 件、添付の個数、`text_body` / `html_body` / 件名 / アドレス列の長さ（D1 の 1 行上限） | `incoming.ts` `MAX_RAW_BYTES`、`inbound.ts` `MAX_ATTACHMENTS` / `MAX_ATTACHMENT_BYTES` / `STORED_BYTES`。MIME のパート数・入れ子は postal-mime 任せ（例外は placeholder） |
+| 送信 API | リクエストボディ、宛先数、本文長、添付 1 件と合計、件名、送信回数 | `outbound.ts` `bodyLimit`、`contracts/send.ts` の `MAX_*`、`SEND_RATE_LIMIT`（精査 #106） |
+| 検索 API | `limit`、`q` の長さと語数 | `paginationQuery`、`query.ts` `MAX_QUERY_CHARS` / `MAX_FREE_WORDS` |
+| 認証 API | KDF の回数、ログイン試行、bootstrap 試行 | `LOGIN_RATE_LIMIT`（login と bootstrap） |
+| 管理 API | 一覧のページング、`localParts` の個数、ルール数、Webhook の `addressIds` | `paginationQuery`、`contracts/domains.ts`（`localParts` 50）、`contracts/webhooks.ts`（100）。ルール数・Webhook 数の上限は無い |
+| 通知 API | 端末数、通知ルール数 | `devices.ts` 10 台、`notifications.ts` 50 件（精査 #133） |
+| キュー | 再試行回数、DLQ の有無、1 メッセージの処理時間 | `wrangler.jsonc` `max_retries: 3` と `dead_letter_queue`。DLQ の中身を見る手順は無い |
+| Webhook | 再送回数、タイムアウト、同時配信数 | `webhooks.ts` `MAX_ATTEMPTS` / `TIMEOUT_MS`。同時配信数の上限は無い |
 
 - [ ] 上の表の空欄を埋めたか。空欄ごとに「無くてよい理由」か「上限値」のどちらかがあるか
 - [ ] キューのコンシューマが毒メッセージで再試行し続けないか。`max_retries` を超えたメッセージが

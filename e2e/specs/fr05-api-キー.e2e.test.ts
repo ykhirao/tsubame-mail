@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
 import {
+	createClient,
 	deliverEmail,
 	drainQueues,
 	freshHarness,
@@ -194,5 +195,34 @@ describe("FR-5 API キー", () => {
 		const me = await owner.get("/api/v1/me");
 		expect(me.status).toBe(200);
 		expect(me.body.apiKeyId).toBeTruthy();
+	});
+
+	scenario("FR-5", "失効したキーと同じ設定で再発行できる", async () => {
+		const body = {
+			userId: ownerId,
+			name: "再発行テスト",
+			scopes: ["read"],
+			addressIds: [ai] as string[] | null,
+		};
+
+		const first = await owner.post("/api/v1/admin/api-keys", body);
+		expect(first.status).toBe(201);
+
+		const oldClient = createClient(h);
+		oldClient.useKey(first.body.token as string);
+		expect((await oldClient.get("/api/v1/messages?limit=10")).status).toBe(200);
+
+		// キー自身には admin スコープが無いので、失効はセッションで行う。
+		owner.useKey(null);
+		const revoke = await owner.del(`/api/v1/admin/api-keys/${first.body.id}`);
+		expect(revoke.status).toBe(200);
+		expect((await oldClient.get("/api/v1/messages?limit=10")).status).toBe(401);
+
+		const second = await owner.post("/api/v1/admin/api-keys", body);
+		expect(second.status).toBe(201);
+
+		const newClient = createClient(h);
+		newClient.useKey(second.body.token as string);
+		expect((await newClient.get("/api/v1/messages?limit=10")).status).toBe(200);
 	});
 });

@@ -419,7 +419,7 @@ app.post("/dry-run", async (c) => {
 				),
 			)
 			.orderBy(desc(schema.messages.receivedAt), desc(schema.messages.id))
-			.limit(20),
+			.limit(50),
 	]);
 	const now = Date.now();
 	const data = [];
@@ -567,6 +567,7 @@ function toFeedEntry(row: { id: string; createdAt: Date; decision: string; reaso
 		fromAddr: "",
 		subject: null,
 		mailboxAddress: "",
+		isCatchAll: false,
 	};
 }
 
@@ -587,18 +588,19 @@ async function attachFeedDetails(db: Db, principal: Principal, entries: FeedEntr
 	const addressIds = [...new Set(msgs.map((m) => m.addressId))];
 	const addrs = addressIds.length
 		? await db
-				.select({ id: schema.addresses.id, address: schema.addresses.address })
+				.select({ id: schema.addresses.id, address: schema.addresses.address, isCatchAll: schema.addresses.isCatchAll })
 				.from(schema.addresses)
 				.where(jsonIdsIn(schema.addresses.id, addressIds))
 		: [];
 	const msgMap = new Map(msgs.map((m) => [m.id, m]));
-	const addrMap = new Map(addrs.map((a) => [a.id, a.address]));
+	const addrMap = new Map(addrs.map((a) => [a.id, a]));
 	for (const e of entries) {
 		const m = e.messageId ? msgMap.get(e.messageId) : undefined;
 		if (!m) continue;
 		e.fromAddr = m.fromAddr;
 		e.subject = m.subject;
-		e.mailboxAddress = addrMap.get(m.addressId) ?? "";
+		e.mailboxAddress = addrMap.get(m.addressId)?.address ?? "";
+		e.isCatchAll = addrMap.get(m.addressId)?.isCatchAll ?? false;
 	}
 }
 

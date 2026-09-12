@@ -114,7 +114,7 @@ export function NotificationsQuiet() {
 						: " は通知しない"
 				}`;
 
-	const valid = on && ranges.length > 0;
+	const valid = !on || ranges.length > 0;
 
 	return (
 		<SettingsPage title="おやすみ時間" summary={summary}>

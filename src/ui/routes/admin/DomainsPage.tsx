@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import type { AvailableZone, DnsCheckResult, DomainSummary } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
@@ -87,7 +88,12 @@ function DomainList({
 						{domains.map((d) => (
 							<TableRow key={d.id}>
 								<td className={tdCls}>
-									<div className="font-medium text-[var(--text)]">{d.name}</div>
+									<Link
+										to={`/admin/domains/${d.id}`}
+										className="font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+									>
+										{d.name}
+									</Link>
 									<div className="text-xs text-[var(--text-muted)]">{d.zoneName}</div>
 								</td>
 								<td className={tdCls}>
@@ -134,7 +140,12 @@ function DomainList({
 						<li key={d.id} className="border-b border-[var(--line-soft)] px-4 py-3">
 							<div className="flex items-center justify-between gap-2">
 								<div className="min-w-0">
-									<div className="font-medium text-[var(--text)]">{d.name}</div>
+									<Link
+										to={`/admin/domains/${d.id}`}
+										className="font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+									>
+										{d.name}
+									</Link>
 									<div className="text-xs text-[var(--text-muted)]">{d.zoneName}</div>
 								</div>
 								<Badge color={modeBadge(d.mode)}>
@@ -414,7 +425,7 @@ function MxTable({ mx }: { mx: { name: string; content: string; priority?: numbe
 	);
 }
 
-function CatchAllModal({
+export function CatchAllModal({
 	domain,
 	onClose,
 	onDone,
@@ -477,6 +488,63 @@ function CatchAllModal({
 	);
 }
 
+export function DeleteDomainModal({
+	domain,
+	onClose,
+	onDone,
+}: {
+	domain: DomainSummary;
+	onClose: () => void;
+	onDone: () => void;
+}) {
+	const [error, setError] = useState("");
+	const [note, setNote] = useState<string | null>(null);
+	const [busy, setBusy] = useState(false);
+
+	useEffect(() => {
+		setError("");
+		setNote(null);
+	}, [domain.id]);
+
+	const del = async () => {
+		setError("");
+		setBusy(true);
+		try {
+			const res = await api.del<{ note: string | null; data: { id: string; deleted: boolean } }>(
+				`/api/v1/admin/domains/${domain.id}`,
+			);
+			setNote(res.note);
+			if (res.note == null) onDone();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "ドメインの削除に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const close = note != null ? onDone : onClose;
+	return (
+		<Modal title="ドメインを削除" onClose={close}>
+			<ErrorBanner message={error} onDismiss={() => setError("")} />
+			<Notice tone="warn">
+				<strong>{domain.name}</strong>（{domain.zoneName}）を削除します。
+				Cloudflare 側の後始末（DNS・ルーティングルール）も実行されます。この操作は取り消せません。
+			</Notice>
+			{note && <Notice tone="warn">{note}</Notice>}
+			<div className="flex justify-end gap-2 pt-3">
+				<Button variant="secondary" onClick={close}>
+					{note != null ? "閉じる" : "キャンセル"}
+				</Button>
+				{note == null && (
+					<Button variant="danger" onClick={del} disabled={busy}>
+						{busy ? "削除中…" : "削除する"}
+					</Button>
+				)}
+			</div>
+		</Modal>
+	);
+}
+
 export function DomainsPage() {
 	const [domains, setDomains] = useState<DomainSummary[]>([]);
 	const [error, setError] = useState("");
@@ -496,21 +564,6 @@ export function DomainsPage() {
 	useEffect(() => {
 		load();
 	}, [load]);
-
-	const confirmDelete = async () => {
-		if (!deleteTarget) return;
-		setError("");
-		try {
-			const res = await api.del<{ note: string | null; data: { id: string; deleted: boolean } }>(
-				`/api/v1/admin/domains/${deleteTarget.id}`,
-			);
-			if (res.note) setError(res.note);
-			setDeleteTarget(null);
-			await load();
-		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "ドメインの削除に失敗しました");
-		}
-	};
 
 	const verify = async (d: DomainSummary) => {
 		setError("");
@@ -555,22 +608,14 @@ export function DomainsPage() {
 				)}
 
 				{deleteTarget && (
-					<Modal title="ドメインを削除" onClose={() => setDeleteTarget(null)}>
-						<div className="space-y-4">
-							<Notice tone="warn">
-								<strong>{deleteTarget.name}</strong>（{deleteTarget.zoneName}）を削除します。
-								Cloudflare 側の後始末（DNS・ルーティングルール）も実行されます。この操作は取り消せません。
-							</Notice>
-							<div className="flex justify-end gap-2">
-								<Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-									キャンセル
-								</Button>
-								<Button variant="danger" onClick={confirmDelete}>
-									削除する
-								</Button>
-							</div>
-						</div>
-					</Modal>
+					<DeleteDomainModal
+						domain={deleteTarget}
+						onClose={() => setDeleteTarget(null)}
+						onDone={() => {
+							setDeleteTarget(null);
+							load();
+						}}
+					/>
 				)}
 			</Page>
 		</AdminGate>

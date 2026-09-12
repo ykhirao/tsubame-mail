@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import type { AdminAddress, DomainSummary, Rule, RuleAction, RuleScope } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
@@ -23,7 +24,7 @@ import {
 	thCls,
 } from "./components";
 
-const actionLabels: Record<RuleAction, string> = {
+export const actionLabels: Record<RuleAction, string> = {
 	deliver: "配信する（deliver）",
 	forward: "転送する（forward）",
 	reject: "拒否する（reject）",
@@ -66,8 +67,7 @@ function RuleTargetLabel({
 	return <span className="font-medium text-[var(--text)]">{addresses.find((a) => a.id === rule.addressId)?.address ?? rule.addressId}</span>;
 }
 
-// 作成と編集で項目が完全に同じなので 1 つにしてある。rule があれば編集。
-function RuleModal({
+export function RuleModal({
 	scope,
 	domains,
 	addresses,
@@ -312,8 +312,13 @@ function RuleTable({
 								<td className={tdCls}>
 									<RuleTargetLabel rule={r} domains={domains} addresses={addresses} />
 								</td>
-								<td className={tdCls}>
-									<span className="font-medium text-[var(--text)]">{r.name}</span>
+							<td className={tdCls}>
+								<Link
+									to={`/admin/rules/${r.id}`}
+									className="font-medium text-[var(--accent)] hover:underline"
+								>
+									{r.name}
+								</Link>
 									{r.target && <div className="text-xs text-[var(--text-muted)]">→ {r.target}</div>}
 								</td>
 								<td className={tdCls}>
@@ -345,7 +350,12 @@ function RuleTable({
 					{rules.map((r) => (
 						<li key={r.id} className="border-b border-[var(--line-soft)] px-4 py-3">
 							<div className="flex items-center justify-between gap-2">
-								<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{r.name}</span>
+								<Link
+									to={`/admin/rules/${r.id}`}
+									className="min-w-0 flex-1 font-medium text-[var(--accent)] hover:underline"
+								>
+									{r.name}
+								</Link>
 								<Badge color={actionColor(r.action)}>{r.action}</Badge>
 							</div>
 							{r.target && <div className="mt-0.5 text-xs text-[var(--text-muted)]">→ {r.target}</div>}
@@ -378,7 +388,7 @@ function RuleTable({
 	);
 }
 
-function actionColor(action: RuleAction): "green" | "purple" | "red" | "gray" | "blue" {
+export function actionColor(action: RuleAction): "green" | "purple" | "red" | "gray" | "blue" {
 	switch (action) {
 		case "deliver":
 			return "green";
@@ -423,7 +433,7 @@ function AddButton({
 	);
 }
 
-function MatcherText({ matcher }: { matcher: Rule["matcher"] }) {
+export function MatcherText({ matcher }: { matcher: Rule["matcher"] }) {
 	const parts: string[] = [];
 	if (matcher.from) parts.push(`from: ${matcher.from}`);
 	if (matcher.to) parts.push(`to: ${matcher.to}`);
@@ -431,6 +441,49 @@ function MatcherText({ matcher }: { matcher: Rule["matcher"] }) {
 	if (matcher.contains) parts.push(`本文: ${matcher.contains}`);
 	if (parts.length === 0) return <span className="text-[var(--text-muted)]">全件一致</span>;
 	return <span className="break-all text-xs">{parts.join(" / ")}</span>;
+}
+
+export function DeleteRuleModal({
+	rule,
+	onClose,
+	onDeleted,
+}: {
+	rule: Rule;
+	onClose: () => void;
+	onDeleted: () => void;
+}) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState("");
+
+	const remove = async () => {
+		setBusy(true);
+		setError("");
+		try {
+			await api.del(`/api/v1/admin/rules/${rule.id}`);
+			onDeleted();
+		} catch (e) {
+			setError(e instanceof ApiClientError ? e.message : "削除に失敗しました");
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<Modal title="ルールを削除" onClose={onClose}>
+			<div className="space-y-4">
+				<ErrorBanner message={error} onDismiss={() => setError("")} />
+				<Notice tone="info">{rule.name} を削除します。</Notice>
+				<div className="flex justify-end gap-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button variant="danger" onClick={remove} disabled={busy}>
+						削除する
+					</Button>
+				</div>
+			</div>
+		</Modal>
+	);
 }
 
 export function RulesPage() {
@@ -463,18 +516,6 @@ export function RulesPage() {
 
 	const domainRules = rules.filter((r) => r.scope === "domain");
 	const addressRules = rules.filter((r) => r.scope === "address");
-
-	const confirmDelete = async () => {
-		if (!deleteTarget) return;
-		setError("");
-		try {
-			await api.del(`/api/v1/admin/rules/${deleteTarget.id}`);
-			setDeleteTarget(null);
-			await load();
-		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "削除に失敗しました");
-		}
-	};
 
 	return (
 		<AdminGate>
@@ -531,19 +572,14 @@ export function RulesPage() {
 				)}
 
 				{deleteTarget && (
-					<Modal title="ルールを削除" onClose={() => setDeleteTarget(null)}>
-						<div className="space-y-4">
-							<Notice tone="info">{deleteTarget.name} を削除します。</Notice>
-							<div className="flex justify-end gap-2">
-								<Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-									キャンセル
-								</Button>
-								<Button variant="danger" onClick={confirmDelete}>
-									削除する
-								</Button>
-							</div>
-						</div>
-					</Modal>
+					<DeleteRuleModal
+						rule={deleteTarget}
+						onClose={() => setDeleteTarget(null)}
+						onDeleted={() => {
+							setDeleteTarget(null);
+							load();
+						}}
+					/>
 				)}
 			</Page>
 		</AdminGate>

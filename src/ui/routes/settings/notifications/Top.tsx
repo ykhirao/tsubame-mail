@@ -107,8 +107,10 @@ export function NotificationSettingsTop() {
 						: "このブラウザでは対応していません";
 
 	const allActive = settings.mailboxes.every((m) => !m.assigned || m.level === "all");
-	const importantActive = settings.mailboxes.every((m) => !m.assigned || m.level === "direct");
-	const presetActive = allActive ? "all" : importantActive ? "important" : "custom";
+	const importantMailboxes = settings.mailboxes.every((m) => !m.assigned || m.level === "direct");
+	// 「重要なものだけ」は返信を必ず通知するルールも立てるので、プリセット判定は両方を見る。
+	const replyRuleActive = settings.rules.some((r) => r.action === "always" && r.matcher.replyToOwn === true);
+	const presetActive = allActive ? "all" : importantMailboxes && replyRuleActive ? "important" : "custom";
 
 	const now = Date.now() / 1000;
 	const pausedAt = settings.paused_until && settings.paused_until > now ? settings.paused_until : null;
@@ -149,7 +151,7 @@ export function NotificationSettingsTop() {
 					title="通知"
 					trailing={<Toggle checked={settings.enabled} disabled={busySwitch} onChange={setEnabled} />}
 				/>
-				<div className="px-4 py-3">
+				<div className={`px-4 py-3 ${!settings.enabled ? "pointer-events-none opacity-50" : ""}`}>
 					{pausedAt ? (
 						<div className="flex items-center justify-between gap-3">
 							<div className="text-sm text-[var(--text)]">{pausedTime} まで停止中</div>
@@ -174,8 +176,7 @@ export function NotificationSettingsTop() {
 						<div className="mt-2 flex flex-wrap gap-2">
 							{[
 								{ label: "1 時間", until: Math.floor(now) + 3600 },
-								{ label: "今日の終わりまで", until: Math.floor(new Date().setHours(24, 0, 0, 0) / 1000) },
-								{ label: "明日の朝まで", until: Math.floor(new Date().setHours(24, 0, 0, 0) / 1000) + 7 * 3600 },
+								{ label: "明日の朝 7:00 まで", until: Math.floor(new Date().setHours(24, 0, 0, 0) / 1000) + 7 * 3600 },
 							].map((o) => (
 								<button
 									key={o.label}

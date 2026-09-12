@@ -43,7 +43,8 @@ src/
     middleware/           [W1] 認証・エラー・ロギング
     v1/
       auth.ts            [W4] ログイン/ログアウト/セッション/オーナー作成（bootstrap）
-      messages.ts        [W6 が GET, W3 が POST/PATCH]
+      messages.ts        [W6（GET / PATCH）]
+      outbound.ts        [W3]
       threads.ts         [W6]
       addresses.ts       [W5]
       attachments.ts     [W2]
@@ -51,13 +52,15 @@ src/
       me.ts              [W4]
       notifications.ts   [W11] 通知設定・ルール・通知欄・会話の通知
       devices.ts         [W11] 購読端末
-      push.ts            [W11] VAPID 公開鍵
+      push.ts            [W11] VAPID 公開鍵・バッジ
       admin/
         users.ts         [W4]
         api-keys.ts      [W4]
         domains.ts       [W5]
         addresses.ts     [W5]
         rules.ts         [W2]
+      admin/
+        audit-logs.ts     [W4]
   domain/                副作用を持たない、または最小限に閉じたロジック
     mail/
       address.ts         [W1] アドレス文字列のパース/整形（共有ユーティリティ）
@@ -90,6 +93,7 @@ src/
     webpush.ts           [W11] VAPID・RFC 8291 暗号化・送信
     notify.ts            [W11] 通知キューのコンシューマ・cron
     notify/              [W11] deliver(配信)/load(読み込み)/prefs(設定・未読数)/render(描画)/token-cache
+    maintenance.ts       [W11] cron のまとめ配信・掃除（監査ログ・通知ログ・未使用端末）
     cloudflare-api.ts    [W5]
     sender.ts            [W3] EMAIL バインディング
     webhooks.ts          [W9]
@@ -103,12 +107,13 @@ src/
       *.ts               zod スキーマ。サーバと UI で共有する唯一の真実
       notifications.ts   [W11]
     errors.ts            [W1]
+    colors.ts            [W1] アドレス色の採番（FR-14）
   ui/                    Vite + React
     main.tsx             [W7]
     sw.ts                [W7] Service Worker（キャッシュ・push 表示）
     lib/                 [W7] API クライアント（contracts から型を取る）
     routes/*.tsx         [W7] メールの画面（受信箱・会話・作成・検索・設定）。サブディレクトリは切っていない
-    routes/admin/        [W8]
+    routes/admin/        [W8] index / gate / detail / 各 *Page / 各 *DetailPage / api / ColorPicker
     routes/settings/notifications/  [W7]
     routes/welcome/notifications.tsx [W7]
     routes/NotificationsFeed.tsx     [W7] 通知欄
@@ -128,27 +133,28 @@ docs/                    [W10]
 
 | テーブル | 目的 | 要点 |
 | --- | --- | --- |
-| `users` | 人と AI のアカウント | `role: owner \| member \| agent`, `password_hash`(agent は null 可), `status` |
-| `sessions` | UI セッション | Cookie `__Host-tsb_session`（精査 #84）。ハッシュ保存、期限あり |
-| `api_keys` | API トークン | `key_hash`, `prefix`, `scopes[]`, `address_ids[] \| null`, `expires_at`, `revoked_at` |
-| `domains` | 接続済みゾーン | `zone_id`, `zone_name`, `name`, `mode: apex \| subdomain`, `routing_status`, `sending_status` |
-| `addresses` | 受信アドレス | `domain_id`, `local_part`, `address`(一意), `kind: mailbox \| alias`, `alias_target_id`, `is_catch_all` |
+| `users` | 人と AI のアカウント | `role: owner \| member \| agent`, `status`, `password_hash`(agent は null 可), `must_change_password`, `last_login_at` |
+| `sessions` | UI セッション | Cookie `__Host-tsb_session`（精査 #84）。`token_hash` ハッシュ保存、`expires_at`、`user_agent`、`ip` |
+| `api_keys` | API トークン | `user_id`, `name`, `prefix`, `key_hash`, `scopes[]`, `address_ids[] \| null`, `expires_at`, `revoked_at`, `last_used_at` |
+| `domains` | 接続済みゾーン | `zone_id`(一意), `name`, `zone_name`, `mode: apex \| subdomain`, `routing_status`, `sending_status`, `catch_all_enabled`, `last_error` |
+| `addresses` | 受信アドレス | `domain_id`, `local_part`, `address`(一意), `display_name`, `kind: mailbox \| alias`, `alias_target_id`, `is_catch_all`, `signature`, `color`, `archived_at` |
 | `address_grants` | 権限 | `(user_id, address_id)` 主キー, `level: read \| write` |
 | `threads` | 会話 | `address_id`, `subject`, `last_message_at`, `message_count`, `unread_count` |
 | `messages` | メッセージ | 下記参照 |
-| `attachments` | 添付 | `message_id`, `filename`, `content_type`, `size`, `content_id`, `is_inline`, `r2_key` |
-| `routing_rules` | ルール | `scope: domain \| address`, `action`, `matcher`(JSON), `target`, `priority`, `enabled` |
-| `outbound_jobs` | 送信ジョブ | `message_id`, `status`, `attempts`, `last_error`, `next_attempt_at` |
-| `webhooks` | 通知先 | `url`, `secret`, `events[]`, `address_ids[]`, `enabled` |
-| `webhook_deliveries` | 配信履歴 | `status`, `http_status`, `error`, `duration_ms`, `attempt`, `next_retry_at` |
-| `audit_logs` | 監査 | owner の管理操作のみ記録。`actor_id`, `action`, `target_type`, `target_id`, `meta`, `ip` |
+| `attachments` | 添付 | `message_id`, `filename`, `content_type`, `size_bytes`, `content_id`, `is_inline`, `r2_key` |
+| `routing_rules` | ルール | `scope: domain \| address`, `domain_id` / `address_id`, `name`, `action`, `matcher`(JSON), `target`, `priority`, `enabled` |
+| `outbound_jobs` | 送信ジョブ | `message_id`, `status`, `attempts`, `last_error`, `next_attempt_at`, `sent_recipients`, `sent_at` |
+| `webhooks` | 通知先 | `name`, `url`, `secret`(ハッシュ保存), `events[]`, `address_ids[]`, `enabled` |
+| `webhook_deliveries` | 配信履歴 | `webhook_id`, `event`, `message_id`, `status`, `http_status`, `error`, `duration_ms`, `attempt`, `next_retry_at` |
+| `audit_logs` | 監査 | 管理操作と端末・利用者自身のキー・bootstrap を記録。`actor_id`, `action`, `target_type`, `target_id`, `meta`, `ip` |
+| `settings` | キー・バリュー（VAPID キャッシュ等） | `key`, `value`(JSON), `updated_at` |
 | `push_devices` | 購読端末 | `user_id`, `session_id`, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`, `last_seen_at`, `last_success_at`, `failure_count` |
 | `notification_prefs` | 利用者の通知設定（1 行） | `enabled`, `paused_until`, `display`, `badge`, `group_by_thread`, `burst_window_sec`, `suppress_when_active`, `spam_suspicious`, `quiet`(JSON), `notify_send_failure`, `notify_catch_all`, `feed_seen_at` |
 | `notification_mailbox_prefs` | メールボックスごとの通知レベル | `(user_id, address_id)` 主キー, `level: all \| new_thread \| direct \| off` |
 | `notification_rules` | 通知ルール | `name`, `matcher`(JSON), `action: always \| normal \| silent \| never`, `priority`, `enabled` |
 | `thread_notification_prefs` | 会話ごと | `(user_id, thread_id)` 主キー, `mode: follow \| mute` |
 | `notification_digests` | 後でまとめる分 | `user_id`, `due_at`, `message_ids[]` |
-| `notification_log` | 判定の履歴（通知欄） | `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`, `device_count`。30 日で消す |
+| `notification_log` | 判定の履歴（通知欄） | `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`, `device_count`, `retry_device_ids`。30 日で消す |
 
 ### `messages`
 
@@ -200,6 +206,7 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 
 `code` は `unauthorized` / `forbidden` / `not_found` / `invalid_request` /
 `conflict` / `rate_limited` / `internal`。
+`details` は検証エラー（`invalid_request`）のときだけ持ち、`not_found` / `internal` では空。
 
 ページングはカーソル方式。レスポンスは `{ "data": [...], "next_cursor": "…" | null }`。
 
@@ -218,10 +225,17 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 | POST | `/v1/messages/{id}/reply` | read かつ send（読めない相手には返信もできないよう、両方を要求する） | W3 |
 | GET | `/v1/threads` `/v1/threads/{id}` | read | W6 |
 | GET | `/v1/attachments/{id}` | read | W2 |
-| GET/POST/PATCH/DELETE | `/v1/webhooks`（+ `/:id/deliveries`、手動再送 `/deliveries/:id/retry`） | admin | W9 |
-| CRUD | `/v1/admin/users`（+ `/:id/grants`） `/v1/admin/api-keys` | admin | W4 |
-| CRUD | `/v1/admin/domains`（+ `/available` `/preview` `/:id/verify` `/:id/catch-all`） `/v1/admin/addresses` | admin | W5 |
-| CRUD | `/v1/admin/rules` | admin | W2 |
+| GET | `/v1/webhooks`（+ `/:id/deliveries`、手動再送 `/deliveries/:id/retry`） | admin | W9 |
+| GET / POST | `/v1/admin/users`（一覧 / 作成） | 一覧は任意。変更系は**セッション限定** | W4 |
+| GET / PATCH / DELETE | `/v1/admin/users/{id}`（+ PUT `/{id}/grants`） | 変更系は**セッション限定** | W4 |
+| GET / POST / DELETE | `/v1/admin/api-keys`（+ `?userId=` 絞り込み / `/{id}`） | admin | W4 |
+| GET | `/v1/admin/domains`（一覧） `/v1/admin/domains/available` `/v1/admin/domains/{id}` | admin | W5 |
+| POST | `/v1/admin/domains` `/v1/admin/domains/preview` `/v1/admin/domains/{id}/verify` `/v1/admin/domains/{id}/catch-all` `/v1/admin/domains/{id}/sending` | admin | W5 |
+| DELETE | `/v1/admin/domains/{id}` | admin | W5 |
+| GET / POST | `/v1/admin/addresses` `/v1/admin/addresses/{id}` `/v1/admin/addresses/{id}/viewers` | admin | W5 |
+| PATCH / DELETE | `/v1/admin/addresses/{id}` | admin | W5 |
+| GET | `/v1/admin/audit-logs`（`targetType` `targetId` `actorId` `action` `limit` `cursor`） | owner のセッションか addressIds を絞っていない admin スコープ | W4 |
+| GET / POST / PATCH / DELETE | `/v1/admin/rules`（+ `/{id}`） | admin | W2 |
 | GET | `/v1/openapi.json` | — | W9（未実装。呼ぶと 404） |
 
 #### 通知・端末（W11）— すべて**セッション限定**（API キーで叩くと 403）・agent 対象外・自分の分のみ
@@ -234,13 +248,14 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 | PATCH / DELETE | `/v1/me/notifications/rules/{id}` | 更新 / 削除 |
 | POST | `/v1/me/notifications/rules/reorder` | 並べ替え |
 | POST | `/v1/me/notifications/dry-run` | 最近のメールに今の設定を当てて判定し返す |
-| GET | `/v1/me/notifications/feed` | 通知欄（カーソルページング。`include_dropped` で対象外も理由つき） |
+| GET | `/v1/me/notifications/feed` | 通知欄（カーソルページング。一時停止の束 `hold_group` と、`include_dropped` で対象外も理由つき） |
 | POST | `/v1/me/notifications/feed/seen` | 通知欄を開いた（未確認数の 0 化） |
 | GET / PUT / DELETE | `/v1/threads/{id}/notification` | 会話のフォロー / ミュート解除（`threadNotificationRouter` を `/v1/threads` に載せている） |
 | GET / POST | `/v1/me/devices` | 自分の端末一覧 / 購読の登録（同じ `endpoint` は上書き） |
 | PATCH / DELETE | `/v1/me/devices/{id}` | 名前・有効・受け取るメールボックス / 削除 |
 | POST | `/v1/me/devices/{id}/test` `/v1/me/devices/{id}/seen` | テスト通知 / 使用中の合図 |
 | GET | `/v1/push/key` | VAPID 公開鍵（未設定・解釈不可なら `null`） |
+| GET | `/v1/push/badge` | 未読件数バッジ（`me/notifications` の `badge` 設定で見る数） |
 
 端末登録の `endpoint` はブラウザのプッシュサービス（FCM / Mozilla / Apple / Windows）に限定する
 （`src/shared/contracts/notifications.ts` の `isPushServiceEndpoint`）。任意の URL を受けると踏み台になるため。
@@ -251,8 +266,9 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 `direction`, `status`, `unread`, `starred`, `has_attachment`, `thread`,
 `order`(`received_at`/`relevance`), `limit`(既定 25 / 最大 100), `cursor`。
 
-`q` は簡易演算子を解釈する: `from:foo@bar subject:"見積" since:2026-01-01 添付`。
-パースは `src/domain/search/query.ts` に閉じる。
+`q` は簡易演算子を解釈する: `from:foo@bar subject:"見積" since:2026-01-01 has:attachment`。
+演算子は `from:` `to:` `subject:` `body:` `since:` `until:` `is:unread|starred` `has:attachment` `in:<アドレス>`。
+それ以外の語は全文検索の語になる（最大 500 文字・10 語）。パースは `src/domain/search/query.ts` に閉じる。
 
 ### API を実際に叩くときの注意
 
@@ -413,7 +429,9 @@ type Principal = {
   `sent / held / digest / dropped / excluded` を決め、`notification_log` に理由つきで記録。
   詳細な判定表は `pwa-notifications.md` の「4. 通知の判定」。
 - `sent` は `filterDevices` で端末単位に間引いてから `deliverToDevices` で送る。
-- `held` / `digest` は `notification_digests` に積む。
+- `held` は送らず `notification_log` にだけ記録してそこで止める（積まない）。
+- `digest` は `notification_digests` に積み、`notification_log` にも記録する。
+- `excluded` は対象外。何も書かずに終わる。
 
 **VAPID と暗号化（RFC 8291）は自前実装**（`services/webpush.ts`）。
 `web-push` パッケージは MPL-2.0 のため使わない。VAPID JWT は Apple の制約（1 時間に 1 回）を

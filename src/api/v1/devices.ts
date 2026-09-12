@@ -126,6 +126,7 @@ app.patch("/:id", async (c) => {
 	const set: Record<string, unknown> = {};
 	if (body.name !== undefined) set.name = body.name;
 	if (body.enabled !== undefined) set.enabled = body.enabled;
+	if (body.enabled === true) set.failureCount = 0;
 	if (body.addressIds !== undefined) {
 		if (body.addressIds === null) {
 			set.addressIds = null;

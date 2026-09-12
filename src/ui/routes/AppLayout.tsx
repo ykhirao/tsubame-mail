@@ -1,4 +1,4 @@
-import { Link, Outlet, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, Outlet, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
 import { AddressesApi, NotificationsApi } from "@/ui/lib/api";
@@ -244,6 +244,7 @@ export function MailShell() {
 export function AppLayout() {
 	const { me, logout } = useAuth();
 	const navigate = useNavigate();
+	const location = useLocation();
 	const [params, setParams] = useSearchParams();
 	const [loggingOut, setLoggingOut] = useState(false);
 	const [q, setQ] = useState("");
@@ -263,6 +264,7 @@ export function AppLayout() {
 	const [unseenCount, setUnseenCount] = useState(0);
 	const accountRef = useRef<HTMLDivElement>(null);
 
+	const onFeed = location.pathname === "/notifications";
 	useEffect(() => {
 		let alive = true;
 		NotificationsApi.get()
@@ -271,7 +273,7 @@ export function AppLayout() {
 		return () => {
 			alive = false;
 		};
-	}, []);
+	}, [onFeed]);
 
 	// 仮パスワードのままなら、他の画面を見せずに変更へ寄せる。
 	useEffect(() => {

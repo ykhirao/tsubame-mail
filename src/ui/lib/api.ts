@@ -219,7 +219,12 @@ export const MyKeysApi = {
 	list: (query: { limit?: number; cursor?: string } = {}) =>
 		request<{ data: MyApiKey[]; next_cursor: string | null }>(`/me/api-keys${qs(query)}`),
 	/** 発行の応答にだけ平文が入る。 */
-	create: (body: { name: string; scopes: string[]; addressIds?: string[] }) =>
+	create: (body: {
+		name: string;
+		scopes: string[];
+		addressIds?: string[];
+		expiresAt?: number;
+	}) =>
 		request<MyApiKey & { token: string }>("/me/api-keys", { method: "POST", body }),
 	revoke: (id: string) => request<unknown>(`/me/api-keys/${id}`, { method: "DELETE" }),
 };

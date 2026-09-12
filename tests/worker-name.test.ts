@@ -59,7 +59,11 @@ function stripJsonc(text: string): string {
 	return out;
 }
 
-function parseWranglerJsonc(text: string): { name: string; vars: Record<string, unknown> } {
+function parseWranglerJsonc(text: string): {
+	name: string;
+	vars: Record<string, unknown>;
+	env?: Record<string, { name?: string; vars?: Record<string, unknown> }>;
+} {
 	return JSON.parse(stripJsonc(text));
 }
 
@@ -81,6 +85,15 @@ describe("wrangler.jsonc の Worker 名", () => {
 		const config = parseWranglerJsonc(wranglerJsonc);
 		expect(config.name).toBeTruthy();
 		expect(config.vars.EMAIL_WORKER_NAME).toBe(config.name);
+	});
+
+	it("env.* がある場合は各 env の EMAIL_WORKER_NAME がその env の Worker 名と一致する", () => {
+		const config = parseWranglerJsonc(wranglerJsonc);
+		for (const [key, environment] of Object.entries(config.env ?? {})) {
+			// wrangler は env の name を省くと `<name>-<env>` で別の Worker を作り、vars は継承しない。
+			const workerName = environment.name ?? `${config.name}-${key}`;
+			expect(environment.vars?.EMAIL_WORKER_NAME).toBe(workerName);
+		}
 	});
 
 	it("ずれていれば検出できる（このテスト自体の健全性確認）", () => {

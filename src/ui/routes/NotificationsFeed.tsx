@@ -1,24 +1,24 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import type { FeedEntry, FeedItem, NotificationSettings } from "@/shared/contracts/notifications";
 import { NotificationsApi, MessagesApi } from "@/ui/lib/api";
 import { formatDate } from "@/ui/lib/format";
 import { SwitchRow } from "@/ui/routes/settings/notifications/ruleShared";
+import { CatchAllBadge } from "@/ui/components/mobile/CatchAllBadge";
 
 const reasonLabelMap: Record<string, string> = {
-	user_ineligible: "対象外のアカウントでした",
-	not_assigned: "このメールボックスに割り当てられていません",
-	privilege_only: "オーナーにしか見えないため通知しません",
-	disabled: "通知がオフになっています",
+	user_ineligible: "この利用者の受信対象ではありません",
+	not_assigned: "割り当ての無いメールボックスです",
+	privilege_only: "割り当ての無いメールボックスです",
+	disabled: "設定がオフのため通知しませんでした",
 	paused: "一時停止中でした",
 	rule_trashed: "ルーティングルールで破棄されました",
 	rule_read: "ルーティングルールで既読にされました",
-	spam: "スパム判定のため通知しません",
+	spam: "スパム判定のため通知しませんでした",
 	thread_muted: "この会話は通知しない設定です",
 	thread_followed: "フォロー中の会話です",
 	catch_all_off: "キャッチオールを通知しない設定です",
 	quiet_drop: "おやすみ時間のため通知しませんでした",
-	quiet_digest: "おやすみ時間のため、終わったときにまとめて通知しました",
 	coalesced: "続けて届いたため 1 件にまとめました",
 	send_failure: "送信に失敗しました",
 };
@@ -33,6 +33,14 @@ function reasonLabel(entry: FeedEntry, rules: NotificationSettings["rules"] | []
 		return entry.mailboxAddress
 			? `${entry.mailboxAddress} のメールボックス設定に従いました`
 			: "メールボックスの通知設定に従いました";
+	}
+	if (entry.reason === "quiet_digest") {
+		const at = entry.holdGroup
+			? new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(
+					new Date(Number(entry.holdGroup)),
+				)
+			: null;
+		return at ? `おやすみ時間のため ${at} にまとめて通知しました` : "おやすみ時間のためまとめて通知しました";
 	}
 	return reasonLabelMap[entry.reason] ?? entry.reason;
 }
@@ -62,10 +70,8 @@ const decisionLabel: Record<FeedEntry["decision"], string> = {
 };
 
 function bundleTitle(reason: string): string {
-	if (reason === "paused") return "一時停止中に届きました";
-	if (reason === "quiet_drop" || reason === "quiet_digest") {
-		return reason === "quiet_digest" ? "おやすみ中（まとめて通知）" : "おやすみ中";
-	}
+	if (reason === "paused") return "一時停止中に届いた";
+	if (reason === "quiet_drop" || reason === "quiet_digest") return "おやすみ中に届いた";
 	return "保留";
 }
 
@@ -93,9 +99,12 @@ function EntryRow({
 			>
 				<div className="min-w-0 flex-1">
 					{entry.subject && <p className="truncate text-sm text-[var(--text)]">{entry.subject}</p>}
-					<p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">
-						{entry.mailboxAddress || "—"} ・ {formatDate(entry.createdAt)} ・ {decisionLabel[entry.decision]}
-					</p>
+					<span className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+						<span className="truncate">
+							{entry.mailboxAddress || "—"} ・ {formatDate(entry.createdAt)} ・ {decisionLabel[entry.decision]}
+						</span>
+						{entry.isCatchAll && <CatchAllBadge />}
+					</span>
 				</div>
 			</button>
 			<div className="mt-1">
@@ -131,7 +140,9 @@ export function NotificationsFeed() {
 	const [feedSeenAt, setFeedSeenAt] = useState<number | null>(null);
 	const [showDropped, setShowDropped] = useState(false);
 	const [expanded, setExpanded] = useState<Set<string>>(new Set());
-	const [bundleExtra, setBundleExtra] = useState<Record<string, FeedEntry[]>>({});
+	const [bundleAll, setBundleAll] = useState<Record<string, FeedEntry[]>>({});
+	const [bundleRange, setBundleRange] = useState<Record<string, string | null>>({});
+	const bundleLoaded = useRef(new Set<string>());
 	const [loading, setLoading] = useState(true);
 	const [loadMoreBusy, setLoadMoreBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -169,16 +180,51 @@ export function NotificationsFeed() {
 			try {
 				const s = await NotificationsApi.get();
 				setRules(s.rules);
+				// 印の基準は読み込み時点の feed_seen_at を保つ。markFeedSeen で進めない。
 				setFeedSeenAt(s.feed_seen_at);
-				if (s.unseen_count > 0) {
-					await NotificationsApi.markFeedSeen();
-					setFeedSeenAt(Date.now() / 1000);
-				}
+				if (s.unseen_count > 0) await NotificationsApi.markFeedSeen();
 			} catch {
 				/* 未確認数の更新に失敗しても一覧は見られる */
 			}
 		})();
 	}, []);
+
+	// 束の残りと時間帯は hold_group を next_cursor で辿って全件読んでから決める。
+	const loadBundleAll = useCallback(
+		async (bundle: FeedItem & { type: "bundle" }) => {
+			if (bundleLoaded.current.has(bundle.id)) return;
+			bundleLoaded.current.add(bundle.id);
+			const collected: FeedEntry[] = [];
+			let cursor: string | undefined;
+			do {
+				const res = await NotificationsApi.feed({
+					hold_group: bundle.id,
+					limit: 200,
+					cursor,
+					include_dropped: showDropped ? 1 : undefined,
+				});
+				collected.push(...(res.data as FeedEntry[]));
+				cursor = res.next_cursor ?? undefined;
+			} while (cursor);
+			setBundleAll((prev) => ({ ...prev, [bundle.id]: collected }));
+			setBundleRange((prev) => ({ ...prev, [bundle.id]: bundleTimeRange(collected) }));
+		},
+		[showDropped],
+	);
+
+	// 束の見出しの時間帯は先頭 3 件では足らないので、表示前に全件を読んでおく。
+	useEffect(() => {
+		for (const item of items) {
+			if (item.type === "bundle") void loadBundleAll(item);
+		}
+	}, [items, loadBundleAll]);
+
+	// 「対象外も表示」を切り替えたら束の中身も読み直す。
+	useEffect(() => {
+		bundleLoaded.current = new Set();
+		setBundleAll({});
+		setBundleRange({});
+	}, [showDropped]);
 
 	const openThread = async (messageId: string | null) => {
 		if (!messageId) return;
@@ -198,20 +244,6 @@ export function NotificationsFeed() {
 			else next.add(bundle.id);
 			return next;
 		});
-		if (!wasOpen && bundle.count > bundle.items.length && !bundleExtra[bundle.id]) {
-			void (async () => {
-				try {
-					const res = await NotificationsApi.feed({
-						hold_group: bundle.id,
-						limit: 200,
-						include_dropped: showDropped ? 1 : undefined,
-					});
-					setBundleExtra((prev) => ({ ...prev, [bundle.id]: res.data as FeedEntry[] }));
-				} catch {
-					/* 残りが取れなくても開いたものは見られる */
-				}
-			})();
-		}
 	};
 
 	const sorted = [...items].sort((a, b) => b.createdAt - a.createdAt);
@@ -265,19 +297,18 @@ export function NotificationsFeed() {
 						if (item.type === "entry") {
 							return (
 								<div key={item.id} className="card relative overflow-hidden">
-									{feedSeenAt !== null && item.createdAt > feedSeenAt && (
-										<span className="absolute left-0 top-0 h-full w-1 bg-[var(--accent)]" />
-									)}
+									{(feedSeenAt === null || item.createdAt > feedSeenAt) && <span className="absolute left-0 top-0 h-full w-1 bg-[var(--accent)]" />}
 									<EntryRow entry={item} rules={rules} onOpen={openThread} />
 								</div>
 							);
 						}
 						const open = expanded.has(item.id);
-						const loaded = bundleExtra[item.id];
-						const shown = loaded ?? item.items;
-						const range = bundleTimeRange(shown);
-						const hasMore = item.count > item.items.length && !loaded;
-						const unseen = feedSeenAt !== null && shown.some((e) => e.createdAt > feedSeenAt);
+						const all = bundleAll[item.id] ?? item.items;
+						const range = bundleRange[item.id] ?? null;
+						const hasMore = item.count > item.items.length;
+						const visible = all.slice(0, 3);
+						const rest = all.slice(3);
+						const unseen = all.some((e) => feedSeenAt === null || e.createdAt > feedSeenAt);
 						return (
 							<div key={item.id} className="card relative flex flex-col overflow-hidden">
 								{unseen && <span className="absolute left-0 top-0 h-full w-1 bg-[var(--accent)]" />}
@@ -288,8 +319,7 @@ export function NotificationsFeed() {
 								>
 									<div className="min-w-0 flex-1">
 										<p className="text-sm font-semibold text-[var(--text)]">
-											{item.count} 件 ・ {bundleTitle(item.reason)}
-											{range && <span className="font-normal text-[var(--text-muted)]"> {range}</span>}
+											{bundleTitle(item.reason)} {item.count} 件{range ?? ""}
 										</p>
 										<p className="mt-0.5 text-xs text-[var(--text-muted)]">
 											{formatDate(item.createdAt)} ・ {decisionLabel[item.decision]}
@@ -299,15 +329,19 @@ export function NotificationsFeed() {
 										{open ? "閉じる" : hasMore ? `ほか ${item.count - item.items.length} 件を表示` : "表示"}
 									</span>
 								</button>
-								{(open || item.count <= item.items.length) && (
-									<div className="flex flex-col">
-										{shown.map((e) => (
+								<div className="flex flex-col">
+									{visible.map((e) => (
+										<div key={e.id} className="border-t border-[var(--line-soft)]">
+											<EntryRow entry={e} rules={rules} onOpen={openThread} />
+										</div>
+									))}
+									{open &&
+										rest.map((e) => (
 											<div key={e.id} className="border-t border-[var(--line-soft)]">
 												<EntryRow entry={e} rules={rules} onOpen={openThread} />
 											</div>
 										))}
-									</div>
-								)}
+								</div>
 							</div>
 						);
 					})}

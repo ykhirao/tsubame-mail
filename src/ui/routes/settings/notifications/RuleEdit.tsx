@@ -186,9 +186,10 @@ export function NotificationRuleEdit() {
 			const res = await NotificationsApi.dryRun({
 				rule: { name: name.trim() || "試すルール", matcher: buildMatcher(), action, enabled: true },
 			});
+			const matches = res.data.filter((e) => e.reason === "rule:draft");
 			setDryResult({
-				count: res.data.length,
-				rows: res.data.slice(0, 3).map((e) => ({
+				count: matches.length,
+				rows: matches.slice(0, 3).map((e) => ({
 					fromAddr: e.fromAddr,
 					subject: e.subject,
 					receivedAt: e.receivedAt,

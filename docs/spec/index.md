@@ -14,8 +14,8 @@
 - [精査の残件](security-audit.html) — 上の観点で精査して見つかった、対応予定の指摘と残っている制約。確認したものだけ載る。
 - [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
   FR-15 / FR-16 の方式と画面。
-- 検討中: [PC 画面の改善要望](pc-screens.html) — 使っていて出た要望の置き場。
-  FR-9「作り込まない」と衝突するため、着手には要件の改訂が要る。
+- [PC 画面の改善要望](pc-screens.html) — 使っていて出た要望の記録。FR-17 として要件に移し、実装済み。
+- [バックログ](backlog.html) — 残っている実装・文書の作業と、並列開発の割り振り案。
 
 運用は別冊: [デプロイ](../ops/deployment.html) / [切り替え](../ops/cutover.html) /
 [日々の運用](../ops/operations.html)
@@ -30,4 +30,5 @@
 | `npm run spec:drift` | 実装を変えたのに要件も e2e も触っていない |
 | `npm run check:comments` | コードを読めば分かることを書いたコメント |
 
-どれも CI で走る。要件を書き足すと、e2e を書くまで CI が通らない。
+どれも CI で走る（`spec:coverage` は push と pull request、`spec:drift` と `check:comments` は pull request のとき）。
+要件を書き足すと、e2e を書くまで CI が通らない。

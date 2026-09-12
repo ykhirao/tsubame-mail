@@ -1,6 +1,7 @@
 import { and, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
 import type { Db } from "@/db/client";
+import { jsonIdsIn } from "@/domain/access/policy";
 import { loadPrefs } from "./prefs";
 import type {
 	Mailbox,
@@ -142,7 +143,7 @@ export async function loadMessageAddressIds(db: Db, messageIds: string[]): Promi
 	const rows = await db
 		.select({ addressId: schema.messages.addressId })
 		.from(schema.messages)
-		.where(inArray(schema.messages.id, messageIds));
+		.where(jsonIdsIn(schema.messages.id, messageIds));
 	return [...new Set(rows.map((r) => r.addressId))];
 }
 

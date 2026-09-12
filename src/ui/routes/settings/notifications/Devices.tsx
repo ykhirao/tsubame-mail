@@ -174,6 +174,18 @@ function DeviceCard({
 							>
 								すべて
 							</button>
+							<button
+								type="button"
+								disabled={busy}
+								onClick={() => allMailboxes && save({ addressIds: mailboxes.map((m) => m.id) })}
+								className={`h-11 rounded-full border px-4 text-sm transition-colors ${
+									!allMailboxes
+										? "border-[var(--accent)] bg-[var(--accent-weak)] text-[var(--accent-text)]"
+										: "border-[var(--line)] text-[var(--text)] hover:bg-[var(--surface-hover)]"
+								}`}
+							>
+								選ぶ
+							</button>
 						</div>
 						{!allMailboxes && (
 							<div className="mt-2 flex flex-col gap-1">

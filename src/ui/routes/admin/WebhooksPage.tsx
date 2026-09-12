@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import type { Webhook, WebhookCreate, WebhookDelivery, WebhookEvent } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
@@ -25,14 +26,14 @@ import {
 	WarningBlock,
 } from "./components";
 
-const eventLabels: Record<WebhookEvent, string> = {
+export const eventLabels: Record<WebhookEvent, string> = {
 	"message.received": "新着受信",
 	"message.sent": "送信完了",
 	"message.failed": "送信失敗",
 };
 
 // 作成と編集で入力項目が同じなので 1 つにしてある。secret は作成時しか返らない。
-function WebhookModal({
+export function WebhookModal({
 	addresses,
 	webhook,
 	onClose,
@@ -200,119 +201,48 @@ function SecretDialog({ created, onClose }: { created: WebhookCreate; onClose: (
 	);
 }
 
-function NoticeDanger({ children }: { children: React.ReactNode }) {
-	return (
-		<div className="rounded-md border border-[var(--warning)] bg-[var(--surface-hover)] px-4 py-3 text-sm text-[var(--warning)]">
-			{children}
-		</div>
-	);
-}
-
-function DeliveriesModal({ webhook, onClose }: { webhook: Webhook; onClose: () => void }) {
-	const [items, setItems] = useState<WebhookDelivery[]>([]);
+export function DeleteWebhookDialog({
+	webhook,
+	onClose,
+	onDeleted,
+}: {
+	webhook: Webhook;
+	onClose: () => void;
+	onDeleted: () => void | Promise<void>;
+}) {
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
-	const [retrying, setRetrying] = useState<string | null>(null);
 
-	const load = useCallback(async () => {
-		try {
-			const res = await api.get<{ data: WebhookDelivery[] }>(
-				`/api/v1/webhooks/${webhook.id}/deliveries?limit=100`,
-			);
-			setItems(res.data);
-		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "配信履歴の取得に失敗しました");
-		}
-	}, [webhook.id]);
-
-	useEffect(() => {
-		load();
-	}, [load]);
-
-	const retry = async (d: WebhookDelivery) => {
-		setRetrying(d.id);
+	const confirm = async () => {
+		setBusy(true);
 		setError("");
 		try {
-			await api.post(`/api/v1/webhooks/deliveries/${d.id}/retry`);
-			await load();
+			await api.del(`/api/v1/webhooks/${webhook.id}`);
+			await onDeleted();
+			onClose();
 		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "再送に失敗しました");
+			setError(e instanceof ApiClientError ? e.message : "削除に失敗しました");
 		} finally {
-			setRetrying(null);
+			setBusy(false);
 		}
 	};
 
 	return (
-		<Modal title={`配信履歴 — ${webhook.name}`} onClose={onClose}>
-			<ErrorBanner message={error} onDismiss={() => setError("")} />
-			<div className="mb-2 text-sm text-[var(--text-muted)]">イベント: {webhook.events.map((e) => eventLabels[e]).join(" / ")}</div>
-			{items.length === 0 ? (
-				<EmptyState message="配信履歴はまだありません。" />
-			) : (
-				<div className="max-h-96 overflow-y-auto rounded-md border border-[var(--line)]">
-					<div className="hidden overflow-x-auto md:block">
-					<table className="w-full min-w-[720px]">
-						<thead className="sticky top-0 bg-[var(--surface-sunken)]">
-							<tr className="border-b border-[var(--line)]">
-								<th className={thCls}>日時</th>
-								<th className={thCls}>イベント</th>
-								<th className={thCls}>状態</th>
-								<th className={thCls}>HTTP</th>
-								<th className={thCls}>試行</th>
-								<th className={thCls}></th>
-							</tr>
-						</thead>
-						<tbody>
-							{items.map((d) => (
-								<TableRow key={d.id}>
-									<td className={tdCls}>{formatDateTime(d.createdAt)}</td>
-									<td className={tdCls}>{eventLabels[d.event]}</td>
-									<td className={tdCls}>
-										<Badge color={d.status === "success" ? "green" : d.status === "failed" ? "red" : "yellow"}>
-											{d.status}
-										</Badge>
-										{d.error && <div className="text-xs text-[var(--danger)]">{d.error}</div>}
-									</td>
-									<td className={tdCls}>{d.httpStatus ?? "—"}</td>
-									<td className={tdCls}>{d.attempt}</td>
-									<td className={tdCls}>
-										{d.status === "failed" && (
-											<Button variant="secondary" disabled={retrying === d.id} onClick={() => retry(d)}>
-												{retrying === d.id ? "再送中…" : "再送"}
-											</Button>
-										)}
-									</td>
-								</TableRow>
-							))}
-						</tbody>
-					</table>
-					</div>
-					<ul className="md:hidden">
-						{items.map((d) => (
-							<li key={d.id} className="border-b border-[var(--line-soft)] px-3 py-2">
-								<div className="flex items-center justify-between gap-2">
-									<span className="text-sm font-medium text-[var(--text)]">{eventLabels[d.event]}</span>
-									<Badge color={d.status === "success" ? "green" : d.status === "failed" ? "red" : "yellow"}>
-										{d.status}
-									</Badge>
-								</div>
-								{d.error && <div className="mt-1 text-xs text-[var(--danger)]">{d.error}</div>}
-								<div className="mt-1 space-y-0.5 text-sm">
-									<div className="text-[var(--text-muted)]">{formatDateTime(d.createdAt)}</div>
-									<div className="text-[var(--text)]">HTTP: {d.httpStatus ?? "—"} / 試行: {d.attempt}</div>
-								</div>
-								{d.status === "failed" && (
-									<div className="mt-1">
-										<Button variant="secondary" disabled={retrying === d.id} onClick={() => retry(d)}>
-											{retrying === d.id ? "再送中…" : "再送"}
-										</Button>
-									</div>
-								)}
-							</li>
-						))}
-					</ul>
+		<Modal title="Webhook を削除" onClose={onClose}>
+			<div className="space-y-4">
+				<ErrorBanner message={error} onDismiss={() => setError("")} />
+				<Notice tone="info">
+					<strong>{webhook.name}</strong> を削除します。
+				</Notice>
+				<div className="flex justify-end gap-2">
+					<Button variant="secondary" onClick={onClose}>
+						キャンセル
+					</Button>
+					<Button variant="danger" onClick={confirm} disabled={busy}>
+						削除する
+					</Button>
 				</div>
-			)}
+			</div>
 		</Modal>
 	);
 }
@@ -324,7 +254,6 @@ export function WebhooksPage() {
 	const [showCreate, setShowCreate] = useState(false);
 	const [created, setCreated] = useState<WebhookCreate | null>(null);
 	const [editTarget, setEditTarget] = useState<Webhook | null>(null);
-	const [deliveriesTarget, setDeliveriesTarget] = useState<Webhook | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<Webhook | null>(null);
 
 	const load = useCallback(async () => {
@@ -343,18 +272,6 @@ export function WebhooksPage() {
 	useEffect(() => {
 		load();
 	}, [load]);
-
-	const confirmDelete = async () => {
-		if (!deleteTarget) return;
-		setError("");
-		try {
-			await api.del(`/api/v1/webhooks/${deleteTarget.id}`);
-			setDeleteTarget(null);
-			await load();
-		} catch (e) {
-			setError(e instanceof ApiClientError ? e.message : "削除に失敗しました");
-		}
-	};
 
 	const addressLabel = (ids: string[] | null): string => {
 		if (!ids) return "全アドレス";
@@ -392,7 +309,9 @@ export function WebhooksPage() {
 								{webhooks.map((w) => (
 									<TableRow key={w.id}>
 										<td className={tdCls}>
-											<span className="font-medium text-[var(--text)]">{w.name}</span>
+											<Link to={`/admin/webhooks/${w.id}`} className="font-medium text-[var(--text)] hover:underline">
+												{w.name}
+											</Link>
 										</td>
 										<td className={tdCls}>
 											<span className="break-all font-mono text-xs">{w.url}</span>
@@ -414,9 +333,6 @@ export function WebhooksPage() {
 											<div className="flex gap-2">
 												<Button variant="secondary" onClick={() => setEditTarget(w)}>
 													編集
-												</Button>
-												<Button variant="secondary" onClick={() => setDeliveriesTarget(w)}>
-													配信履歴
 												</Button>
 												<Button variant="danger" onClick={() => setDeleteTarget(w)}>
 													削除
@@ -451,9 +367,6 @@ export function WebhooksPage() {
 									<MobileActions>
 										<Button variant="secondary" onClick={() => setEditTarget(w)}>
 											編集
-										</Button>
-										<Button variant="secondary" onClick={() => setDeliveriesTarget(w)}>
-											配信履歴
 										</Button>
 										<Button variant="danger" onClick={() => setDeleteTarget(w)}>
 											削除
@@ -492,26 +405,12 @@ export function WebhooksPage() {
 
 				{created && <SecretDialog created={created} onClose={() => setCreated(null)} />}
 
-				{deliveriesTarget && (
-					<DeliveriesModal webhook={deliveriesTarget} onClose={() => setDeliveriesTarget(null)} />
-				)}
-
 				{deleteTarget && (
-					<Modal title="Webhook を削除" onClose={() => setDeleteTarget(null)}>
-						<div className="space-y-4">
-							<Notice tone="info">
-								<strong>{deleteTarget.name}</strong> を削除します。
-							</Notice>
-							<div className="flex justify-end gap-2">
-								<Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-									キャンセル
-								</Button>
-								<Button variant="danger" onClick={confirmDelete}>
-									削除する
-								</Button>
-							</div>
-						</div>
-					</Modal>
+					<DeleteWebhookDialog
+						webhook={deleteTarget}
+						onClose={() => setDeleteTarget(null)}
+						onDeleted={() => load()}
+					/>
 				)}
 			</Page>
 		</AdminGate>

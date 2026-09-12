@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { domains } from "@/db/schema";
 import {
+	enableSending,
 	provisionDomain,
 	pickZoneForName,
 	readSendingDnsState,
@@ -262,6 +263,92 @@ describe("provisionDomain", () => {
 		});
 		expect(row?.routingStatus).toBe("error");
 		expect(row?.lastError).toContain("CF_API_TOKEN");
+	});
+});
+
+describe("enableSending", () => {
+	it("後から有効化すると Email Sending を作り、状態を DB に保存する", async () => {
+		const fake = createFakeCloudflare({ zones: [{ id: "zone1", name: "late.test" }] });
+		const db = getTestDb();
+		await db.insert(domains).values({
+			id: "dom_late",
+			name: "mail.late.test",
+			zoneId: "zone1",
+			zoneName: "late.test",
+			mode: "subdomain",
+			routingStatus: "active",
+			sendingStatus: "disabled",
+		});
+
+		const result = await enableSending({
+			db,
+			api: apiOf(fake),
+			domain: { id: "dom_late", name: "mail.late.test", zoneId: "zone1", zoneName: "late.test" },
+		});
+
+		// 送信用の SPF / DKIM が無いので pending になる。
+		expect(["pending", "active"]).toContain(result.sendingStatus);
+		expect(fake.find((r) => r.method === "POST" && /email\/sending\/subdomains$/.test(r.path))).toHaveLength(1);
+		const row = await db.query.domains.findFirst({ where: eq(domains.id, "dom_late") });
+		expect(row?.sendingStatus).toBe(result.sendingStatus);
+		expect(row?.lastError).toBeNull();
+	});
+
+	it("既に送信用のレコードがあれば active を保存する", async () => {
+		const fake = createFakeCloudflare({ zones: [{ id: "zone1", name: "ready.test" }] });
+		fake.dnsRecords.push(
+			{ id: "r-spf", type: "TXT", name: "mail.ready.test", content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+			{ id: "r-dkim", type: "TXT", name: "cf-bounce._domainkey.mail.ready.test", content: "v=DKIM1; p=AAA" },
+		);
+		const db = getTestDb();
+		await db.insert(domains).values({
+			id: "dom_ready",
+			name: "mail.ready.test",
+			zoneId: "zone1",
+			zoneName: "ready.test",
+			mode: "subdomain",
+			routingStatus: "active",
+			sendingStatus: "disabled",
+		});
+
+		const result = await enableSending({
+			db,
+			api: apiOf(fake),
+			domain: { id: "dom_ready", name: "mail.ready.test", zoneId: "zone1", zoneName: "ready.test" },
+		});
+
+		expect(result.sendingStatus).toBe("active");
+	});
+
+	it("Cloudflare API が失敗したら error と lastError を保存する", async () => {
+		const fake = createFakeCloudflare({
+			zones: [{ id: "zone1", name: "latefail.test" }],
+			failWith: (req) =>
+				/email\/sending\/subdomains$/.test(req.path) && req.method === "POST"
+					? { status: 403, errors: [{ code: 9109, message: "Unauthorized" }] }
+					: undefined,
+		});
+		const db = getTestDb();
+		await db.insert(domains).values({
+			id: "dom_latefail",
+			name: "mail.latefail.test",
+			zoneId: "zone1",
+			zoneName: "latefail.test",
+			mode: "subdomain",
+			routingStatus: "active",
+			sendingStatus: "disabled",
+		});
+
+		const result = await enableSending({
+			db,
+			api: apiOf(fake),
+			domain: { id: "dom_latefail", name: "mail.latefail.test", zoneId: "zone1", zoneName: "latefail.test" },
+		});
+
+		expect(result.sendingStatus).toBe("error");
+		const row = await db.query.domains.findFirst({ where: eq(domains.id, "dom_latefail") });
+		expect(row?.sendingStatus).toBe("error");
+		expect(result.lastError).toBeTruthy();
 	});
 });
 

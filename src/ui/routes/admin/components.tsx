@@ -16,7 +16,7 @@ export function AdminTabs() {
 	return (
 		<nav className="mb-6 flex flex-wrap gap-1 border-b border-[var(--line-soft)] pb-2">
 			{ADMIN_TABS.map((t) => {
-				const active = pathname === t.to;
+				const active = pathname === t.to || pathname.startsWith(`${t.to}/`);
 				return (
 					<Link
 						key={t.to}
@@ -76,7 +76,7 @@ const buttonStyles: Record<ButtonVariant, string> = {
 	primary: "bg-[var(--accent)] text-white hover:opacity-90",
 	secondary:
 		"bg-[var(--surface)] text-[var(--text)] border border-[var(--line)] hover:bg-[var(--surface-hover)]",
-	danger: "bg-transparent text-[var(--danger)] hover:bg-[var(--surface-hover)]",
+	danger: "bg-[var(--danger)] text-white hover:opacity-90",
 	ghost: "bg-transparent text-[var(--text-muted)] hover:bg-[var(--surface-hover)]",
 };
 

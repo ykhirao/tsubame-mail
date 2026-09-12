@@ -173,6 +173,34 @@ describe("端末の登録・更新・削除", () => {
 		expect((await app.request(`/api/v1/me/devices/${created.id}`, { method: "DELETE" })).status).toBe(204);
 	});
 
+	it("enabled: true で PATCH すると failureCount を 0 に戻す", async () => {
+		const member = await createUser({ role: "member" });
+		await createSession(member.id, "ses_fail");
+		const deviceId = "dev_fail";
+		await db().insert(schema.pushDevices).values({
+			id: deviceId,
+			userId: member.id,
+			sessionId: "ses_fail",
+			endpoint: "https://fcm.googleapis.com/fcm/send/endpoint-fail",
+			p256dh: "abc",
+			auth: "def",
+			name: "iPhone",
+			platform: "ios",
+			enabled: false,
+			failureCount: 3,
+		});
+		const app = buildApp(sessionPrincipal(member.id, "member", "ses_fail"));
+		const res = (await (
+			await app.request(`/api/v1/me/devices/${deviceId}`, {
+				method: "PATCH",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ enabled: true }),
+			})
+		).json()) as { enabled: boolean; failureCount: number };
+		expect(res.enabled).toBe(true);
+		expect(res.failureCount).toBe(0);
+	});
+
 	it("登録と削除を device.register / device.delete として記録する（エンドポイントは含めない）", async () => {
 		const member = await createUser({ role: "member" });
 		await createSession(member.id, "ses_aud");

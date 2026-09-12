@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import type { AdminAddress, AdminUser, AdminUserDetail, GrantInput } from "./api";
 import { api, ApiClientError, getAllPages } from "./api";
 import { AdminGate } from "./gate";
@@ -145,7 +146,7 @@ function CreateUserModal({
 	);
 }
 
-function GrantsModal({
+export function GrantsModal({
 	user,
 	addresses,
 	onClose,
@@ -485,7 +486,12 @@ export function UsersPage() {
 								{users.map((u) => (
 									<TableRow key={u.id}>
 										<td className={tdCls}>
-											<span className="font-medium text-[var(--text)]">{u.name}</span>
+											<Link
+												to={`/admin/users/${u.id}`}
+												className="font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+											>
+												{u.name}
+											</Link>
 										</td>
 										<td className={tdCls}>{u.email}</td>
 										<td className={tdCls}>
@@ -519,7 +525,12 @@ export function UsersPage() {
 							{users.map((u) => (
 								<li key={u.id} className="border-b border-[var(--line-soft)] px-4 py-3">
 									<div className="flex items-center justify-between gap-2">
-										<span className="min-w-0 flex-1 font-medium text-[var(--text)]">{u.name}</span>
+										<Link
+											to={`/admin/users/${u.id}`}
+											className="min-w-0 flex-1 font-medium text-[var(--text)] hover:text-[var(--accent)] underline decoration-[var(--line)] underline-offset-2 hover:decoration-[var(--accent)]"
+										>
+											{u.name}
+										</Link>
 										<Badge color={roleBadge(u.role)}>{roleLabels[u.role]}</Badge>
 									</div>
 									<div className="mt-2 space-y-1">

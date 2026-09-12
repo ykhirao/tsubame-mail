@@ -167,6 +167,7 @@ export const feedEntry = z.object({
 	fromAddr: z.string(),
 	subject: z.string().nullable(),
 	mailboxAddress: z.string(),
+	isCatchAll: z.boolean(),
 });
 export type FeedEntry = z.infer<typeof feedEntry>;
 

@@ -72,7 +72,8 @@ npx wrangler queues create tsubame-outbound-dlq
 
 ## 3. Worker Secret を投入する
 
-`tsubame` Worker に 3 つのシークレットを設定する。`wrangler login` 済みの状態で:
+`tsubame` Worker にシークレットを 5 つ設定する（**プッシュ通知を使わないなら 3 つ**）。
+`wrangler login` 済みの状態で:
 
 ```bash
 npx wrangler secret put CF_API_TOKEN
@@ -115,6 +116,10 @@ openssl rand -base64 32
 
 未設定、または 20 文字未満だと `POST /api/v1/auth/bootstrap` が 403 を返し、
 **誰もオーナーを作れない**（安全側に倒してある）。詳細は第 8 節。
+
+ログイン・送信のレート制限（`ratelimits` の `LOGIN_RATE_LIMIT` / `SEND_RATE_LIMIT`）と
+定時実行の cron（`*/5 * * * *`）はどちらも `wrangler.jsonc` が持つもので、
+シークレットや追加の設定は要らない。
 
 ### VAPID_PRIVATE_KEY（プッシュ通知の鍵）
 
