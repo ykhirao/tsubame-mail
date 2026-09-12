@@ -1,4 +1,4 @@
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, eq, gt, ne, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db/client";
 import type { Db } from "@/db/client";
 import { jsonIdsIn } from "@/domain/access/policy";
@@ -95,10 +95,24 @@ export async function countUnread(
 				.all()
 		).map((g) => g.addressId),
 	);
+	// ゴミ箱しか持たない会話は受信箱にも一覧にも出ないので、数えると端末のバッジに
+	// 消せない数字が残る。サイドバーのバッジ（`api/v1/addresses.ts`）と同じ条件で除く。
 	const rows = await db
 		.select({ addressId: schema.threads.addressId, unread: schema.threads.unreadCount })
 		.from(schema.threads)
-		.where(and(gt(schema.threads.unreadCount, 0), filter));
+		.where(
+			and(
+				gt(schema.threads.unreadCount, 0),
+				filter,
+				sql`exists (
+					select 1 from ${schema.messages}
+					where ${and(
+						eq(schema.messages.threadId, schema.threads.id),
+						ne(schema.messages.status, "trash"),
+					)}
+				)`,
+			),
+		);
 	let total = 0;
 	for (const r of rows) {
 		if (prefs.badge === "notified") {

@@ -13,7 +13,12 @@ import { isSelfAddress, looseAddressOf } from "@/ui/lib/looseAddress";
 import { formatAddress, parseAddressList } from "@/domain/mail/address";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
 import { useIsMobile } from "@/ui/lib/useIsMobile";
-import { MAX_SUBJECT_BYTES } from "@/shared/contracts/send";
+import {
+	MAX_ATTACHMENTS,
+	MAX_ATTACHMENT_BYTES,
+	MAX_SUBJECT_BYTES,
+	MAX_TOTAL_ATTACHMENT_BYTES,
+} from "@/shared/contracts/send";
 
 // 表示専用の簡易パース。実際の重複除去・自分除外はサーバ側（outbound.ts）が行う。
 // 素の .split(",") だと、引用された表示名 "Doe, John" のカンマまでも割ってしまう（精査 #82）。
@@ -211,13 +216,35 @@ export function Compose() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [writable, requestedFrom, replyMessageId, from]);
 
+	// 上限はサーバでも見ているが、そこまで行くと base64 にして送り切ってから 400 が返る。
+	// 25MB の動画なら 33MB を持って待たされたうえに全部書き直しになるので、選んだ時点で止める。
 	const onFiles = async (files: FileList | null) => {
 		if (!files) return;
+		const chosen = Array.from(files);
+		const tooBig = chosen.find((f) => f.size > MAX_ATTACHMENT_BYTES);
+		if (tooBig) {
+			setError(`「${tooBig.name}」は ${formatBytes(MAX_ATTACHMENT_BYTES)} を超えています`);
+			return;
+		}
+		if (pending.length + chosen.length > MAX_ATTACHMENTS) {
+			setError(`添付は ${MAX_ATTACHMENTS} 件までです`);
+			return;
+		}
+		const total =
+			pending.reduce((sum, p) => sum + p.file.size, 0) + chosen.reduce((sum, f) => sum + f.size, 0);
+		if (total > MAX_TOTAL_ATTACHMENT_BYTES) {
+			setError(`添付の合計が ${formatBytes(MAX_TOTAL_ATTACHMENT_BYTES)} を超えています`);
+			return;
+		}
 		const list: PendingAttachment[] = [];
-		for (const file of Array.from(files)) {
+		for (const file of chosen) {
 			list.push({ file, base64: await readAsBase64(file) });
 		}
 		setPending((prev) => [...prev, ...list]);
+	};
+
+	const removeAttachment = (index: number) => {
+		setPending((prev) => prev.filter((_, i) => i !== index));
 	};
 
 	const changeFrom = (v: string) => {
@@ -372,7 +399,7 @@ export function Compose() {
 							placeholder="返信内容を入力"
 							className="min-h-[220px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
 						/>
-						<AttachRow pending={pending} onFiles={onFiles} />
+						<AttachRow pending={pending} onFiles={onFiles} onRemove={removeAttachment} />
 					</form>
 				</MobileComposeFrame>
 			);
@@ -429,7 +456,7 @@ export function Compose() {
 						className="min-h-[300px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
 					/>
 
-					<AttachRow pending={pending} onFiles={onFiles} />
+					<AttachRow pending={pending} onFiles={onFiles} onRemove={removeAttachment} />
 
 					<div className="flex items-center justify-between gap-2">
 						<label className="flex items-center gap-1.5 text-sm text-[var(--text-muted)]">
@@ -541,7 +568,7 @@ export function Compose() {
 						placeholder="本文"
 						className="min-h-[240px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
 					/>
-					<AttachRow pending={pending} onFiles={onFiles} />
+					<AttachRow pending={pending} onFiles={onFiles} onRemove={removeAttachment} />
 				</form>
 			</MobileComposeFrame>
 		);
@@ -668,7 +695,7 @@ export function Compose() {
 					className="min-h-[300px] w-full resize-y bg-transparent text-sm leading-relaxed text-[var(--text)] placeholder:text-[var(--text-muted)] focus:outline-none"
 				/>
 
-				<AttachRow pending={pending} onFiles={onFiles} />
+				<AttachRow pending={pending} onFiles={onFiles} onRemove={removeAttachment} />
 
 				<div className="flex items-center justify-end gap-3">
 					<Link to="/" className="text-sm text-[var(--text-muted)] hover:text-[var(--text)]">
@@ -686,31 +713,56 @@ export function Compose() {
 function AttachRow({
 	pending,
 	onFiles,
+	onRemove,
 }: {
 	pending: PendingAttachment[];
 	onFiles: (files: FileList | null) => void;
+	onRemove: (index: number) => void;
 }) {
+	const total = pending.reduce((sum, p) => sum + p.file.size, 0);
 	return (
 		<div>
 			<label className="mb-1 block text-xs font-medium text-[var(--text-muted)]">添付</label>
 			<input
 				type="file"
 				multiple
-				onChange={(e) => void onFiles(e.target.files)}
+				onChange={(e) => {
+					void onFiles(e.target.files);
+					// 同じファイルを消してもう一度選べるように、input の値を空に戻す。
+					e.target.value = "";
+				}}
 				className="block w-full text-sm text-[var(--text-muted)] file:mr-2 file:rounded-full file:border-0 file:bg-[var(--surface-hover)] file:px-3 file:py-1 file:text-sm file:text-[var(--text)] hover:file:bg-[var(--surface-selected)]"
 			/>
 			{pending.length > 0 && (
-				<ul className="mt-2 space-y-1 text-xs text-[var(--text-muted)]">
-					{pending.map((p, i) => (
-						<li key={`${p.file.name}-${i}`} className="flex items-center gap-1">
-							<span>📎 {p.file.name}</span>
-							{(p.file.size / 1024).toFixed(0)} KB
-						</li>
-					))}
-				</ul>
+				<>
+					<ul className="mt-2 space-y-1 text-xs text-[var(--text-muted)]">
+						{pending.map((p, i) => (
+							<li key={`${p.file.name}-${i}`} className="flex items-center gap-1">
+								<span className="truncate">📎 {p.file.name}</span>
+								<span className="shrink-0">{formatBytes(p.file.size)}</span>
+								<button
+									type="button"
+									onClick={() => onRemove(i)}
+									aria-label={`${p.file.name} を外す`}
+									className="shrink-0 rounded-full px-1.5 text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--danger)]"
+								>
+									×
+								</button>
+							</li>
+						))}
+					</ul>
+					<p className="mt-1 text-xs text-[var(--text-muted)]">
+						合計 {formatBytes(total)} / {formatBytes(MAX_TOTAL_ATTACHMENT_BYTES)}
+					</p>
+				</>
 			)}
 		</div>
 	);
+}
+
+function formatBytes(n: number): string {
+	if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+	return `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
 // スマホでは作成画面を全画面で覆う。送信は上部に置いてキーボードに隠れないようにし、

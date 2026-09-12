@@ -16,9 +16,9 @@ export const MIME_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 
 // キーのスコープ（read/send/admin）だけでは送信量に上限が無く、
 // 1 本のキーで巨大な JSON を R2 に置いたり大量に送信できてしまう（精査 #22）。
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-const MAX_ATTACHMENTS = 50;
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 50;
 export const MAX_RECIPIENTS = 100;
 export const MAX_BODY_BYTES = 1024 * 1024;
 // z.string().max はコード単位を数え、多バイト文字なら実バイト数が大幅に超える。D1 の 1 行 2MB 上限に
