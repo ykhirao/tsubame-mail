@@ -277,12 +277,25 @@ D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 
 | シークレット名 | 値 |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | 第 3 節の CF_API_TOKEN と同じ値 |
+| `CLOUDFLARE_API_TOKEN` | デプロイ用のトークン（下の権限で発行する。第 3 節の CF_API_TOKEN とは分ける） |
 | `CLOUDFLARE_ACCOUNT_ID` | アカウント ID |
 | `D1_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
 
-`CLOUDFLARE_API_TOKEN` は wrangler 本体の認証にも使う（Workers Scripts Edit 等の
-権限が必要になる場合がある。トークンに Workers Scripts: Edit を加える）。
+`CLOUDFLARE_API_TOKEN` は wrangler 本体がマイグレーションとデプロイに使う。アプリ用の CF_API_TOKEN には
+D1 の権限が無いので、同じ値を入れるとマイグレーションで `code: 7403` になる。デプロイ用に別に発行する
+（ダッシュボードのテンプレート「Edit Cloudflare Workers」から始めて D1 と Queues を足すと早い）:
+
+| レベル | 権限 | 使う場面 |
+| --- | --- | --- |
+| Account | D1 – Edit | マイグレーションの適用 |
+| Account | Workers Scripts – Edit | Worker の本体と cron の登録 |
+| Account | Queues – Edit | キューのコンシューマの設定 |
+| Account | Workers R2 Storage – Edit | R2 バインディング |
+| Account | Account Settings – Read | wrangler がアカウントを確かめる |
+| User | User Details – Read | 同上 |
+| User | Memberships – Read | 同上 |
+
+アカウントリソースは本番のアカウントだけに絞る。この 7 つで Deploy が通ることを 2026-09-12 に確かめた。
 
 実行: *Actions → Deploy → Run workflow*。
 
