@@ -25,6 +25,7 @@ import {
 	type AddressViewer,
 } from "@/shared/contracts/addresses";
 import { ApiError, conflict, invalidRequest, notFound } from "@/shared/errors";
+import { redactError } from "@/lib/logError";
 
 const app = new Hono<AppEnv>();
 
@@ -34,7 +35,7 @@ const listAddressesQueryWithPaging = listAddressesQuery.and(paginationQuery);
 
 app.onError((err, c) => {
 	if (err instanceof ApiError) return c.json(err.toJSON(), err.status as 400);
-	console.error("unhandled error", err);
+	console.error("unhandled error", redactError(err));
 	return c.json({ error: { code: "internal", message: "内部エラーが発生しました" } }, 500);
 });
 

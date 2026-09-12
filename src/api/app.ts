@@ -23,6 +23,7 @@ import adminAuditLogRoutes from "./v1/admin/audit-logs";
 import notificationRoutes, { threadNotificationRouter } from "./v1/notifications";
 import deviceRoutes from "./v1/devices";
 import pushRoutes from "./v1/push";
+import { redactError } from "@/lib/logError";
 
 // `clone()` は元のストリームを乱さないので、ここで読んでもハンドラ側の
 // `c.req.json()` 等はそのまま読める。ヘッダ（Content-Length など）は
@@ -125,7 +126,7 @@ export function createApp() {
 		if (err instanceof ApiError) {
 			return c.json(err.toJSON(), err.status as 400);
 		}
-		console.error("unhandled error", err);
+		console.error("unhandled error", redactError(err));
 		return c.json({ error: { code: "internal", message: "内部エラーが発生しました" } }, 500);
 	});
 

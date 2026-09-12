@@ -10,6 +10,7 @@ import { newId } from "@/lib/id";
 import type { Principal, Role, Scope } from "@/shared/contracts/common";
 import { defaultColorFor } from "@/shared/colors";
 import { forbidden } from "@/shared/errors";
+import { redactError } from "@/lib/logError";
 
 export const ALL_SCOPES: Scope[] = ["read", "send", "admin"];
 
@@ -208,7 +209,7 @@ export async function recordAudit(db: Db, entry: AuditEntry): Promise<void> {
 			ip: entry.ip ?? null,
 		});
 	} catch (err) {
-		console.error("audit_logs への記録に失敗", entry.action, err);
+		console.error("audit_logs への記録に失敗", entry.action, redactError(err));
 	}
 }
 

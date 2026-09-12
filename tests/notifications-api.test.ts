@@ -209,6 +209,17 @@ describe("PATCH /me/notifications（プリセット）", () => {
 describe("メールボックスのレベル PUT", () => {
 	useCleanState();
 
+	it("owner が実在しないメールボックスを指定すると 500 ではなく 404", async () => {
+		const owner = await createUser({ role: "owner" });
+		const app = buildApp({ ...sessionPrincipal(owner.id, "owner", []), addressIds: "all", writableAddressIds: "all" });
+		const res = await app.request("/api/v1/me/notifications/mailboxes/adr_missing", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ level: "all" }),
+		});
+		expect(res.status).toBe(404);
+	});
+
 	it("見られるアドレスのみ変更でき、権限外は 403", async () => {
 		const member = await createUser({ role: "member" });
 		const domainId = await createDomain();

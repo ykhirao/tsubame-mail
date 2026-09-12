@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@/db/schema";
 import { newId } from "@/lib/id";
 import { ApiError } from "@/shared/errors";
@@ -268,5 +268,25 @@ describe("#113 スレッド一覧の view フィルタ", () => {
 		});
 		const r = await queryThreads(db(), { principal: ownerPrincipal, limit: 50, view: "inbox" });
 		expect(r.rows.map((t) => t.id)).not.toContain("thr_empty");
+	});
+});
+
+describe("#146 LIKE に落ちる検索語の長さ", () => {
+	it("D1 の LIKE の上限を超える語は 500 ではなく 400、ログにも検索語を残さない", async () => {
+		const errors: unknown[] = [];
+		const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+			errors.push(args);
+		});
+		const app = mountRouter("/", messagesRoutes, ownerPrincipal);
+
+		for (const q of [`body=${"z".repeat(48)}b`, `subject=${"あ".repeat(16)}b`, `q=${encodeURIComponent(`from:${"x".repeat(60)}`)}`]) {
+			const res = await callJson(app, `/?${q}`);
+			expect(res.status, q).toBe(400);
+		}
+		const ok = await callJson(app, `/?body=${"z".repeat(46)}`);
+		expect(ok.status).toBe(200);
+
+		expect(JSON.stringify(errors)).not.toContain("zzzz");
+		spy.mockRestore();
 	});
 });

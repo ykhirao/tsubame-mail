@@ -9,6 +9,7 @@ import { requireOwner as assertOwner, resolvePrincipal } from "@/domain/access/p
 import type { Principal } from "@/shared/contracts/common";
 import { forbidden, unauthorized } from "@/shared/errors";
 import type { AppEnv } from "../types";
+import { redactError } from "@/lib/logError";
 
 /** last_used_at の更新間隔。毎リクエスト書くと D1 が重いので間引く。 */
 const LAST_USED_GRANULARITY_MS = 60_000;
@@ -129,7 +130,7 @@ async function touchLastUsed(
 		.where(eq(schema.apiKeys.id, keyId))
 		.then(() => undefined)
 		.catch((err: unknown) => {
-			console.error("last_used_at の更新に失敗", err);
+			console.error("last_used_at の更新に失敗", redactError(err));
 		});
 
 	try {

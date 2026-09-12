@@ -203,3 +203,24 @@ describe("#142 パスワード変更・無効化で、その人のキーから�
 		expect(await revokedAt(root.id)).toBeNull();
 	});
 });
+
+describe("#145 範囲を絞ったキーは、自分と自分の子孫しか /me から失効できない", () => {
+	it("同じ持ち主の無制限キーは 403、自分の子は 200、セッションなら従来どおり 200", async () => {
+		const owner = await bootstrapOwner();
+		const domainId = await createDomain("example.com");
+		const addressId = await createAddress(domainId, "scoped", "example.com");
+		const narrow = await createApiKeyFor({ userId: owner.id, scopes: ["read", "send", "admin"], addressIds: [addressId] });
+		const wide = await createApiKeyFor({ userId: owner.id, scopes: ["read", "admin"] });
+
+		const denied = await request(app, `/api/v1/me/api-keys/${wide.id}`, { method: "DELETE", bearer: narrow.token });
+		expect(denied.status).toBe(403);
+		expect(await revokedAt(wide.id)).toBeNull();
+
+		const child = await issueWith(narrow.token, "子");
+		const own = await request(app, `/api/v1/me/api-keys/${child.id}`, { method: "DELETE", bearer: narrow.token });
+		expect(own.status).toBe(200);
+
+		const bySession = await request(app, `/api/v1/me/api-keys/${wide.id}`, { method: "DELETE", cookie: owner.cookie });
+		expect(bySession.status).toBe(200);
+	});
+});

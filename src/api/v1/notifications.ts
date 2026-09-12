@@ -293,6 +293,9 @@ app.put("/mailboxes/:addressId", async (c) => {
 	const addressId = c.req.param("addressId");
 	if (!addressSetHas(principal.addressIds, addressId)) throw forbidden("このメールボックスの設定は変更できません");
 	const { level } = await readJson(c.req, mailboxLevelInput);
+	// owner は addressIds が all なので、実在しない id でもここまで来て FK 違反の 500 になっていた。
+	const exists = await db.select({ id: schema.addresses.id }).from(schema.addresses).where(eq(schema.addresses.id, addressId)).get();
+	if (!exists) throw notFound("メールボックスが見つかりません");
 	await ensurePrefsRow(db, principal.userId);
 	await db
 		.insert(schema.notificationMailboxPrefs)

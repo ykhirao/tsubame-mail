@@ -7,6 +7,7 @@
  */
 import { createApp } from "@/api/app";
 import type { AnyQueueMessage } from "@/services/queue";
+import { redactError } from "@/lib/logError";
 
 const app = createApp();
 
@@ -29,7 +30,7 @@ export default {
 		const { pruneAuditLogs } = await import("@/services/maintenance");
 		// 片方の失敗でもう片方を止めない。
 		const results = await Promise.allSettled([handleScheduled(controller, env, ctx), pruneAuditLogs(env)]);
-		for (const r of results) if (r.status === "rejected") console.error("scheduled の処理に失敗", r.reason);
+		for (const r of results) if (r.status === "rejected") console.error("scheduled の処理に失敗", redactError(r.reason));
 	},
 
 	async queue(batch, env, ctx) {

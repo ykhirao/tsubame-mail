@@ -90,12 +90,19 @@ function escapeFtsTerm(w: string): string {
 	return `"${cleaned}"`;
 }
 
+// D1 は LIKE のパターンを 50 バイトまでしか受けず、超えると 500 になる（#146）。前後の % を含めて数える。
+const LIKE_PATTERN_MAX_BYTES = 50;
+
 // LIKE の % _ \ をそのまま通すと 1 語で全件に当たる（#125）。制御文字（char(31) を含む）は
 // 連結した列の区切りと衝突するので、含む語を何にも一致させない。
 function likeCondition(col: AnyColumn | SQL, w: string): SQL {
 	if (/[\x00-\x1f\x7f]/.test(w)) return sql`0`;
 	const escaped = w.replace(/[\\%_]/g, (m) => `\\${m}`);
-	return sql`${col} like ${`%${escaped}%`} escape '\\'`;
+	const pattern = `%${escaped}%`;
+	if (new TextEncoder().encode(pattern).length > LIKE_PATTERN_MAX_BYTES) {
+		throw invalidRequest("検索語が長すぎます。1 つの条件は日本語で 15 文字、英数字で 46 文字くらいまでにしてください");
+	}
+	return sql`${col} like ${pattern} escape '\\'`;
 }
 
 function freeWordCondition(w: string): SQL {

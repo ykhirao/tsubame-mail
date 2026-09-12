@@ -1,4 +1,5 @@
 import { isInbound, isNotify, isOutboundSend, isWebhookRetry, type AnyQueueMessage } from "./queue";
+import { redactError } from "@/lib/logError";
 
 // 429/5xx で再試行に回すときの遅延（秒）。Webhook と同じく試行回数で指数に伸ばす。
 // item.attempts は 1 始まり。末尾の値は残りの試行すべてに使い回す。
@@ -30,7 +31,7 @@ export async function handleQueueBatch(
 			}
 			item.ack();
 		} catch (err) {
-			console.error("キュー処理に失敗", err);
+			console.error("キュー処理に失敗", redactError(err));
 			const delay = isNotify(item.body)
 				? NOTIFY_RETRY_DELAYS[Math.min(Math.max(item.attempts - 1, 0), NOTIFY_RETRY_DELAYS.length - 1)]
 				: 10;

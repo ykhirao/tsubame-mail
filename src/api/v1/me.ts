@@ -220,6 +220,12 @@ app.delete("/api-keys/:id", async (c) => {
 		.limit(1);
 	// 他人のキーは「見つからない」で返す（存在を漏らさない）。
 	if (!key) throw notFound("キーが見つかりません");
+	// 範囲を絞ったキーが漏れても、持ち主の他のキーまで止められないようにする。自分と自分の子孫だけ（#145）。
+	if (principal.via === "api_key" && principal.addressIds !== "all" && principal.apiKeyId) {
+		if (id !== principal.apiKeyId && !(await isDescendantKey(db, principal.apiKeyId, id))) {
+			throw forbidden("範囲を絞った API キーでは、そのキーと、そのキーから発行したキーしか失効できません");
+		}
+	}
 
 	const revokedAt = key.revokedAt ?? new Date();
 	const descendants = await revokeKeyTree(db, id, revokedAt);
@@ -235,6 +241,17 @@ app.delete("/api-keys/:id", async (c) => {
 
 	return c.json({ ...serializeKey(key), revokedAt: unixSeconds(revokedAt) });
 });
+
+async function isDescendantKey(db: Db, ancestorId: string, id: string): Promise<boolean> {
+	const rows = await db.all<{ id: string }>(sql`
+		with recursive tree(id) as (
+			select id from api_keys where parent_key_id = ${ancestorId}
+			union
+			select k.id from api_keys k join tree t on k.parent_key_id = t.id
+		)
+		select id from tree where id = ${id}`);
+	return rows.length > 0;
+}
 
 /** キーと、そのキーから（孫以降も含めて）発行したキーを失効する。新しく失効した子孫の id を返す。 */
 export async function revokeKeyTree(db: Db, id: string, revokedAt: Date): Promise<string[]> {

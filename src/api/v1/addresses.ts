@@ -10,6 +10,7 @@ import { afterCursor, toPage } from "@/lib/paging";
 import { clientIp } from "@/api/middleware/auth";
 import { readJson } from "@/lib/validate";
 import { updateMySignatureInput } from "@/shared/contracts/addresses";
+import { redactError } from "@/lib/logError";
 
 const app = new Hono<AppEnv>();
 
@@ -24,7 +25,7 @@ const addressListQuery = z.object({
 // app.ts でも張っているが、サブアプリ単体でテストしたときも同じ形になるよう重ねて張る。
 app.onError((err, c) => {
 	if (err instanceof ApiError) return c.json(err.toJSON(), err.status as 400);
-	console.error("unhandled error", err);
+	console.error("unhandled error", redactError(err));
 	return c.json({ error: { code: "internal", message: "内部エラーが発生しました" } }, 500);
 });
 
