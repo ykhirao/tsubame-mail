@@ -261,4 +261,45 @@ describe("出し分けた宛先ごとの送信済み記録（#21 / #59）", () =
 		expect(job!.status).toBe("sent");
 		expect(job!.sentRecipients).toEqual(["x@ext.example.jp"]);
 	});
+
+	// 宛先は 100 件まで認めており、1 件ずつ送るので実処理が「止まった sending」の
+	// 判定（120 秒）を跨ぎうる。跨いだ途中で再配達が拾い直すと attempts だけが進み、
+	// 上限に当たって残りの宛先に永久に届かなくなる。送るたびに期限を先へ進める。
+	it("宛先を送るたびに sending の期限が先へ延びる", async () => {
+		const h = await freshHarness();
+		const db = getDb(h.env);
+		const owner = await loginAsOwner(h);
+		await seedDomain(h, { addresses: ["ai"] });
+		const res = await owner.post("/api/v1/messages", {
+			from: "ai@mail.tsubame.test",
+			to: ["a@ext.example.jp", "b@ext.example.jp", "c@ext.example.jp"],
+			text: "本文",
+		});
+		expect(res.status).toBe(202);
+		const messageId = res.body.id as string;
+		const job0 = await db.select().from(outboundJobs).where(eq(outboundJobs.messageId, messageId)).get();
+
+		// 1 通ごとに時間がかかる送信を模す。claim が置いた期限を実処理が追い越す状況。
+		const deadlines: (Date | null)[] = [];
+		let count = 0;
+		(h.env as { EMAIL: unknown }).EMAIL = {
+			async send() {
+				count++;
+				// 送る直前の期限を覚えておき、宛先をまたいで進むかを見る。
+				const row = await db.select().from(outboundJobs).where(eq(outboundJobs.id, job0!.id)).get();
+				deadlines.push(row?.nextAttemptAt ?? null);
+				await new Promise((r) => setTimeout(r, 1100));
+				return { messageId: `slow-${count}` };
+			},
+		};
+
+		await runProcessOnce(h, job0!.id, messageId);
+
+		expect(count).toBe(3);
+		// 2 通目・3 通目を送る時点の期限が、1 通目の時点より後になっている
+		// （延ばしていなければ claim 時の 1 つの値のまま 3 回とも等しい）。
+		const [first, second, third] = deadlines;
+		expect(second!.getTime()).toBeGreaterThan(first!.getTime());
+		expect(third!.getTime()).toBeGreaterThan(second!.getTime());
+	});
 });

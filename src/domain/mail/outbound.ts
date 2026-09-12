@@ -184,11 +184,18 @@ export async function processOutboundSend(
 			bcc: parseMailboxes(message.bccAddr),
 			raw,
 			alreadySent: new Set(sentLog),
+			// 宛先ごとに 1 通送って記録する。宛先は 100 件まで認めているので、実処理が
+			// SENDING_STUCK_SECONDS を超えうる。期限を進めておかないと、まだ送っている
+			// 最中の job を再配達が「止まった」と見なして拾い直し、attempts だけが進んで
+			// 上限に当たり、残りの宛先に永久に届かなくなる。
 			onSent: async (address) => {
 				sentLog.push(address);
 				await db
 					.update(outboundJobs)
-					.set({ sentRecipients: [...sentLog] })
+					.set({
+						sentRecipients: [...sentLog],
+						nextAttemptAt: new Date(Date.now() + SENDING_STUCK_SECONDS * 1000),
+					})
 					.where(eq(outboundJobs.id, job.id));
 			},
 		});
