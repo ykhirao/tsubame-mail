@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import addressRoutes from "@/api/v1/addresses";
 import adminAddressRoutes from "@/api/v1/admin/addresses";
 import adminDomainRoutes from "@/api/v1/admin/domains";
-import { addresses, auditLogs, domains, messages } from "@/db/schema";
+import { addresses, auditLogs, domains, messages, threads } from "@/db/schema";
 import {
 	applyMigrations,
 	callJson,
@@ -599,10 +599,28 @@ describe("GET /addresses（全ユーザー）", () => {
 			{ id: "adr_b", domainId: "dom_mine", localPart: "b", address: "b@mail.mine.example.com" },
 			{ id: "adr_c", domainId: "dom_mine", localPart: "c", address: "c@mail.mine.example.com" },
 		]);
+		// バッジは未読の会話を数えるので、未読メールには会話を持たせる。
+		await db.insert(threads).values([
+			{
+				id: "thr_a",
+				addressId: "adr_a",
+				lastMessageAt: new Date(),
+				messageCount: 1,
+				unreadCount: 1,
+			},
+			{
+				id: "thr_c",
+				addressId: "adr_c",
+				lastMessageAt: new Date(),
+				messageCount: 1,
+				unreadCount: 1,
+			},
+		]);
 		await db.insert(messages).values([
 			{
 				id: "msg1",
 				addressId: "adr_a",
+				threadId: "thr_a",
 				direction: "inbound",
 				status: "received",
 				fromAddr: "x@example.com",
@@ -621,6 +639,7 @@ describe("GET /addresses（全ユーザー）", () => {
 			{
 				id: "msg3",
 				addressId: "adr_c",
+				threadId: "thr_c",
 				direction: "inbound",
 				status: "received",
 				fromAddr: "x@example.com",

@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { defaultColorFor } from "@/shared/colors";
-import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
-import { addresses, domains, messages } from "@/db/schema";
+import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
+import { addresses, domains, threads } from "@/db/schema";
 import type { AppEnv } from "@/api/types";
 import { canRead, canWrite, jsonIdsIn, recordAudit } from "@/domain/access/policy";
 import { conflict, forbidden, invalidRequest, notFound, unauthorized, ApiError } from "@/shared/errors";
@@ -52,9 +52,11 @@ app.get("/", async (c) => {
 	// D1 の上限（100）をアドレス 99 件以上で超えて 500 になっていた（精査 #32）。
 	// 相関サブクエリなら addresses.id は列参照であってバインド変数ではないので、
 	// バインド変数の数はページの行数によらず一定になる。
+	// 一覧で濃く出る会話の数をそのまま数える。メールを 1 通ずつ数えると、一覧に
+	// 太字の行が 1 つも無いのにバッジだけ数字が残り、何を開けば消えるのか分からなくなる。
 	const unreadCount = sql<number>`(
-		select count(*) from ${messages}
-		where ${and(eq(messages.addressId, addresses.id), eq(messages.isRead, false), ne(messages.status, "trash"))}
+		select count(*) from ${threads}
+		where ${and(eq(threads.addressId, addresses.id), gt(threads.unreadCount, 0))}
 	)`;
 
 	const pageRows = await db

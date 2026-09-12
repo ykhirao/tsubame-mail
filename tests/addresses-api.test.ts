@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import addressRoutes from "@/api/v1/addresses";
-import { addresses, auditLogs, domains, messages } from "@/db/schema";
+import { addresses, auditLogs, domains, messages, threads } from "@/db/schema";
 import { newId } from "@/lib/id";
 import type { Principal } from "@/shared/contracts/common";
 import { applyMigrations, callJson, getTestDb, mountRouter, ownerPrincipal } from "./domains-helpers";
@@ -51,7 +51,7 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 		expect(res.json.data.length).toBe(100);
 	});
 
-	it("相関サブクエリに変えても未読件数は正しい（既読・trash を数えない）", async () => {
+	it("バッジは未読の会話の数を返す（一覧で濃く出る行と一致する）", async () => {
 		const db = getTestDb();
 		const domainId = newId("domain");
 		await db.insert(domains).values({
@@ -68,29 +68,47 @@ describe("GET /addresses の一覧（#32: 未読集計の inArray がアドレ�
 			localPart: "inbox",
 			address: "inbox@unread.test",
 		});
-		const insertMessage = (isRead: boolean, status: "received" | "trash") =>
+		// 一覧が濃く出すのは会話単位なので、バッジも会話を数える。未読 2 通が
+		// 同じ会話に入っていれば、濃い行は 1 つ＝バッジも 1。
+		const insertThread = (unreadCount: number) => {
+			const id = newId("thread");
+			return db
+				.insert(threads)
+				.values({
+					id,
+					addressId,
+					subject: "s",
+					lastMessageAt: new Date(),
+					messageCount: 1,
+					unreadCount,
+				})
+				.then(() => id);
+		};
+		const threadWith2Unread = await insertThread(2);
+		const readThread = await insertThread(0);
+		const insertMessage = (threadId: string, isRead: boolean) =>
 			db.insert(messages).values({
 				id: newId("message"),
 				addressId,
+				threadId,
 				direction: "inbound",
-				status,
+				status: "received",
 				isRead,
 				fromAddr: "a@b.test",
 				toAddr: "inbox@unread.test",
 				subject: "s",
 				receivedAt: new Date(),
 			});
-		await insertMessage(false, "received");
-		await insertMessage(false, "received");
-		await insertMessage(true, "received");
-		await insertMessage(false, "trash");
+		await insertMessage(threadWith2Unread, false);
+		await insertMessage(threadWith2Unread, false);
+		await insertMessage(readThread, true);
 
 		const app = mountRouter("/", addressRoutes, ownerPrincipal);
 		const res = await callJson(app, "/?limit=200");
 
 		expect(res.status).toBe(200);
 		const row = res.json.data.find((a: { id: string }) => a.id === addressId);
-		expect(row.unreadCount).toBe(2);
+		expect(row.unreadCount).toBe(1);
 	});
 
 	describe("PATCH /:id/signature", () => {

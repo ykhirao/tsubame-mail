@@ -177,6 +177,9 @@ async function enqueueOutbound(
 		threadId,
 		hasAttachments: m.attachments.length > 0,
 		receivedAt: now,
+		// 自分が書いて送ったものなので既読で作る。既定の false のままだと、送っただけで
+		// 未読が増え、開いて消すこともできない（受信が 1 通も無いのにバッジが出る）。
+		isRead: true,
 	});
 	const jobInsert = db.insert(outboundJobs).values({ id: jobId, messageId, status: "queued" });
 
