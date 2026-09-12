@@ -5,6 +5,9 @@
 **まず `docs/spec/requirements.md` と `docs/spec/architecture.md` を読むこと。** 何を作るか（要件）と
 どう作るか（設計・ディレクトリ所有権・API 契約）はそこに書いてある。この 2 つが唯一の真実。
 
+**次に何をするかは `docs/spec/todo.md` に集めてある。** 残作業を足すときも消すときもそのファイルを直す。
+ドキュメントの地図は `docs/spec/index.md`。
+
 ## ライセンス
 
 MIT で公開している。
@@ -46,6 +49,8 @@ npm run deploy           # build + wrangler deploy
   レビュー観点は `.agents/skills/code-review/SKILL.md`、
   e2e の書き方と育て方は `.agents/skills/e2e/SKILL.md` にある。
 
+- **ドキュメントも負債になる。** 役目を終えた文書は「正はどこか」を 1 行で示してから消す（経緯は git に残る）。
+  同じことを 2 か所に書かない。docs 内のリンクは `.md` で書く（`npm run doc` が `.html` に置き換える）。
 - インデントはタブ。`@/*` は `src/*`。
 - **担当ディレクトリの外を編集しない**（`docs/spec/architecture.md` の「2. ディレクトリと所有権」）。
   他所に手を入れる必要が出たら、変更内容を報告して統合担当に任せる。
