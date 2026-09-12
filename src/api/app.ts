@@ -7,6 +7,7 @@ import { requireAuth, requireOwner } from "./middleware/auth";
 import type { AppEnv } from "./types";
 
 import authRoutes from "./v1/auth";
+import openapiRoutes from "./v1/openapi";
 import meRoutes from "./v1/me";
 import outboundRoutes from "./v1/outbound";
 import messageRoutes from "./v1/messages";
@@ -131,7 +132,9 @@ export function createApp() {
 	});
 
 	app.get("/api/health", (c) => c.json({ ok: true, app: c.env.APP_NAME }));
+	app.route("/api/v1", openapiRoutes);
 
+	// これ以降は認証あり
 	app.route("/api/v1/auth", authRoutes);
 
 	app.use("/api/v1/me/*", requireAuth);
