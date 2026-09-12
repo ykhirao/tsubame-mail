@@ -87,7 +87,7 @@ describe("FR-2 送信", () => {
 	}
 
 	scenario(
-		"FR-2",
+		["FR-2-1", "FR-2-4"],
 		"自分に割り当てられたアドレスから送信できる。差出人詐称は不可（サーバ側で検証）。",
 		async () => {
 			const seeded = await seedDomain(h, { addresses: ["ai", "hito"] });
@@ -164,7 +164,7 @@ describe("FR-2 送信", () => {
 		},
 	);
 
-	scenario("FR-2", "返信はスレッドを維持する（In-Reply-To / References を引き継ぐ）。", async () => {
+	scenario("FR-2-2", "返信はスレッドを維持する（In-Reply-To / References を引き継ぐ）。", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 
@@ -207,7 +207,7 @@ describe("FR-2 送信", () => {
 		expect(threadIds.size).toBe(1);
 	});
 
-	scenario("FR-2", "POST /messages の inReplyTo でも References と既存スレッドを引き継ぐ", async () => {
+	scenario("FR-2-2", "POST /messages の inReplyTo でも References と既存スレッドを引き継ぐ", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 
@@ -252,7 +252,7 @@ describe("FR-2 送信", () => {
 		expect(threadIds.size).toBe(1);
 	});
 
-	scenario("FR-2", "inReplyTo は送信元のアドレスのメールだけを参照し、他のアドレスの会話の References を写さない", async () => {
+	scenario(["FR-2-2", "FR-11-4"], "inReplyTo は送信元のアドレスのメールだけを参照し、他のアドレスの会話の References を写さない", async () => {
 		await seedDomain(h, { addresses: ["ai", "hr"] });
 		await deliverEmail(h, {
 			from: "boss@ext.example.jp",
@@ -281,7 +281,7 @@ describe("FR-2 送信", () => {
 		expect(sent[0]!.raw).not.toContain("hr-secret-1");
 	});
 
-	scenario("FR-2", "添付ファイルを送れる。", async () => {
+	scenario("FR-2-3", "添付ファイルを送れる。", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 
@@ -324,7 +324,7 @@ describe("FR-2 送信", () => {
 		expect(raw).toContain(base64);
 	});
 
-	scenario("FR-2", "送信は outbound_jobs で状態を持ち、失敗は再試行する。", async () => {
+	scenario("FR-2-4", "送信は outbound_jobs で状態を持ち、失敗は再試行する。", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 
@@ -389,7 +389,7 @@ describe("FR-2 送信", () => {
 		).toHaveLength(0);
 	});
 
-	scenario("FR-2", "600 バイトを超える件名は 400 で拒否し、黙って切らない（#22）", async () => {
+	scenario("FR-2-5", "600 バイトを超える件名は 400 で拒否し、黙って切らない（#22）", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const res = await owner.post("/api/v1/messages", {
 			from: "ai@mail.tsubame.test",
@@ -401,7 +401,7 @@ describe("FR-2 送信", () => {
 		expect(h.pending).toHaveLength(0);
 	});
 
-	scenario("FR-2", "返信の引用が本文上限を超えても、末尾を切って送り 400 にならない（#115）", async () => {
+	scenario("FR-2-2", "返信の引用が本文上限を超えても、末尾を切って送り 400 にならない（#115）", async () => {
 		const { getDb } = await import("@/db/client");
 		const { messages, threads } = await import("@/db/schema");
 		const { newId } = await import("@/lib/id");

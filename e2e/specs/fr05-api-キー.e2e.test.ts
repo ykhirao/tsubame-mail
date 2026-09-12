@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
 import {
+	OWNER,
 	createClient,
 	deliverEmail,
 	drainQueues,
@@ -33,19 +34,48 @@ describe("FR-5 API キー", () => {
 		scopes: string[];
 		addressIds?: string[] | null;
 		userId?: string;
-	}): Promise<{ id: string; token: string }> {
+		expiresAt?: number;
+	}): Promise<{ id: string; token: string; parentKeyId: string | null }> {
 		const res = await owner.post("/api/v1/admin/api-keys", {
 			userId: opts.userId ?? ownerId,
 			name: "テストキー",
 			scopes: opts.scopes,
 			addressIds: opts.addressIds ?? null,
+			expiresAt: opts.expiresAt,
 		});
 		expect(res.status).toBe(201);
-		return { id: res.body.id, token: res.body.token };
+		return {
+			id: res.body.id,
+			token: res.body.token,
+			parentKeyId: res.body.parentKeyId,
+		};
+	}
+
+	async function createUser(role: "owner" | "member", email: string): Promise<string> {
+		const res = await owner.post("/api/v1/admin/users", {
+			email,
+			name: role === "owner" ? "別オーナー" : "メンバー",
+			role,
+			password: "user-password-1234",
+		});
+		expect(res.status).toBe(201);
+		return res.body.id as string;
+	}
+
+	async function issueRestrictedKey(): Promise<{ id: string; token: string; expiresAt: number }> {
+		const res = await owner.post("/api/v1/admin/api-keys", {
+			userId: ownerId,
+			name: "絞った admin キー",
+			scopes: ["read", "admin"],
+			addressIds: [ai],
+			expiresAt: Math.floor(Date.now() / 1000) + 3600,
+		});
+		expect(res.status).toBe(201);
+		return { id: res.body.id, token: res.body.token, expiresAt: res.body.expiresAt };
 	}
 
 	scenario(
-		"FR-5",
+		"FR-5-1",
 		"オーナー自身のキーでも addressIds で絞れば他のアドレスは見えない",
 		async () => {
 			await deliverEmail(h, {
@@ -77,7 +107,7 @@ describe("FR-5 API キー", () => {
 		},
 	);
 
-	scenario("FR-5", "read だけのキーで送信すると 403、管理 API も 403", async () => {
+	scenario("FR-5-1", "read だけのキーで送信すると 403、管理 API も 403", async () => {
 		const { token } = await issueKey({ scopes: ["read"] });
 		owner.useKey(token);
 
@@ -93,7 +123,7 @@ describe("FR-5 API キー", () => {
 		expect(admin.status).toBe(403);
 	});
 
-	scenario("FR-5", "send だけのキーでは受信メールを一切読めないが、送信はできる", async () => {
+	scenario("FR-5-1", "send だけのキーでは受信メールを一切読めないが、送信はできる", async () => {
 		await deliverEmail(h, {
 			from: "a@ext.jp",
 			to: "ai@mail.tsubame.test",
@@ -132,7 +162,7 @@ describe("FR-5 API キー", () => {
 		expect(send.status).toBe(202);
 	});
 
-	scenario("FR-5", "read だけのキーでは既読は付けられるが、ゴミ箱には移せない", async () => {
+	scenario("FR-5-1", "read だけのキーでは既読は付けられるが、ゴミ箱には移せない", async () => {
 		await deliverEmail(h, {
 			from: "a@ext.jp",
 			to: "ai@mail.tsubame.test",
@@ -157,7 +187,7 @@ describe("FR-5 API キー", () => {
 		expect(after.body.status).toBe("received");
 	});
 
-	scenario("FR-5", "失効したキーは 401 になる", async () => {
+	scenario("FR-5-2", "失効したキーは 401 になる", async () => {
 		const { id, token } = await issueKey({ scopes: ["read"] });
 
 		owner.useKey(token);
@@ -174,7 +204,7 @@ describe("FR-5 API キー", () => {
 		expect(after.status).toBe(401);
 	});
 
-	scenario("FR-5", "発行時だけ平文が返り、一覧・詳細には出ない", async () => {
+	scenario("FR-5-2", "発行時だけ平文が返り、一覧・詳細には出ない", async () => {
 		const { token } = await issueKey({ scopes: ["read", "send"] });
 
 		expect(token).toBeTruthy();
@@ -197,7 +227,7 @@ describe("FR-5 API キー", () => {
 		expect(me.body.apiKeyId).toBeTruthy();
 	});
 
-	scenario("FR-5", "失効したキーと同じ設定で再発行できる", async () => {
+	scenario("FR-5-3", "失効したキーと同じ設定で再発行できる", async () => {
 		const body = {
 			userId: ownerId,
 			name: "再発行テスト",
@@ -224,5 +254,233 @@ describe("FR-5 API キー", () => {
 		const newClient = createClient(h);
 		newClient.useKey(second.body.token as string);
 		expect((await newClient.get("/api/v1/messages?limit=10")).status).toBe(200);
+	});
+
+	scenario("FR-5-2", "期限を過ぎたキーは 401 になる", async () => {
+		const { token } = await issueKey({
+			scopes: ["read"],
+			expiresAt: Math.floor(Date.now() / 1000) - 60,
+		});
+		owner.useKey(token);
+		expect((await owner.get("/api/v1/me")).status).toBe(401);
+	});
+
+	scenario("FR-5-2", "キーで叩くと最終使用時刻が記録される", async () => {
+		const { id, token } = await issueKey({ scopes: ["read"] });
+
+		owner.useKey(token);
+		expect((await owner.get("/api/v1/me")).status).toBe(200);
+
+		owner.useKey(null);
+		const detail = await owner.get(`/api/v1/admin/api-keys/${id}`);
+		expect(detail.status).toBe(200);
+		expect(detail.body.lastUsedAt).not.toBeNull();
+	});
+
+	scenario("FR-5-4", "絞ったキーから自分より広いスコープのキーは作れない（403）", async () => {
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const res = await owner.post("/api/v1/me/api-keys", {
+			name: "広いキー",
+			scopes: ["read", "send"],
+		});
+		expect(res.status).toBe(403);
+	});
+
+	scenario("FR-5-4", "絞ったキーから範囲外アドレスのキーは作れない（403）", async () => {
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const res = await owner.post("/api/v1/me/api-keys", {
+			name: "範囲外",
+			scopes: ["read"],
+			addressIds: [hito],
+		});
+		expect(res.status).toBe(403);
+	});
+
+	scenario("FR-5-4", "対象アドレスを省くと自分の範囲に自動で狭められる", async () => {
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const res = await owner.post("/api/v1/me/api-keys", {
+			name: "アドレス省略",
+			scopes: ["read"],
+		});
+		expect(res.status).toBe(201);
+		expect(res.body.addressIds).toEqual([ai]);
+	});
+
+	scenario("FR-5-4", "期限は親キーの期限を超えられず、自分の期限に丸められる", async () => {
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const res = await owner.post("/api/v1/me/api-keys", {
+			name: "長い期限",
+			scopes: ["read"],
+			expiresAt: Math.floor(Date.now() / 1000) + 2 * 24 * 3600,
+		});
+		expect(res.status).toBe(201);
+		expect(res.body.expiresAt).toBe(restricted.expiresAt);
+	});
+
+	scenario("FR-5-4", "絞った admin キーでは他利用者向けに広いキーは作れない（403）", async () => {
+		const memberId = await createUser("member", "member-4@example.test");
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const res = await owner.post("/api/v1/admin/api-keys", {
+			userId: memberId,
+			name: "メンバー用",
+			scopes: ["send"],
+		});
+		expect(res.status).toBe(403);
+	});
+
+	scenario("FR-5-4", "絞った admin キーでは他の利用者のキーを失効できない（403）", async () => {
+		const memberId = await createUser("member", "member-5@example.test");
+		const victim = await issueKey({ userId: memberId, scopes: ["read"] });
+
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+		const del = await owner.del(`/api/v1/admin/api-keys/${victim.id}`);
+		expect(del.status).toBe(403);
+
+		const victimClient = createClient(h);
+		victimClient.useKey(victim.token);
+		expect((await victimClient.get("/api/v1/me")).status).toBe(200);
+	});
+
+	scenario("FR-5-4", "絞った admin キーでは管理の変更（ルール・アドレス・Webhook）が 403", async () => {
+		const restricted = await issueRestrictedKey();
+		owner.useKey(restricted.token);
+
+		const rules = await owner.post("/api/v1/admin/rules", {
+			scope: "domain",
+			name: "作れない",
+			action: "deliver",
+		});
+		expect(rules.status).toBe(403);
+
+		const addr = await owner.patch(`/api/v1/admin/addresses/${ai}`, { name: "変えられない" });
+		expect(addr.status).toBe(403);
+
+		const webhook = await owner.post("/api/v1/webhooks", {
+			name: "作れない",
+			url: "https://example.net/hook",
+			events: ["message.received"],
+		});
+		expect(webhook.status).toBe(403);
+	});
+
+	scenario("FR-5-5", "キーで発行した子・孫は親に連なり、親の失効でまとめて失効する", async () => {
+		const root = await issueKey({ scopes: ["read", "admin"] });
+
+		const childClient = createClient(h);
+		childClient.useKey(root.token);
+		const child = await childClient.post("/api/v1/me/api-keys", {
+			name: "子",
+			scopes: ["read", "admin"],
+		});
+		expect(child.status).toBe(201);
+		expect(child.body.parentKeyId).toBe(root.id);
+
+		const grandchildClient = createClient(h);
+		grandchildClient.useKey(child.body.token as string);
+		const grandchild = await grandchildClient.post("/api/v1/me/api-keys", {
+			name: "孫",
+			scopes: ["read", "admin"],
+		});
+		expect(grandchild.status).toBe(201);
+		expect(grandchild.body.parentKeyId).toBe(child.body.id);
+
+		owner.useKey(null);
+		const revoke = await owner.del(`/api/v1/admin/api-keys/${root.id}`);
+		expect(revoke.status).toBe(200);
+
+		expect((await childClient.get("/api/v1/me")).status).toBe(401);
+		expect((await grandchildClient.get("/api/v1/me")).status).toBe(401);
+
+		const audit = await owner.get("/api/v1/admin/audit-logs?targetType=api_key&targetId=" + root.id);
+		expect(audit.status).toBe(200);
+		const revokeEntry = audit.body.data.find((e: any) => e.action === "api_key.revoke");
+		expect(revokeEntry.meta.descendants.sort()).toEqual([child.body.id, grandchild.body.id].sort());
+	});
+
+	scenario("FR-5-5", "持ち主のパスワード変更で、そのキーから他人向けに発行した子も失効する", async () => {
+		const memberId = await createUser("member", "member-6@example.test");
+		const root = await issueKey({ scopes: ["read", "admin"] });
+
+		const rootClient = createClient(h);
+		rootClient.useKey(root.token);
+		const memberKey = await rootClient.post("/api/v1/admin/api-keys", {
+			userId: memberId,
+			name: "メンバー用",
+			scopes: ["read"],
+		});
+		expect(memberKey.status).toBe(201);
+
+		const pwClient = createClient(h);
+		pwClient.useKey(memberKey.body.token as string);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(200);
+
+		owner.useKey(null);
+		const change = await owner.patch("/api/v1/me", {
+			currentPassword: OWNER.password,
+			newPassword: "brand-new-9876",
+		});
+		expect(change.status).toBe(200);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(401);
+	});
+
+	scenario("FR-5-5", "持ち主の無効化で、そのキーから他人向けに発行した子が失効する", async () => {
+		const secondOwnerId = await createUser("owner", "owner-2@example.test");
+		const memberId = await createUser("member", "member-7@example.test");
+		const root = await issueKey({ userId: secondOwnerId, scopes: ["read", "admin"] });
+
+		const rootClient = createClient(h);
+		rootClient.useKey(root.token);
+		const memberKey = await rootClient.post("/api/v1/admin/api-keys", {
+			userId: memberId,
+			name: "メンバー用",
+			scopes: ["read"],
+		});
+		expect(memberKey.status).toBe(201);
+
+		const pwClient = createClient(h);
+		pwClient.useKey(memberKey.body.token as string);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(200);
+
+		owner.useKey(null);
+		const disable = await owner.patch(`/api/v1/admin/users/${secondOwnerId}`, {
+			status: "disabled",
+		});
+		expect(disable.status).toBe(200);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(401);
+	});
+
+	scenario("FR-5-5", "持ち主の削除で、そのキーから他人向けに発行した子が失効する", async () => {
+		const secondOwnerId = await createUser("owner", "owner-3@example.test");
+		const memberId = await createUser("member", "member-8@example.test");
+		const root = await issueKey({ userId: secondOwnerId, scopes: ["read", "admin"] });
+
+		const rootClient = createClient(h);
+		rootClient.useKey(root.token);
+		const memberKey = await rootClient.post("/api/v1/admin/api-keys", {
+			userId: memberId,
+			name: "メンバー用",
+			scopes: ["read"],
+		});
+		expect(memberKey.status).toBe(201);
+
+		const pwClient = createClient(h);
+		pwClient.useKey(memberKey.body.token as string);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(200);
+
+		owner.useKey(null);
+		const remove = await owner.del(`/api/v1/admin/users/${secondOwnerId}`);
+		expect(remove.status).toBe(200);
+		expect((await pwClient.get("/api/v1/me")).status).toBe(401);
 	});
 });

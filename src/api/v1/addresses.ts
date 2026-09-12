@@ -142,7 +142,6 @@ app.patch("/:id/signature", async (c) => {
 			address: addr.address,
 			before,
 			after: next?.length ?? 0,
-			apiKeyId: principal.apiKeyId ?? null,
 		},
 		ip: clientIp(c),
 	});

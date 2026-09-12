@@ -63,7 +63,7 @@ describe("FR-11 共有メールボックス", () => {
 		await drainQueues(h);
 	});
 
-	scenario("FR-11", "同じアドレスを 2 人に割り当てると両方から同じメールが見える", async () => {
+	scenario("FR-11-1", "同じアドレスを 2 人に割り当てると両方から同じメールが見える", async () => {
 		const a = await createMember("a@tsubame.test", [{ addressId: sharedId, level: "read" }]);
 		const b = await createMember("b@tsubame.test", [{ addressId: sharedId, level: "write" }]);
 
@@ -75,7 +75,7 @@ describe("FR-11 共有メールボックス", () => {
 		}
 	});
 
-	scenario("FR-11", "read だけの人は共有アドレスから送信できない", async () => {
+	scenario("FR-11-2", "read だけの人は共有アドレスから送信できない", async () => {
 		const a = await createMember("read-only@tsubame.test", [
 			{ addressId: sharedId, level: "read" },
 		]);
@@ -100,7 +100,7 @@ describe("FR-11 共有メールボックス", () => {
 		expect(allowed.status).toBe(202);
 	});
 
-	scenario("FR-11", "割り当てられていない人には一切見えない", async () => {
+	scenario("FR-11-4", "割り当てられていない人には一切見えない", async () => {
 		const outsider = await createMember("outsider@tsubame.test", [
 			{ addressId: otherId, level: "read" },
 		]);
@@ -126,7 +126,7 @@ describe("FR-11 共有メールボックス", () => {
 		expect(addresses.body.data.map((a: { id: string }) => a.id)).toEqual([otherId]);
 	});
 
-	scenario("FR-11", "権限を 1 件も持たない人には何も見えない", async () => {
+	scenario("FR-11-4", "権限を 1 件も持たない人には何も見えない", async () => {
 		const nobody = await createMember("nobody@tsubame.test", []);
 
 		// 空の権限は「制限なし」ではなく「1 件も見えない」。
@@ -143,7 +143,7 @@ describe("FR-11 共有メールボックス", () => {
 		expect((await nobody.client.get(`/api/v1/threads/${anyMessage.threadId}`)).status).toBe(404);
 	});
 
-	scenario("FR-11", "オーナーはあるアドレスを誰が見られるかを一覧できる（owner と grants）", async () => {
+	scenario("FR-11-3", "オーナーはあるアドレスを誰が見られるかを一覧できる（owner と grants）", async () => {
 		const a = await createMember("viewer-a@tsubame.test", [
 			{ addressId: sharedId, level: "read" },
 		]);
@@ -166,7 +166,7 @@ describe("FR-11 共有メールボックス", () => {
 		]);
 	});
 
-	scenario("FR-11", "オーナーは誰がそのアドレスを見られるか分かる", async () => {
+	scenario("FR-11-3", "オーナーは誰がそのアドレスを見られるか分かる", async () => {
 		const a = await createMember("x@tsubame.test", [{ addressId: sharedId, level: "read" }]);
 		const b = await createMember("y@tsubame.test", [{ addressId: sharedId, level: "write" }]);
 

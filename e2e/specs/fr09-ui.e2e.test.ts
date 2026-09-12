@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect } from "vitest";
+import { safeLinkHref } from "@/ui/components/MessageHtml";
 import { scenario } from "../registry";
 import {
 	createClient,
@@ -11,6 +12,15 @@ import {
 	type Client,
 	type Harness,
 } from "../harness";
+
+// new タブで開く振る舞いの根拠をソースの形で固定する（fr15 と同じ流儀）。
+const messageHtmlText = Object.values(
+	import.meta.glob("../../src/ui/components/MessageHtml.tsx", {
+		query: "?raw",
+		import: "default",
+		eager: true,
+	}),
+)[0] as string;
 
 describe("FR-9 UI", () => {
 	let h: Harness;
@@ -66,7 +76,7 @@ describe("FR-9 UI", () => {
 		}
 	}
 
-	scenario("FR-9", "UI が叩く静的パスがすべて API に存在する", async () => {
+	scenario("FR-9-2", "UI が叩く静的パスがすべて API に存在する", async () => {
 		const paths = collectUiPaths();
 		expect(paths.length).toBeGreaterThan(0);
 
@@ -76,7 +86,7 @@ describe("FR-9 UI", () => {
 		}
 	});
 
-	scenario("FR-9", "UI が叩く動的パス（:id 付き）がすべて API に存在する", async () => {
+	scenario("FR-9-2", "UI が叩く動的パス（:id 付き）がすべて API に存在する", async () => {
 		const routes: { method: string; path: string; body?: unknown }[] = [
 			{ method: "POST", path: "/api/v1/auth/login" },
 			{ method: "POST", path: "/api/v1/auth/logout" },
@@ -130,7 +140,7 @@ describe("FR-9 UI", () => {
 		}
 	});
 
-	scenario("FR-9", "送信者が書いた中身を API から開いても、何も読み込ませず埋め込ませない", async () => {
+	scenario("FR-10-1", "送信者が書いた中身を API から開いても、何も読み込ませず埋め込ませない", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const raw = mime({
 			from: "someone@ext.example.jp",
@@ -154,7 +164,7 @@ describe("FR-9 UI", () => {
 		expect(denied.headers.get("content-security-policy")).toContain("default-src 'none'");
 	});
 
-	scenario("FR-9", "作成画面が使う差出人の一覧が空にならない", async () => {
+	scenario("FR-9-2", "作成画面が使う差出人の一覧が空にならない", async () => {
 		// /v1/me と /v1/addresses が同じ概念を別の形で返していて、
 		// 作成画面の差出人が黙って空になっていた。形が揃っていることを固定する。
 		const seeded = await seedDomain(h, { addresses: ["sender"] });
@@ -179,7 +189,7 @@ describe("FR-9 UI", () => {
 		}
 	});
 
-	scenario("FR-9", "書き込みできるメールボックスの署名を自分で変えられ、送信画面が読む情報に反映される", async () => {
+	scenario("FR-9-4", "書き込みできるメールボックスの署名を自分で変えられ、送信画面が読む情報に反映される", async () => {
 		const seeded = await seedDomain(h, { addresses: ["info", "hisho"] });
 		const infoId = seeded.addressIds.info!;
 		const hishoId = seeded.addressIds.hisho!;
@@ -227,4 +237,63 @@ describe("FR-9 UI", () => {
 		});
 		expect(denied.status).toBe(403);
 	});
+
+	scenario("FR-9-5", "本文のリンクは http(s) と mailto と # だけを通す", async () => {
+		expect(safeLinkHref("https://example.com/a")).toBe("https://example.com/a");
+		expect(safeLinkHref("http://example.com/a")).toBe("http://example.com/a");
+		expect(safeLinkHref("mailto:info@example.com")).toBe("mailto:info@example.com");
+		expect(safeLinkHref("#section")).toBe("#section");
+		expect(safeLinkHref("javascript:alert(1)")).toBeNull();
+		expect(safeLinkHref("data:text/html,<b>hi</b>")).toBeNull();
+		expect(safeLinkHref("ftp://example.com")).toBeNull();
+		expect(safeLinkHref(null)).toBeNull();
+	});
+
+	scenario("FR-9-5", "本文のリンクは新しいタブで開き、rel=noopener noreferrer を付ける", async () => {
+		expect(messageHtmlText).toContain('setAttribute("target", "_blank")');
+		expect(messageHtmlText).toContain('"noopener noreferrer"');
+	});
+
+	scenario("FR-9-4", "API キーでは署名を変えられない（403）", async () => {
+		const seeded = await seedDomain(h, { addresses: ["info"] });
+		const infoId = seeded.addressIds.info!;
+		const me = await owner.get("/api/v1/me");
+		// フル権限の admin キーでも、署名は画面のセッションからしか変えられない。
+		const key = await owner.post("/api/v1/admin/api-keys", {
+			userId: me.body.id as string,
+			name: "署名を変えたいキー",
+			scopes: ["admin"],
+			addressIds: null,
+		});
+		expect(key.status).toBe(201);
+
+		owner.useKey(key.body.token as string);
+		const res = await owner.patch(`/api/v1/addresses/${infoId}/signature`, {
+			signature: "キーから書いた署名",
+		});
+		expect(res.status).toBe(403);
+		owner.useKey(null);
+	});
+
+	scenario(
+		["FR-9-4", "FR-18-3"],
+		"署名の変更は監査ログに残り、署名の本文は残らない",
+		async () => {
+			const seeded = await seedDomain(h, { addresses: ["info"] });
+			const infoId = seeded.addressIds.info!;
+			const signature = "よろしくお願いします";
+			const res = await owner.patch(`/api/v1/addresses/${infoId}/signature`, { signature });
+			expect(res.status).toBe(200);
+
+			const log = await owner.get(`/api/v1/admin/audit-logs?targetType=address&targetId=${infoId}`);
+			expect(log.status).toBe(200);
+			const entry = (log.body.data as { action: string; meta?: Record<string, unknown> }[]).find(
+				(e) => e.action === "address.signature",
+			);
+			expect(entry).toBeTruthy();
+			expect(entry!.meta?.after).toBe(signature.length);
+			// 秘密は残さない。署名の本文が JSON のどこにも出ない。
+			expect(JSON.stringify(log.body)).not.toContain(signature);
+		},
+	);
 });

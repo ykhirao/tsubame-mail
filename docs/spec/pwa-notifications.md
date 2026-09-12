@@ -91,7 +91,7 @@ FR-16（プッシュ通知）に移した。ここには草案の記録を残さ
   受信処理の再試行を起こさないため。キューは既存の `tsubame-outbound` に種類を足す
   （`webhook.retry` と同じ扱い）。新しいキューは作らない。
 - おやすみ時間の「終わりにまとめる」は 24 時間を超えうる（金曜夜〜月曜朝）。
-  キューの遅延送信（上限 24 時間）では届かないので cron で拾う。`scheduled` ハンドラを新設する。
+  キューの遅延送信（上限 24 時間）では届かないので cron（`scheduled` ハンドラ、5 分ごと）で拾う。
 - **抑制は全部サーバで決める**。プッシュを受けた Service Worker は必ず通知を出さなければならない
   （出さないと iOS は数回で許可を取り消し、Chrome は「バックグラウンドで更新されました」を勝手に出す）。
   「他の端末で使用中なら送らない」「まとめる」を端末側で握りつぶす設計にはできない。
@@ -108,9 +108,11 @@ FR-16（プッシュ通知）に移した。ここには草案の記録を残さ
   - Apple は JWT の作り直しを 1 時間に 1 回までにするよう求めている。isolate ごとに作ると超えうるので、
     VAPID JWT の `exp` は 12 時間とし、`Authorization` ヘッダを origin ごとに D1 の `settings` へ
     1 時間の有効期限で置いて使い回す。
-- 応答の扱い: `201` 成功 / `404`・`410` 購読を削除 / `413` 本文を縮めて再送 /
-  `429`・`5xx` 指数バックオフで再試行（Webhook と同じ段数）。
-- それ以外の応答・ネットワーク断での失敗が **3 回** 続いた端末は `enabled=false` にする
+- 応答の扱い（`webpush.ts` `sendWebPush` → `notify/deliver.ts`）: `201` 成功 / `404`・`410` 購読を削除 / `413` 本文を縮めて再送 /
+  `429`・`5xx`・タイムアウト（10 秒）・ネットワーク断は一時失敗。一時失敗した端末の id を `notification_log.retry_device_ids` に残し、
+  キューの再試行（30 秒・5 分・30 分、最大 3 回。`consumer.ts` `NOTIFY_RETRY_DELAYS`）でその端末にだけ送り直す。
+  成功した端末には二度送らない。上限を超えたら諦める（#131）。
+- それ以外の応答（他の 4xx など）が **3 回** 続いた端末は `enabled=false` にする
   （端末 1 台の恒久失敗がバッチ全体の再試行を握らないようにする）。
 - ヘッダ: `TTL` は 1 日、`Urgency` は「必ず通知」で `high`、通常 `normal`、音なしで `low`。
   `Topic` に会話 ID（32 文字以内）を入れ、端末に届く前の古い通知を置き換える。
@@ -156,7 +158,8 @@ FR-16（プッシュ通知）に移した。ここには草案の記録を残さ
   ダークは OS に従わない既存方針のまま。
 - Service Worker は `src/ui/sw.ts` を Vite の別エントリとして `/sw.js`（ハッシュなし）に出す。
   `not_found_handling: single-page-application` のため、**`sw.js` が無いと `index.html` が返って登録が壊れる**。
-  ビルドの検査に「`dist/client/sw.js` がある」を足す。
+  `vite.config.ts` が「`dist/client/sw.js` がある」「`import` / `export` が残っていない」をビルドで検査する
+  （SW はクラシックスクリプト。画面と共有するモジュールを import すると登録ごと失敗する）。
 - キャッシュはアプリの殻（`/` と `/assets/` と `/icons/`）だけ。`/api/*` は常にネットワーク。
 - `sw.js` と `manifest.webmanifest` は `Cache-Control: no-cache` で配る。
 
@@ -200,7 +203,7 @@ FR-16（プッシュ通知）に移した。ここには草案の記録を残さ
 | `notification_rules` | 通知ルール | `user_id`, `name`, `matcher`(JSON), `action: always \| normal \| silent \| never`, `priority`, `enabled` |
 | `thread_notification_prefs` | 会話ごと | `(user_id, thread_id)` 主キー, `mode: follow \| mute` |
 | `notification_digests` | 後でまとめる分 | `user_id`, `due_at`, `message_ids[]` |
-| `notification_log` | 判定の履歴。通知欄の中身 | `user_id`, `message_id`, `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`（同じ一時停止・おやすみの束）, `device_count`, `created_at`。30 日で消す |
+| `notification_log` | 判定の履歴。通知欄の中身 | `user_id`, `message_id`, `kind: received \| send_failed`, `decision: sent \| held \| digest \| dropped`, `reason`, `hold_group`（同じ一時停止・おやすみの束）, `device_count`, `retry_device_ids[]`（一時失敗で送り直す端末）, `created_at`。30 日で消す |
 
 - 設定の行が無い利用者は既定値で動く。**設定を作らないと通知が来ない、にはしない**。
 - 「自分たちが送った会話への返信」は、スレッドに `direction=outbound` があるかで判定する。
@@ -233,7 +236,8 @@ FR-16（プッシュ通知）に移した。ここには草案の記録を残さ
 | PATCH/DELETE | `/v1/me/devices/{id}` | 名前・有効・受け取るメールボックス / 削除 |
 | POST | `/v1/me/devices/{id}/test` | テスト通知 |
 | POST | `/v1/me/devices/{id}/seen` | 使用中の合図（「他の端末で使用中なら送らない」用。表示中だけ 60 秒ごと） |
-| GET | `/v1/push/key` | VAPID 公開鍵 |
+| GET | `/v1/push/key` | VAPID 公開鍵（未設定なら `null`） |
+| GET | `/v1/push/badge` | 未読件数。画面を開くたびにアプリのバッジと、読んだ会話の通知を付け直す |
 
 端末登録の `endpoint` はブラウザのプッシュサービス（FCM / Mozilla / Apple / Windows）のホストだけを通す
 （`isPushServiceEndpoint`。任意の URL を受けると踏み台になる）。上限: 端末は利用者 **10 台**、通知ルールは **50 件**。

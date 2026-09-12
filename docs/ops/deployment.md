@@ -170,8 +170,11 @@ npx wrangler secret delete INTERNAL_SECRET
 
 **API キー**。漏洩時は管理画面・`/api/v1/me/api-keys` で該当キーを**失効（revoke）** する。
 キーは `revokedAt` / `expiresAt` を毎リクエスト検査するため、失効は即有効になる。
-パスワードが流出した場合は `PATCH /api/v1/me` でパスワードを変える。その利用者の全セッションが落ち、
-未失効の API キーもすべて失効する（精査 #99）。キーを使う連携はキーを発行し直して入れ替える。
+そのキーから発行されたキー（孫以降も）も一緒に失効する（`api_keys.parent_key_id`、精査 #25）。
+同じ設定で使い続けるなら「再発行」（旧キーを失効させて同じ設定で作り直す。トークンは変わる）。
+パスワードが流出した場合は `PATCH /api/v1/me` でパスワードを変える。その利用者の全セッションと購読端末が落ち、
+未失効の API キーと、そこから他の利用者向けに発行されたキーもすべて失効する（精査 #99 / #142）。
+キーを使う連携はキーを発行し直して入れ替える。
 
 ---
 
@@ -255,6 +258,12 @@ D1_DATABASE_ID="<UUID>" npx wrangler d1 migrations apply DB --config wrangler.lo
   `npx wrangler d1 execute DB --remote --config wrangler.local.jsonc --command "INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')"`
   を実行して索引を構築してからデプロイを続ける。
 - 0004 は既存 SQL として書き換えない（スキーマの二重管理を避けるため）。
+
+### 5.2 `0007_add_api_key_parent`
+
+`api_keys` に `parent_key_id` と索引を足すだけ（`ALTER TABLE`）。行数に関係なく一瞬で終わり、手作業は無い。
+適用より前に API キーから発行されたキーは親を持たないので、親の失効では連鎖しない（本人の削除・パスワード変更では従来どおり失効する）。
+連鎖させたいキーは失効させて発行し直す。
 
 ---
 

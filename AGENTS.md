@@ -24,8 +24,8 @@ npm run dev:worker       # wrangler dev（API・email・queue）
 npm run typecheck        # tsc --noEmit。CI で必須
 npm run test             # 単体 + e2e（@cloudflare/vitest-pool-workers）
 npm run test:e2e         # e2e だけ
-npm run spec:coverage    # 要件と e2e の対応。未カバーがあれば失敗
-npm run e2e:new FR-5     # 要件から e2e の雛形を起こす
+npm run spec:coverage    # 要件の箇条書き（FR-5-3）と e2e の対応。未カバーの箇条書きがあれば失敗
+npm run e2e:new FR-5     # 要件から e2e の雛形を起こす（FR-5-3 で箇条書き 1 つ分）
 npm run verify           # 型検査 + テスト + 対応表 + ビルド
 npm run doc              # 仕様書を組み立てて http://localhost:4173 で配る
 npm run doc:build        # docs/build/ に出力（そのまま配れる）

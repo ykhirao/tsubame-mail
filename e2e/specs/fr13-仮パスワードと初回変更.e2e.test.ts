@@ -50,7 +50,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		return { id: created.body.id, temporaryPassword: created.body.temporaryPassword };
 	}
 
-	scenario("FR-13", "パスワードを指定しないメンバー作成で仮パスワードが発行され、それでログインできる", async () => {
+	scenario("FR-13-1", "パスワードを指定しないメンバー作成で仮パスワードが発行され、それでログインできる", async () => {
 		const { temporaryPassword } = await createTemporaryMember();
 
 		expect(temporaryPassword).toHaveLength(20);
@@ -64,7 +64,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		expect(login.body.role).toBe("member");
 	});
 
-	scenario("FR-13", "仮パスワードは作成の応答で一度だけ返り、一覧・詳細に平文は残らない", async () => {
+	scenario("FR-13-2", "仮パスワードは作成の応答で一度だけ返り、一覧・詳細に平文は残らない", async () => {
 		const { id, temporaryPassword } = await createTemporaryMember();
 
 		const createdDetail = await owner.get(`/api/v1/admin/users/${id}`);
@@ -82,7 +82,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		expect(JSON.stringify(createdDetail.body)).not.toContain(temporaryPassword);
 	});
 
-	scenario("FR-13", "仮パスワードで入った本人は、変更するまで他の画面に進めない", async () => {
+	scenario("FR-13-3", "仮パスワードで入った本人は、変更するまで他の画面に進めない", async () => {
 		const { temporaryPassword } = await createTemporaryMember();
 
 		const member = createClient(h);
@@ -114,7 +114,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		expect(me2.body.mustChangePassword).toBe(false);
 	});
 
-	scenario("FR-13", "パスワードを変えると、その利用者の全セッションを落とす", async () => {
+	scenario("FR-13-4", "パスワードを変えると、その利用者の全セッションを落とす", async () => {
 		const created = await owner.post("/api/v1/admin/users", {
 			email: EXISTING_EMAIL,
 			name: "メンバー",
@@ -156,7 +156,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		).toBe(200);
 	});
 
-	scenario("FR-13", "ユーザー作成でパスワードを空にでき、仮パスワードを 1 度だけ表示する", () => {
+	scenario(["FR-13-1", "FR-13-2"], "ユーザー作成でパスワードを空にでき、仮パスワードを 1 度だけ表示する", () => {
 		// 空なら仮パスワードを発行する送信に変わる。
 		expect(usersPageText).toContain('password === "" || password.length >= 12');
 		expect(usersPageText).toContain('password: role === "agent" || password === "" ? undefined : password');
@@ -166,7 +166,7 @@ describe("FR-13 仮パスワードと初回変更", () => {
 		expect(usersPageText).toContain("仮パスワードはこれきりしか表示されません");
 	});
 
-	scenario("FR-13", "agent はパスワードを持たず、仮パスワードも発行されない", async () => {
+	scenario("FR-13-1", "agent はパスワードを持たず、仮パスワードも発行されない", async () => {
 		const created = await owner.post("/api/v1/admin/users", {
 			email: "agent@tsubame.test",
 			name: "エージェント",
@@ -182,5 +182,31 @@ describe("FR-13 仮パスワードと初回変更", () => {
 			password: "any-password-123",
 		});
 		expect(login.status).toBe(401);
+	});
+
+	scenario("FR-13-4", "パスワードを変えると発行済みの API キーも全失効し、そのキーで 401 になる", async () => {
+		const created = await owner.post("/api/v1/admin/users", {
+			email: EXISTING_EMAIL,
+			name: "メンバー",
+			role: "member",
+			password: EXISTING_PASSWORD,
+		});
+		expect(created.status).toBe(201);
+		const member = createClient(h);
+		await member.post("/api/v1/auth/login", { email: EXISTING_EMAIL, password: EXISTING_PASSWORD });
+
+		const key = await member.post("/api/v1/me/api-keys", { name: "失効するはず", scopes: ["read"] });
+		expect(key.status).toBe(201);
+		const keyClient = createClient(h);
+		keyClient.useKey(key.body.token as string);
+		expect((await keyClient.get("/api/v1/me")).status).toBe(200);
+
+		const change = await member.patch("/api/v1/me", {
+			currentPassword: EXISTING_PASSWORD,
+			newPassword: "member-new-password-123",
+		});
+		expect(change.status).toBe(200);
+
+		expect((await keyClient.get("/api/v1/me")).status).toBe(401);
 	});
 });

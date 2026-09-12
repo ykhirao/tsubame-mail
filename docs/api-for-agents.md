@@ -13,6 +13,7 @@ curl -H "Authorization: Bearer tsb_..." https://<host>/api/v1/addresses
 
 キーには**スコープ**（`read` / `send` / `admin`）と**対象アドレス**が設定されている。
 キーの権限は所有ユーザーの権限との積集合で効くので、キーが持ち主を超えることはない。
+`GET /v1/me` で、今のキーのスコープ・対象アドレス（`addressIds`。`"all"` なら無制限）・持ち主が分かる。
 
 まず疎通を確認する。認証不要で叩ける。
 
@@ -119,8 +120,12 @@ curl -X POST https://<host>/api/v1/messages \
 
 **送信は非同期。`202 queued` は受理であって送信完了ではない。**
 結果は `GET /v1/messages/{id}` の `status` が `sent` / `failed` に変わるのを見る。
+`sent` は Cloudflare が受け付けたという意味で、相手に届いたことまでは保証しない。
 
 `to` / `cc` / `bcc` は**文字列でも配列でも受ける**。`"a@x.jp, b@x.jp"` でもよい。
+
+`from` に使えないもの（403）: キーの対象外のアドレス、`level` が `read` のアドレス、エイリアス、アーカイブ済み。
+**ドメインの送信が無効にされていると 409**（`conflict`）。管理者がドメインで送信を有効にするまで送れない。
 
 ### 返信
 
@@ -130,8 +135,9 @@ curl -X POST https://<host>/api/v1/messages/msg_.../reply \
   -d '{"text": "返信の本文", "replyAll": false}'
 ```
 
-宛先は省略するとサーバが決める（`replyAll: true` なら元の To / Cc も含む）。
-引用はサーバが付ける。`read` と `send` の両方のスコープが要る。
+宛先は省略するとサーバが決める（`replyAll: true` なら元の To / Cc も含む）。`to` / `cc` を渡せば
+それを使う（自分のアドレスは除かれる）。引用はサーバが付け、本文の上限に収まるよう末尾から切る。
+`read` と `send` の両方のスコープが要る。元メッセージが読めなければ 404。
 
 **返信は `subject` / `bcc` を受け付けない**（件名と宛先の隠蔽は元メールに従い、サーバが決める）。
 指定しても無視される。
@@ -167,6 +173,8 @@ curl -X POST https://<host>/api/v1/messages/msg_.../reply \
 | 添付 1 件 | 20MB |
 | 添付の合計 | 25MB / 50 件 |
 | 件名 | 600 バイト（日本語で約 200 文字）。超えると 400 |
+| リクエストボディ全体 | 40MB（添付の base64 込み） |
+| 送信回数 | キー 1 本につき 60 秒に 100 回（送信と返信の合計）。超えると `rate_limited` |
 
 件名・宛先に**改行は入れられない**（MIME ヘッダに入るため弾かれる）。
 
@@ -236,6 +244,19 @@ curl -H "Authorization: Bearer tsb_..." -OJ https://<host>/api/v1/messages/msg_.
 **権限外の id は `403` ではなく `404` を返す。** 存在を推測されないための意図的な挙動なので、
 **404 を「消えた」と解釈しない。** キーの対象アドレスを確認する。
 
+**API キーでは叩けないもの（`403`）。** 画面のログイン（Cookie セッション）だけが通る。
+- 署名の変更 `PATCH /v1/addresses/{id}/signature`（人が書くメールに差し込まれるため）
+- 通知・端末の設定 `/v1/me/notifications/*` `/v1/me/devices/*` `/v1/push/*` `/v1/threads/{id}/notification`
+- ユーザー管理の変更 `POST/PATCH/DELETE /v1/admin/users*`（パスワードやロールはキーの期限や範囲で縛れないため）
+
+**対象アドレスを絞った admin キーでは、管理の変更ができない（`403`）。** ドメイン・アドレス・ルール・Webhook の
+作成・変更・削除、Webhook の手動再送、他のキーの失効、`GET /v1/admin/audit-logs` は、`addressIds` が無制限のキーか
+セッションでしか通らない。一覧と単体取得は絞ったキーでも読める。
+
+**キーの発行・失効（`/v1/me/api-keys`）には `admin` スコープが要る。** 発行できるキーは、今のキーのスコープ・
+対象アドレス・期限を超えられない（超える指定は 403）。発行したキーはこのキーの子になり、このキーが失効・差し替え
+されると子も失効する。
+
 **自分宛に送ると送信と受信で別レコードになる。** 同じメールでも outbound 1 件と、
 宛先ごとの inbound が別 id で立つ。To と Cc に同じアドレスを入れた場合は重複排除されて 1 件。
 
@@ -248,3 +269,7 @@ Cloudflare が Return-Path に使う正常な envelope sender。
 - 時刻はすべて **Unix 秒**（`receivedAt` など）。
 - `to` / `cc` は複数アドレスが 1 本の文字列に入る（カンマ結合）。読むときは分割すること。
 - レート制限に当たると `rate_limited` が返る。間隔を空けて再試行する。
+- ボディを送る要求（POST / PATCH / PUT）は `Content-Type: application/json` が無いと 400。
+- 管理（`admin` スコープ + owner のキー）で読めるもの: `/v1/admin/users` `/v1/admin/api-keys` `/v1/admin/domains`
+  `/v1/admin/addresses`（+ `/{id}/viewers`）`/v1/admin/rules` `/v1/webhooks`（+ `/{id}/deliveries`）。
+  一覧はどれも `{ data, next_cursor }`。Webhook の `secret` は作成の応答にしか出ない。

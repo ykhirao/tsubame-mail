@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, vi } from "vitest";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import worker from "@/worker";
 import { scenario } from "../registry";
 import { getDb, schema } from "@/db/client";
 import { eq } from "drizzle-orm";
@@ -101,7 +103,7 @@ describe("FR-16 プッシュ通知", () => {
 		return (res.body.data as Array<{ id: string }>).length;
 	}
 
-	scenario("FR-16", "端末は購読のための公開鍵をサーバから受け取れる", async () => {
+	scenario("FR-16-1", "端末は購読のための公開鍵をサーバから受け取れる", async () => {
 		const { generateVapidKeys } = await import("@/services/webpush");
 		const keys = await generateVapidKeys();
 		(h.env as { VAPID_PRIVATE_KEY?: string }).VAPID_PRIVATE_KEY = JSON.stringify(keys.privateKey);
@@ -110,14 +112,14 @@ describe("FR-16 プッシュ通知", () => {
 		expect(res.body.key).toBe(keys.publicKey);
 	});
 
-	scenario("FR-16", "画面を開いたときに付け直すバッジの数をサーバから受け取れる", async () => {
+	scenario("FR-16-10", "画面を開いたときに付け直すバッジの数をサーバから受け取れる", async () => {
 		const res = await owner.get("/api/v1/push/badge");
 		expect(res.status).toBe(200);
 		expect(typeof res.body.count).toBe("number");
 	});
 
 	scenario(
-		"FR-16",
+		"FR-16-1",
 		"端末を登録でき、1 人が複数の端末を持てる。同じ endpoint は上書き",
 		async () => {
 			const a = await addDevice(owner, { name: "iPhone" });
@@ -143,7 +145,7 @@ describe("FR-16 プッシュ通知", () => {
 	);
 
 		scenario(
-			"FR-16",
+			"FR-16-1",
 			"API キーでは通知・端末の API が 403。agent も 403。他人の端末は触れない",
 			async () => {
 				const me = await owner.get("/api/v1/me");
@@ -189,7 +191,7 @@ describe("FR-16 プッシュ通知", () => {
 		);
 
 	scenario(
-		"FR-16",
+		["FR-16-2", "FR-16-9"],
 		"受信すると割り当てられた利用者の端末に POST が飛び、割り当ての無い member には飛ばない",
 		async () => {
 			const seeded = await seedDomain(h, { addresses: ["ai"] });
@@ -214,7 +216,7 @@ describe("FR-16 プッシュ通知", () => {
 		},
 	);
 
-	scenario("FR-16", "送信失敗はそのメールを送った本人にだけ通知される", async () => {
+	scenario("FR-16-2", "送信失敗はそのメールを送った本人にだけ通知される", async () => {
 		const seeded = await seedDomain(h, { addresses: ["ai"] });
 		const ai = seeded.addressIds["ai"]!;
 		const sender = await createMember("sender@tsubame.test", [{ addressId: ai, level: "write" }]);
@@ -231,7 +233,7 @@ describe("FR-16 プッシュ通知", () => {
 		expect(sends[0]!.url).toBe(senderDev.endpoint);
 	});
 
-	scenario("FR-16", "一時停止中の受信は送られず、通知欄に束で残る", async () => {
+	scenario(["FR-16-4", "FR-16-3"], "一時停止中の受信は送られず、通知欄に束で残る", async () => {
 		const seeded = await seedDomain(h, { addresses: ["pause"] });
 		const pause = seeded.addressIds["pause"]!;
 		const { client: m } = await createMember("pause@tsubame.test", [{ addressId: pause, level: "read" }]);
@@ -272,7 +274,7 @@ describe("FR-16 プッシュ通知", () => {
 		expect(first.mailboxAddress).not.toBe("");
 	});
 
-	scenario("FR-16", "アドレスの割り当てを外すと、次の 1 通から通知が来ない", async () => {
+	scenario("FR-16-5", "アドレスの割り当てを外すと、次の 1 通から通知が来ない", async () => {
 		const seeded = await seedDomain(h, { addresses: ["churn"] });
 		const churn = seeded.addressIds["churn"]!;
 		const { client: m, id } = await createMember("churn@tsubame.test", [
@@ -304,7 +306,7 @@ describe("FR-16 プッシュ通知", () => {
 	});
 
 	scenario(
-		"FR-16",
+		"FR-16-6",
 		"パスワードを変えると全端末の購読が消え、ログアウトするとその端末の購読が消える",
 		async () => {
 			const { client: m, email, password } = await createMember("dev@tsubame.test", []);
@@ -328,7 +330,7 @@ describe("FR-16 プッシュ通知", () => {
 		},
 	);
 
-	scenario("FR-16", "push サービスが 410 を返したらその端末を消す", async () => {
+	scenario("FR-16-11", "push サービスが 410 を返したらその端末を消す", async () => {
 		const seeded = await seedDomain(h, { addresses: ["gone"] });
 		const gone = seeded.addressIds["gone"]!;
 		const { client: m } = await createMember("gone@tsubame.test", [{ addressId: gone, level: "read" }]);
@@ -347,7 +349,7 @@ describe("FR-16 プッシュ通知", () => {
 		expect(await countDevices(m)).toBe(0);
 	});
 
-	scenario("FR-16", "設定の行が無くても既定値で通知が来る", async () => {
+	scenario("FR-16-7", "設定の行が無くても既定値で通知が来る", async () => {
 		const seeded = await seedDomain(h, { addresses: ["pref"] });
 		const pref = seeded.addressIds["pref"]!;
 		const { client: m } = await createMember("pref@tsubame.test", [{ addressId: pref, level: "read" }]);
@@ -363,7 +365,7 @@ describe("FR-16 プッシュ通知", () => {
 		expect(sends).toHaveLength(1);
 	});
 
-	scenario("FR-16", "スパム判定 spam は通知しない", async () => {
+	scenario("FR-16-7", "スパム判定 spam は通知しない", async () => {
 		const seeded = await seedDomain(h, { addresses: ["spam"] });
 		const spam = seeded.addressIds["spam"]!;
 		const { client: m } = await createMember("spam@tsubame.test", [{ addressId: spam, level: "read" }]);
@@ -377,7 +379,7 @@ describe("FR-16 プッシュ通知", () => {
 		expect(sends).toHaveLength(0);
 	});
 
-	scenario("FR-16", "owner にはキャッチオールの受け皿の新着が通知される", async () => {
+	scenario("FR-16-7", "owner にはキャッチオールの受け皿の新着が通知される", async () => {
 		const seeded = await seedDomain(h, { addresses: ["recruit"] });
 		const recruit = seeded.addressIds["recruit"]!;
 		const db = getDb(h.env);
@@ -394,5 +396,24 @@ describe("FR-16 プッシュ通知", () => {
 		await drainQueues(h);
 
 		expect(sends).toHaveLength(1);
+	});
+
+	scenario("FR-16-6", "90 日開かれていない端末の購読を定期実行で消す", async () => {
+		await addDevice(owner);
+		expect(await countDevices(owner)).toBe(1);
+
+		// 端末は登録されたまま、lastSeenAt だけ 91 日前に戻し「90 日開かず放置」を再現する。
+		const db = getDb(h.env);
+		const device = await db.select().from(schema.pushDevices).all();
+		await db
+			.update(schema.pushDevices)
+			.set({ lastSeenAt: new Date(Date.now() - 91 * 86_400_000) })
+			.where(eq(schema.pushDevices.id, device[0]!.id));
+
+		const ctx = createExecutionContext();
+		await worker.scheduled({} as ScheduledController, h.env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(await countDevices(owner)).toBe(0);
 	});
 });

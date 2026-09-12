@@ -51,7 +51,7 @@ describe("FR-4 アカウント管理", () => {
 		return member;
 	}
 
-	scenario("FR-4", "bootstrap は owner が居ないときだけ通り、2 回目は 409", async () => {
+	scenario("FR-4-3", "bootstrap は owner が居ないときだけ通り、2 回目は 409", async () => {
 		const h2 = await freshHarness();
 		const c = createClient(h2);
 
@@ -64,7 +64,7 @@ describe("FR-4 アカウント管理", () => {
 		expect(second.body.error.code).toBe("conflict");
 	});
 
-	scenario("FR-4", "オーナーがユーザーを作り、read / write を割り当て、read だけのユーザーは送信できない", async () => {
+	scenario(["FR-4-1", "FR-4-4", "FR-11-2"], "オーナーがユーザーを作り、read / write を割り当て、read だけのユーザーは送信できない", async () => {
 		const member = await createMember("member@tsubame.test", [
 			{ addressId: ai, level: "read" },
 			{ addressId: hito, level: "write" },
@@ -72,7 +72,7 @@ describe("FR-4 アカウント管理", () => {
 
 		const me = await member.get("/api/v1/me");
 		expect(me.status).toBe(200);
-		const byId = new Map(me.body.addresses.map((a: any) => [a.id, a]));
+		const byId = new Map<string, { canWrite: boolean }>(me.body.addresses.map((a: any) => [a.id, a]));
 		expect(byId.get(ai)!.canWrite).toBe(false);
 		expect(byId.get(hito)!.canWrite).toBe(true);
 
@@ -93,7 +93,7 @@ describe("FR-4 アカウント管理", () => {
 		expect(sendWrite.status).toBe(202);
 	});
 
-	scenario("FR-4", "member は他人のアドレスのメッセージを一切見られない", async () => {
+	scenario(["FR-4-1", "FR-11-4"], "member は他人のアドレスのメッセージを一切見られない", async () => {
 		await deliverEmail(h, {
 			from: "a@ext.jp",
 			to: "ai@mail.tsubame.test",
@@ -119,7 +119,7 @@ describe("FR-4 アカウント管理", () => {
 		expect(detail.status).toBe(404);
 	});
 
-	scenario("FR-4", "最後の owner は削除も降格も無効化もできない", async () => {
+	scenario("FR-4-1", "最後の owner は削除も降格も無効化もできない", async () => {
 		const me = await owner.get("/api/v1/me");
 		const ownerId = me.body.id;
 
@@ -133,7 +133,26 @@ describe("FR-4 アカウント管理", () => {
 		expect(disable.status).toBe(409);
 	});
 
-	scenario("FR-4", "ログイン失敗はメールアドレスの存在を漏らさない", async () => {
+	scenario("FR-4-1", "12 文字未満のパスワードではユーザーを作れない", async () => {
+		const short = await owner.post("/api/v1/admin/users", {
+			email: "short@tsubame.test",
+			name: "短いパスワード",
+			role: "member",
+			password: "短い11文字!!",
+		});
+		expect(short.status).toBe(400);
+
+		// 境界の 12 文字は作れる。
+		const twelve = await owner.post("/api/v1/admin/users", {
+			email: "twelve@tsubame.test",
+			name: "12文字ちょうど",
+			role: "member",
+			password: "1234567890ab",
+		});
+		expect(twelve.status).toBe(201);
+	});
+
+	scenario("FR-4-2", "ログイン失敗はメールアドレスの存在を漏らさない", async () => {
 		const noUser = await owner.post("/api/v1/auth/login", {
 			email: "nobody@tsubame.test",
 			password: "wrong-password-123",
@@ -151,7 +170,7 @@ describe("FR-4 アカウント管理", () => {
 		expect(noUser.body.error.message).toBe(wrongPass.body.error.message);
 	});
 
-	scenario("FR-4", "合言葉が違うと最初のオーナーを作れない", async () => {
+	scenario("FR-4-3", "合言葉が違うと最初のオーナーを作れない", async () => {
 		// オーナーは DNS とルーティングまで触れるので、
 		// デプロイ直後に URL を見つけただけの相手には作らせない。
 		const h2 = await freshHarness();

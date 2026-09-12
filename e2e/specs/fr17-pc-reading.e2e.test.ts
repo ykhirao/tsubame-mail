@@ -38,7 +38,7 @@ describe("FR-17 PC の読み進め", () => {
 		h = await freshHarness();
 	});
 
-	scenario("FR-17", "一覧の並びと位置を保つ層が、会話の前後と戻り先を知る", () => {
+	scenario("FR-17-1", "一覧の並びと位置を保つ層が、会話の前後と戻り先を知る", () => {
 		// 一覧の状態は画面遷移で消えない層が必要。クエリ・並び順・スクロールを持たせる契約を固定する。
 		expect(listStateText).toMatch(/useSyncExternalStore/);
 		expect(listStateText).toMatch(/ids/);
@@ -50,7 +50,7 @@ describe("FR-17 PC の読み進め", () => {
 		expect(inboxText).toMatch(/scrollTop =/);
 	});
 
-	scenario("FR-17", "会話の上部に前へ/次へがあり、一覧の順で移る", () => {
+	scenario("FR-17-1", "会話の上部に前へ/次へがあり、一覧の順で移る", () => {
 		expect(threadText).toMatch(/前へ/);
 		expect(threadText).toMatch(/次へ/);
 		expect(threadText).toMatch(/prevNext/);
@@ -59,7 +59,7 @@ describe("FR-17 PC の読み進め", () => {
 		expect(threadText).toContain("disabled={!next}");
 	});
 
-	scenario("FR-17", "768px 以上で一覧と本文を左右に分けて並べる", () => {
+	scenario("FR-17-2", "768px 以上で一覧と本文を左右に分けて並べる", () => {
 		expect(mainText).toContain('<Route path="/" element={<MailShell />} />');
 		expect(mainText).toContain('<Route path="/threads/:id" element={<MailShell />} />');
 		expect(layoutText).toMatch(/MailShell/);
@@ -68,7 +68,7 @@ describe("FR-17 PC の読み進め", () => {
 		expect(layoutText).toMatch(/会話を選んでください/);
 	});
 
-	scenario("FR-17", "本文の全画面を端末ごとに設定でき、分割を畳める", () => {
+	scenario("FR-17-2", "本文の全画面を端末ごとに設定でき、分割を畳める", () => {
 		expect(viewPrefsText).toMatch(/localStorage/);
 		expect(viewPrefsText).toMatch(/fullscreen/);
 		// 本文の上部の小さな切り替えで、分割/全画面を選べる。
@@ -77,18 +77,18 @@ describe("FR-17 PC の読み進め", () => {
 		expect(threadText).toMatch(/useLayoutPref/);
 	});
 
-	scenario("FR-17", "PC の会話も最後の 1 通以外を畳んで押して開く", () => {
+	scenario("FR-17-2", "PC の会話も最後の 1 通以外を畳んで押して開く", () => {
 		expect(threadText).toMatch(/!isLast && !expandedIds\.has\(m\.id\)/);
 	});
 
-	scenario("FR-17", "PC の一覧に選択と、まとめて既読・未読・ゴミ箱を出す", () => {
+	scenario("FR-17-3", "PC の一覧に選択と、まとめて既読・未読・ゴミ箱を出す", () => {
 		expect(inboxText).toMatch(/type="checkbox"/);
 		expect(inboxText).toMatch(/既読にする/);
 		expect(inboxText).toMatch(/未読にする/);
 		expect(inboxText).toMatch(/ゴミ箱へ/);
 	});
 
-	scenario("FR-17", "まとめて既読が複数スレッドに効く（API で確かめる）", async () => {
+	scenario("FR-17-3", "まとめて既読が複数スレッドに効く（API で確かめる）", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		for (let i = 0; i < 3; i++) {
 			const raw = mime({
@@ -119,7 +119,7 @@ describe("FR-17 PC の読み進め", () => {
 		for (const t of after.body.data) expect(t.unreadCount).toBe(0);
 	});
 
-	scenario("FR-17", "まとめてゴミ箱が複数スレッドを一覧から消す（API で確かめる）", async () => {
+	scenario("FR-17-3", "まとめてゴミ箱が複数スレッドを一覧から消す（API で確かめる）", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		for (let i = 0; i < 3; i++) {
 			const raw = mime({
@@ -148,14 +148,14 @@ describe("FR-17 PC の読み進め", () => {
 		expect(trash.body.data.length).toBe(3);
 	});
 
-	scenario("FR-17", "会話の URL に一覧の絞り込み（表示・メールボックス）を引き継ぐ", () => {
+	scenario("FR-17-1", "会話の URL に一覧の絞り込み（表示・メールボックス）を引き継ぐ", () => {
 			expect(inboxText).toMatch(/rowParams\.set\("address"/);
 			expect(inboxText).toMatch(/rowParams\.set\("view"/);
 			expect(threadText).toMatch(/threadHref/);
 			expect(threadText).toMatch(/new URLSearchParams\(searchParams\)/);
 		});
 
-		scenario("FR-17", "戻る・ゴミ箱へ・未読にするは保存した一覧へ戻る（通知から開いたら受信箱）", () => {
+		scenario("FR-17-1", "戻る・ゴミ箱へ・未読にするは保存した一覧へ戻る（通知から開いたら受信箱）", () => {
 			expect(threadText).toContain('const backHref = store.loaded ? listHref(store.query) : "/";');
 			expect(threadText).toMatch(/navigate\(backHref\)/);
 			expect(threadText).toMatch(/to=\{backHref\}/);

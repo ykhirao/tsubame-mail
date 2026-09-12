@@ -26,7 +26,7 @@ describe("FR-14 メールボックスの色", () => {
 		vi.stubGlobal("fetch", createFakeCloudflare().fetch);
 	});
 
-	scenario("FR-14", "一覧で見分けるための色をメールボックスごとに持つ", async () => {
+	scenario("FR-14-1", "一覧で見分けるための色をメールボックスごとに持つ", async () => {
 		const seeded = await seedDomain(h, { addresses: ["ai", "hito"] });
 		void seeded;
 		const list = await owner.get("/api/v1/addresses");
@@ -38,7 +38,7 @@ describe("FR-14 メールボックスの色", () => {
 		}
 	});
 
-	scenario("FR-14", "既定は 20 色を作成順に割り当てる。任意の色（#rrggbb）も指定できる", async () => {
+	scenario("FR-14-2", "既定は 20 色を作成順に割り当てる。任意の色（#rrggbb）も指定できる", async () => {
 		const { domainId } = await seedDomain(h, { addresses: [] });
 		const created = await owner.get("/api/v1/admin/addresses");
 		// まだ何も無いこと（プレースホルダを作っていないので count が 0 から始まる）。
@@ -54,7 +54,7 @@ describe("FR-14 メールボックスの色", () => {
 		}
 
 		for (let i = 0; i < 21; i++) {
-			expect(colors[i]).toBe(MAILBOX_COLORS[i % MAILBOX_COLORS.length].hex);
+			expect(colors[i]).toBe(MAILBOX_COLORS[i % MAILBOX_COLORS.length]!.hex);
 		}
 		expect(colors[0]).toBe(colors[20]);
 		expect(colors[0]).toBe("#1a73e8");
@@ -71,7 +71,7 @@ describe("FR-14 メールボックスの色", () => {
 		expect(patched.body.data.color).toBe("#ff00aa");
 	});
 
-	scenario("FR-14", "不正な色（red や #12345）は 400 で弾かれる", async () => {
+	scenario("FR-14-2", "不正な色（red や #12345）は 400 で弾かれる", async () => {
 		const { domainId } = await seedDomain(h, { addresses: [] });
 		const created = await owner.post("/api/v1/admin/addresses", {
 			domainId,
@@ -86,7 +86,7 @@ describe("FR-14 メールボックスの色", () => {
 		}
 	});
 
-	scenario("FR-14", "削除後に作ったアドレスは残っている色と重複しない", async () => {
+	scenario("FR-14-2", "削除後に作ったアドレスは残っている色と重複しない", async () => {
 		const { domainId } = await seedDomain(h, { addresses: [] });
 		const ids: string[] = [];
 		const colors: string[] = [];
@@ -118,7 +118,7 @@ describe("FR-14 メールボックスの色", () => {
 		expect(newColor).toBe(colors[1]);
 	});
 
-	scenario("FR-14", "横断表示のときは、どのメールボックス宛かが色と文字で分かる", async () => {
+	scenario("FR-14-3", "横断表示のときは、どのメールボックス宛かが色と文字で分かる", async () => {
 		const { domainId } = await seedDomain(h, { addresses: [] });
 		const created = await owner.post("/api/v1/admin/addresses", {
 			domainId,

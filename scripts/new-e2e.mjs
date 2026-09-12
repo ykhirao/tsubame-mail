@@ -1,43 +1,39 @@
 #!/usr/bin/env node
-// 使い方: npm run e2e:new FR-5
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+// 使い方: npm run e2e:new FR-5      （FR-5 の全箇条書きの雛形を新しいファイルに起こす）
+//         npm run e2e:new FR-5-3    （箇条書き 1 つ分の雛形を出す。ファイルがあれば標準出力に出す）
+import { writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readRequirements } from "./spec-coverage.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const id = (process.argv[2] ?? "").toUpperCase();
+const arg = (process.argv[2] ?? "").toUpperCase();
+const parsed = /^(FR-\d+)(?:-(\d+))?$/.exec(arg);
 
-if (!/^FR-\d+$/.test(id)) {
-	console.error("使い方: npm run e2e:new FR-5");
+if (!parsed) {
+	console.error("使い方: npm run e2e:new FR-5   または   npm run e2e:new FR-5-3");
 	process.exit(1);
 }
 
-const spec = readFileSync(join(root, "docs/spec/requirements.md"), "utf8");
-const section = new RegExp(`^###\\s+${id}\\s+(.+?)$([\\s\\S]*?)(?=^###\\s|^##\\s|\\Z)`, "m").exec(spec);
-if (!section) {
-	console.error(`${id} が docs/spec/requirements.md に見つかりません。`);
+const [, frId, bulletNo] = parsed;
+const requirement = readRequirements().find((r) => r.id === frId);
+if (!requirement) {
+	console.error(`${frId} が docs/spec/requirements.md に見つかりません。`);
 	process.exit(1);
 }
 
-const title = section[1].trim();
-const bodyLines = section[2].split("\n");
-
-const bullets = [];
-for (const line of bodyLines) {
-	if (/^\s*-\s+/.test(line)) bullets.push(line.replace(/^\s*-\s+/, "").trim());
-	else if (bullets.length > 0 && /^\s+\S/.test(line)) bullets[bullets.length - 1] += " " + line.trim();
+let bullets = requirement.bullets;
+if (bulletNo !== undefined) {
+	const one = bullets.find((b) => b.id === arg);
+	if (!one) {
+		console.error(`${arg} はありません（${frId} の箇条書きは ${bullets.length} 件: ${frId}-1〜${frId}-${bullets.length}）。`);
+		process.exit(1);
+	}
+	bullets = [one];
 }
 
-const clean = (s) =>
-	s
-		.replace(/\*\*/g, "")
-		.replace(/`/g, "")
-		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-		.replace(/\s+/g, " ")
-		.trim();
-
-const num = id.split("-")[1].padStart(2, "0");
-const slug = title
+const num = frId.split("-")[1].padStart(2, "0");
+const slug = requirement.title
 	.replace(/[（(].*?[）)]/g, "")
 	.trim()
 	.replace(/[^\p{L}\p{N}]+/gu, "-")
@@ -45,22 +41,26 @@ const slug = title
 	.replace(/^-|-$/g, "");
 const file = join(root, `e2e/specs/fr${num}-${slug || "spec"}.e2e.test.ts`);
 
-if (existsSync(file)) {
-	console.error(`${file} は既にあります。追記して育ててください。`);
-	process.exit(1);
-}
-
-const scenarios = (bullets.length > 0 ? bullets : ["（要件の本文を読んでシナリオを書く）"])
+const scenarios = (bullets.length > 0 ? bullets : [{ id: `${frId}-1`, text: "（要件の本文を読んでシナリオを書く）", short: "" }])
 	.map((b) => {
-		const name = clean(b);
-		const short = name.length > 60 ? name.slice(0, 58) + "…" : name;
-		return `	scenario("${id}", ${JSON.stringify(short)}, async () => {
-		// 要件: ${name}
+		const short = b.short || b.text;
+		return `	scenario("${b.id}", ${JSON.stringify(short)}, async () => {
+		// 要件: ${b.text}
 		// TODO: 実装する。h / owner / seedDomain / deliverEmail / drainQueues が使える。
 		expect.fail("未実装");
 	});`;
 	})
 	.join("\n\n");
+
+if (existsSync(file)) {
+	if (bulletNo === undefined) {
+		console.error(`${file.replace(root + "/", "")} は既にあります。箇条書きを 1 つ指定すると雛形だけ出します: npm run e2e:new ${frId}-1`);
+		process.exit(1);
+	}
+	console.log(`${file.replace(root + "/", "")} は既にあります。次を describe の中に足してください:\n`);
+	console.log(scenarios);
+	process.exit(0);
+}
 
 const content = `import { beforeEach, describe, expect } from "vitest";
 import { scenario } from "../registry";
@@ -75,13 +75,7 @@ import {
 	type Harness,
 } from "../harness";
 
-/**
- * ${id} ${title}
- *
- * 雛形は \`npm run e2e:new ${id}\` が docs/spec/requirements.md から生成した。
- * 要件の文面をそのままシナリオ名にしてある。中身を埋めること。
- */
-describe("${id} ${title}", () => {
+describe("${frId} ${requirement.title}", () => {
 	let h: Harness;
 	let owner: Client;
 
@@ -102,4 +96,4 @@ void seedDomain;
 
 writeFileSync(file, content);
 console.log(`作成: ${file.replace(root + "/", "")}`);
-console.log(`シナリオ ${bullets.length} 件の雛形を要件から起こしました。中身を実装してください。`);
+console.log(`シナリオ ${bullets.length} 件の雛形を要件の箇条書きから起こしました。中身を実装してください。`);

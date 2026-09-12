@@ -15,10 +15,11 @@
 - [PWA とプッシュ通知](pwa-notifications.html) / [スマホ画面設計](mobile-screens.html) —
   FR-15 / FR-16 の方式と画面。
 - [PC 画面の改善要望](pc-screens.html) — 使っていて出た要望の記録。FR-17 として要件に移し、実装済み。
-- [バックログ](backlog.html) — 残っている実装・文書の作業と、並列開発の割り振り案。
+- [バックログ](backlog.html) — 実装と突き合わせて残った作業。今は無い。
 
 運用は別冊: [デプロイ](../ops/deployment.html) / [切り替え](../ops/cutover.html) /
-[日々の運用](../ops/operations.html)
+[日々の運用](../ops/operations.html) / [監査ログ](../ops/audit-log.html)。
+API を使う側の入口は [エージェント向けの使い方](../api-for-agents.html)。
 
 ## 仕様と検証がずれない仕組み
 

@@ -53,7 +53,7 @@ describe("FR-8 Webhook", () => {
 		return res.body;
 	}
 
-	scenario("FR-8", "対象アドレス・対象イベントに一致する webhook にだけ POST が飛ぶ", async () => {
+	scenario(["FR-8-1", "FR-8-5"], "対象アドレス・対象イベントに一致する webhook にだけ POST が飛ぶ", async () => {
 		await createWebhook({
 			name: "ai 宛",
 			url: "https://hook-a.example.com/tsubame",
@@ -83,7 +83,7 @@ describe("FR-8 Webhook", () => {
 		expect(calls.map((c) => c.url)).toEqual(["https://hook-a.example.com/tsubame"]);
 	});
 
-	scenario("FR-8", "署名ヘッダが正しい HMAC になっている", async () => {
+	scenario("FR-8-2", "署名ヘッダが正しい HMAC になっている", async () => {
 		const created = await createWebhook({ url: "https://hook.example.com/tsubame" });
 		const secret = created.secret as string;
 		expect(secret).toBeTruthy();
@@ -136,7 +136,7 @@ describe("FR-8 Webhook", () => {
 		await waitOnExecutionContext(ctx);
 	}
 
-	scenario("FR-8", "配信に失敗すると再試行が予約され、遅延が伸びる", async () => {
+	scenario(["FR-8-4", "FR-8-5"], "配信に失敗すると再試行が予約され、遅延が伸びる", async () => {
 		await createWebhook({ url: "https://hook.example.com/tsubame" });
 		stubWebhookFetch(500);
 
@@ -168,7 +168,7 @@ describe("FR-8 Webhook", () => {
 		expect(second[0]!.nextRetryAt!.getTime()).toBeGreaterThan(first[0]!.nextRetryAt!.getTime());
 	});
 
-	scenario("FR-8", "内部向け・http の URL は登録できず、配信はリダイレクトを追わない", async () => {
+	scenario("FR-8-3", "内部向け・http の URL は登録できず、配信はリダイレクトを追わない", async () => {
 		for (const url of [
 			"http://hook.example.com/tsubame",
 			"https://127.0.0.1/tsubame",
@@ -206,7 +206,7 @@ describe("FR-8 Webhook", () => {
 		expect(deliveries.body.data[0].status).not.toBe("success");
 	});
 
-	scenario("FR-8", "secret は作成時だけ返り、一覧には出ない", async () => {
+	scenario("FR-8-2", "secret は作成時だけ返り、一覧には出ない", async () => {
 		const created = await createWebhook({ url: "https://hook.example.com/tsubame" });
 		expect(created.secret).toBeTruthy();
 
@@ -217,7 +217,7 @@ describe("FR-8 Webhook", () => {
 		expect(list.body.data[0].id).toBe(created.id);
 	});
 
-	scenario("FR-8", "再送予約を過ぎた pending 配信を API から再送できる（B-20）", async () => {
+	scenario("FR-8-4", "再送予約を過ぎた pending 配信を API から再送できる（B-20）", async () => {
 		await createWebhook({ url: "https://hook.example.com/tsubame" });
 		stubWebhookFetch(500);
 		await deliverEmail(h, {
@@ -248,6 +248,83 @@ describe("FR-8 Webhook", () => {
 		expect(calls[0]!.url).toBe("https://hook.example.com/tsubame");
 	});
 
+	scenario("FR-8-4", "配信失敗は最大 5 回で打ち切り、failed になり再試行予定が残らない", async () => {
+		await createWebhook({ url: "https://hook.example.com/tsubame" });
+		stubWebhookFetch(500);
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await processOne(h);
+		for (let i = 0; i < 5; i++) {
+			await processOne(h, isWebhookRetry);
+		}
+
+		expect(h.pending.some((p) => isWebhookRetry(p.body))).toBe(false);
+
+		const { getDb } = await import("@/db/client");
+		const { webhookDeliveries } = await import("@/db/schema");
+		const db = getDb(h.env);
+		const [d] = await db.select().from(webhookDeliveries).all();
+		expect(d!.status).toBe("failed");
+		expect(d!.attempt).toBe(5);
+		expect(d!.nextRetryAt).toBeNull();
+	});
+
+	scenario("FR-8-4", "failed の配信を API から手動再送すると成功し、受け手に届く", async () => {
+		await createWebhook({ url: "https://hook.example.com/tsubame" });
+		stubWebhookFetch(500);
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await processOne(h);
+		for (let i = 0; i < 5; i++) {
+			await processOne(h, isWebhookRetry);
+		}
+
+		const { getDb } = await import("@/db/client");
+		const { webhookDeliveries } = await import("@/db/schema");
+		const db = getDb(h.env);
+		const [d] = await db.select().from(webhookDeliveries).all();
+		expect(d!.status).toBe("failed");
+
+		const calls = stubWebhookFetch(200);
+		const res = await owner.post(`/api/v1/webhooks/deliveries/${d!.id}/retry`);
+		expect(res.status).toBe(200);
+		expect((res.body as { status: string }).status).toBe("success");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.url).toBe("https://hook.example.com/tsubame");
+	});
+
+	scenario("FR-8-4", "同じ試行の retry が重なって届いても受け手への POST は 1 回", async () => {
+		await createWebhook({ url: "https://hook.example.com/tsubame" });
+		const calls = stubWebhookFetch(200);
+		await deliverEmail(h, {
+			from: "a@ext.jp",
+			to: "ai@mail.tsubame.test",
+			raw: mime({ from: "a@ext.jp", to: "ai@mail.tsubame.test" }),
+		});
+		await processOne(h);
+
+		// 同じ webhook.retry メッセージが再配達されて 2 つ積まれた状態を再現する。
+		const retry = h.pending.find((p) => isWebhookRetry(p.body));
+		expect(retry).toBeTruthy();
+		h.pending.push(retry!);
+
+		await processOne(h, isWebhookRetry);
+		await processOne(h, isWebhookRetry);
+		expect(calls).toHaveLength(1);
+
+		const { getDb } = await import("@/db/client");
+		const { webhookDeliveries } = await import("@/db/schema");
+		const db = getDb(h.env);
+		const [d] = await db.select().from(webhookDeliveries).all();
+		expect(d!.status).toBe("success");
+	});
+
 	async function memberAndKeyedOwner(): Promise<[Client, Client]> {
 		const memberCreate = await owner.post("/api/v1/admin/users", {
 			email: "member@tsubame.test",
@@ -275,7 +352,7 @@ describe("FR-8 Webhook", () => {
 		return [member, keyed];
 	}
 
-	scenario("FR-8", "member セッションと admin 無しの owner キーでは webhook を作成・更新・削除できない", async () => {
+	scenario("FR-5-1", "member セッションと admin 無しの owner キーでは webhook を作成・更新・削除できない", async () => {
 		const [member, keyed] = await memberAndKeyedOwner();
 
 		const created = await owner.post("/api/v1/webhooks", {
@@ -307,7 +384,7 @@ describe("FR-8 Webhook", () => {
 		expect(still.body.data[0].enabled).toBe(true);
 	});
 
-	scenario("FR-8", "不正な webhook 入力は 400", async () => {
+	scenario("FR-8-1", "不正な webhook 入力は 400", async () => {
 		for (const body of [
 			{ url: "https://hook.example.com/tsubame", events: ["message.received"] },
 			{ name: "name だけ", events: ["message.received"] },

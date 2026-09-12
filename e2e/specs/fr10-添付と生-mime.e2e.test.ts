@@ -55,8 +55,8 @@ describe("FR-10 添付と生 MIME", () => {
 	}
 
 	scenario(
-		"FR-10",
-		"添付と生 MIME は R2 に置き、認可付きの一時 URL 経由でのみ取得できる。",
+		"FR-10-1",
+		"添付と生 MIME は R2 に置き、恒久 URL で毎回認可を通したときだけ取得できる（一時 URL は張らない）",
 		async () => {
 			const seeded = await seedDomain(h, { addresses: ["ai", "hito"] });
 			const aiAddr = "ai@mail.tsubame.test";
@@ -132,7 +132,7 @@ describe("FR-10 添付と生 MIME", () => {
 		},
 	);
 
-	scenario("FR-10", "ゴミ箱のメッセージの添付と生 MIME は includeTrash 無しでは 404", async () => {
+	scenario("FR-10-2", "ゴミ箱のメッセージの添付と生 MIME は includeTrash 無しでは 404", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 
@@ -166,7 +166,7 @@ describe("FR-10 添付と生 MIME", () => {
 		expect(allowedRaw.status).toBe(200);
 	});
 
-	scenario("FR-10", "送信者が HTML や SVG と名乗る添付は、ブラウザが描画しない型で返す", async () => {
+	scenario("FR-10-1", "送信者が HTML や SVG と名乗る添付は、ブラウザが描画しない型で返す", async () => {
 		await seedDomain(h, { addresses: ["ai"] });
 		const aiAddr = "ai@mail.tsubame.test";
 

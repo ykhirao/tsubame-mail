@@ -70,7 +70,7 @@ describe("FR-3 検索（重点機能）", () => {
 	}
 
 	scenario(
-		"FR-3",
+		["FR-3-1", "FR-3-2"],
 		"日本語の部分一致: 3 文字以上は FTS5 trigram、1〜2 文字は LIKE の両方で引ける",
 		async () => {
 			// ADR: 3 文字以上は FTS5 trigram、1〜2 文字は LIKE に振り分ける。
@@ -97,7 +97,7 @@ describe("FR-3 検索（重点機能）", () => {
 		},
 	);
 
-	scenario("FR-3", "from: / subject: / since: / until: / is:unread の演算子が効く", async () => {
+	scenario(["FR-3-1", "FR-3-3"], "from: / subject: / since: / until: / is:unread の演算子が効く", async () => {
 		await receive({
 			to: "ai@mail.tsubame.test",
 			from: "torihiki@ext.example.jp",
@@ -138,7 +138,7 @@ describe("FR-3 検索（重点機能）", () => {
 		expect(unread.body.data[0].id).not.toBe(first.id);
 	});
 
-	scenario("FR-3", "権限外のアドレスのメッセージが絶対に出ない（member の検索）", async () => {
+	scenario(["FR-3-3", "FR-11-4"], "権限外のアドレスのメッセージが絶対に出ない（member の検索）", async () => {
 		await receive({ to: "ai@mail.tsubame.test", subject: "AI 宛ての秘密" });
 		await receive({ to: "hito@mail.tsubame.test", subject: "人宛ての秘密" });
 
@@ -160,7 +160,7 @@ describe("FR-3 検索（重点機能）", () => {
 		expect(detail.status).toBe(404);
 	});
 
-	scenario("FR-3", "カーソルページングで重複も取りこぼしも出ない（limit=1 で全部辿る）", async () => {
+	scenario("FR-3-4", "カーソルページングで重複も取りこぼしも出ない（limit=1 で全部辿る）", async () => {
 		for (let i = 0; i < 5; i++) {
 			await receive({ to: "ai@mail.tsubame.test", subject: `ページング ${i}` });
 		}
@@ -169,8 +169,8 @@ describe("FR-3 検索（重点機能）", () => {
 		let cursor: string | null = null;
 		let guard = 0;
 		do {
-			const q = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-			const res = await owner.get(`/api/v1/messages?limit=1${q}`);
+			const q: string = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+			const res: { status: number; body: any } = await owner.get(`/api/v1/messages?limit=1${q}`);
 			expect(res.status).toBe(200);
 			expect(res.body.data.length).toBeLessThanOrEqual(1);
 			for (const m of res.body.data) seen.push(m.id);
@@ -183,7 +183,7 @@ describe("FR-3 検索（重点機能）", () => {
 		expect(new Set(seen).size).toBe(5);
 	});
 
-	scenario("FR-3", "不正なパラメータは黙って無視されず 400 になる", async () => {
+	scenario(["FR-3-3", "FR-3-4"], "不正なパラメータは黙って無視されず 400 になる", async () => {
 		const badIs = await owner.get("/api/v1/messages?q=is:bogus");
 		expect(badIs.status).toBe(400);
 		expect(badIs.body.error.code).toBe("invalid_request");

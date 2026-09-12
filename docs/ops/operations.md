@@ -48,8 +48,10 @@ npx wrangler queues info tsubame-outbound
 - **`tsubame-inbound` が詰まる**: コンシューマ（`src/services/consumer.ts`）が
   失敗して再試行を繰り返している可能性。R2 からの読み出しや D1 への保存で例外が出ていないか、
   `wrangler tail` を流しながら確認する。
-- **`tsubame-outbound` が詰まる**: 送信が失敗し続けている（`outbound_jobs` が `failed` /
-  `queued` のまま増える）。次節を参照。
+- **`tsubame-outbound` が詰まる**: このキューには送信（`outbound.send`）のほか、Webhook の配信（`webhook.retry`）と
+  プッシュ通知の判定（`notify`）も流れる（`src/services/queue.ts`）。送信が失敗し続けている（`outbound_jobs` が `failed` /
+  `queued` のまま増える）なら次節、Webhook なら第 3.5 節。通知は push サービスの一時失敗を 30 秒・5 分・30 分の
+  遅延で 3 回まで再試行する。
 
 再試行回数を超えるとメッセージは DLQ（`tsubame-inbound-dlq` / `tsubame-outbound-dlq`）に落ちる。
 `wrangler.jsonc` の `queues.consumers[].max_retries` が再試行上限、`dead_letter_queue` が送り先。
@@ -70,11 +72,14 @@ npx wrangler queues info tsubame-outbound-dlq
   （`kind: "inbound"` / `addressId` / `rawKey` / `envelope` / `receivedAt`）の形で
   `wrangler queues message put tsubame-inbound ...` から積み直す。原因を取り除いてから積めば
   コンシューマが通常処理する。
-- **送信の DLQ（`tsubame-outbound-dlq`）**: 送信のキュー本体（`tsubame-outbound`）には
-  `outbound.send`（`jobId` / `messageId`）だけが入り、送るべき MIME は残っていない。
-  落ちた原因を直したあと、該当メールはアプリの作成画面（または `POST /api/v1/messages`）から
-  **作り直して送る**。`outbound_jobs` 行を `queued` に戻しても再送の引き金にはならない
-  （再配達は OUTBOUND キューをコンシューマが拾うことで起きる。第 3 節参照）。
+- **送信の DLQ（`tsubame-outbound-dlq`）**: メッセージの `kind` で分ける。
+  - `outbound.send`（`jobId` / `messageId`）: 送るべき MIME は残っていない。
+    落ちた原因を直したあと、該当メールはアプリの作成画面（または `POST /api/v1/messages`）から
+    **作り直して送る**。`outbound_jobs` 行を `queued` に戻しても再送の引き金にはならない
+    （再配達は OUTBOUND キューをコンシューマが拾うことで起きる。第 3 節参照）。
+  - `webhook.retry`（`deliveryId` / `attempt`）: `webhook_deliveries` の行は `pending` のまま残る。
+    再試行の予定から 30 分経てば、管理画面の Webhook の詳細か `POST /api/v1/webhooks/deliveries/{id}/retry` で手動で再送できる（第 3.5 節）。
+  - `notify`（`messageId` / `userId`）: プッシュ通知の判定が走らなかっただけで、メールは届いている。積み直す価値は薄い。
 
 基本的に落ちたメッセージの単純な再投入はせず、`wrangler tail` のエラー内容を元に原因を直して
 再度受信が来るのを待つ。DLQ が空になるまで原因を直せないときだけ、上の手順で積み直す。
@@ -103,8 +108,15 @@ npx wrangler d1 execute DB --config wrangler.local.jsonc --remote --command \
   `last_error` に権限・認証系のメッセージが入る。
 - **差出人が許可されていない**: Email Sending で送れる送信元アドレスの承認が漏れている。
 - **ゾーン設定エラー**: 送信ドメインの SPF / DKIM レコードが古い・無い。
+- **ドメインの送信を無効にしている**: 管理画面のドメインで送信を無効にすると、API は 409 を返し、
+  無効化の前に積まれた分は `last_error` が「このドメインは送信が無効になっています」で `failed` になる。
+  有効に戻しても `failed` は再送されない（作り直す）。
 
 対処は原因に応じた設定修正。
+
+`sent` は Cloudflare Email Sending が受け付けたという意味で、届いたことではない。スパムとして拒否された・
+存在しない宛先だった、はダッシュボードの Email Sending の Activity log でしか分からず、送信ドメインの評判
+（Bounce rate / Spam rejection rate）に数えられる。検証で存在しない宛先やスパムの見本を送るときは本番の送信ドメインを使わない。
 
 **直したあと、`failed` ジョブを SQL で `status='queued'` に戻しても再送はされない。** 送信ジョブの
 再配達は OUTBOUND キュー（`OUTBOUND_QUEUE`）のメッセージをコンシューマが拾うことで起き、
@@ -114,6 +126,28 @@ npx wrangler d1 execute DB --config wrangler.local.jsonc --remote --command \
 再送したいなら、アプリの作成画面（または `POST /api/v1/messages`）から**そのメールを作り直して送る**。
 一時的な失敗（権限・SPF/DKIM の整備待ちなど）は、そもそも上限内の指数バックオフで自動再送されるので、
 設定修正はその再送が追いつく前に終えるのが正しい。
+
+### 3.5 Webhook の配信が失敗するとき
+
+配信の流れ（`src/services/webhooks.ts`）:
+
+1. 受信・送信の処理が `webhook_deliveries` に `pending`（`attempt=0`）の行を作り、`webhook.retry` を `tsubame-outbound` に積む。
+   受け手への POST（最大 10 秒）はここでは待たない。
+2. コンシューマが POST する。2xx で `success`。それ以外と接続失敗は 30 秒 / 300 秒 / 1800 秒の遅延で積み直し、5 回目で `failed`。
+   リダイレクト（3xx）は追わず失敗として扱う。
+3. `pending` のまま止まった配信（キューのメッセージを失った・無効化で claim だけ残った）は、再試行の予定（無ければ作成）から
+   30 分経つと手動で再送できる。`failed` はいつでも再送できる。
+
+見る場所は管理画面の Webhook の詳細（配信履歴の全件と、その Webhook への操作の記録）か、
+`GET /api/v1/webhooks/{id}/deliveries`。`http_status` / `error` / `attempt` / `next_retry_at` が入る。
+
+```bash
+curl -X POST "$HOST/api/v1/webhooks/deliveries/<dlv_...>/retry" -H "Authorization: Bearer tsb_..."
+# 今は再送できない（30 分経っていない・無効化した Webhook）なら 409
+```
+
+再送は同期で POST し、結果を返す。同じ試行が重なっても受け手に届くのは 1 回。
+`secret` は作成の応答にしか出ず、失くしたら Webhook を作り直す（`docs/ops/deployment.md` §3.1）。
 
 ---
 
@@ -157,10 +191,13 @@ npx wrangler d1 export tsubame --remote --output ./backup-$(date +%Y%m%d).sql
 ## 6. 定期的な確認（チェックリスト）
 
 - [ ] 受信：新着メールが D1 に増えている（`GET /api/v1/messages`）
-- [ ] 送信：`outbound_jobs` に `failed` が増えていない
-- [ ] キュー：`tsubame-inbound` / `tsubame-outbound` が滞留していない
+- [ ] 送信：`outbound_jobs` に `failed` が増えていない。Cloudflare の Email Sending の評判（Bounce / Spam rejection）が悪化していない
+- [ ] Webhook：`webhook_deliveries` に `failed` や 30 分以上の `pending` が溜まっていない（第 3.5 節）
+- [ ] キュー：`tsubame-inbound` / `tsubame-outbound` と DLQ が滞留していない
+- [ ] 通知：`push_devices` で `enabled=false`（恒久失敗が 3 回続いた端末）が増えていない
 - [ ] D1 バックアップが最新
 - [ ] `CF_API_TOKEN` に未使用の権限が付いていないか（最小権限の維持）
+- [ ] 監査ログ（`GET /api/v1/admin/audit-logs`）に覚えのない管理操作が無い。400 日で消えるので、長く残すなら書き出す（`docs/ops/audit-log.md`）
 
 ---
 

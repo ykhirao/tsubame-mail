@@ -64,7 +64,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		memberId = m.id;
 	});
 
-	scenario("FR-12", "オーナーでなくても自分のキーを発行できる", async () => {
+	scenario("FR-12-1", "オーナーでなくても自分のキーを発行できる", async () => {
 		const res = await member.post("/api/v1/me/api-keys", { name: "自分用", scopes: ["read"] });
 		expect(res.status).toBe(201);
 		expect(res.body.token).toMatch(/^tsb_/);
@@ -74,7 +74,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect(JSON.stringify(list.body)).not.toContain(res.body.token);
 	});
 
-	scenario("FR-12", "自分のキーでも本人が触れないアドレスには届かない", async () => {
+	scenario("FR-12-2", "自分のキーでも本人が触れないアドレスには届かない", async () => {
 		const created = await member.post("/api/v1/me/api-keys", { name: "自分用", scopes: ["read"] });
 		const token = created.body.token as string;
 
@@ -92,7 +92,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect((await keyClient.get(`/api/v1/messages/${othersMessage.id}/raw`)).status).toBe(404);
 	});
 
-	scenario("FR-12", "キーの対象アドレスで自分の権限をさらに狭められる", async () => {
+	scenario("FR-12-3", "キーの対象アドレスで自分の権限をさらに狭められる", async () => {
 		const both = await owner.put(`/api/v1/admin/users/${memberId}/grants`, {
 			grants: [
 				{ addressId: mineId, level: "write" },
@@ -113,7 +113,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect(list.body.data.every((m: { addressId: string }) => m.addressId === mineId)).toBe(true);
 	});
 
-	scenario("FR-12", "read だけのキーで送信も管理 API も通らない", async () => {
+	scenario(["FR-12-2", "FR-12-3"], "read だけのキーで送信も管理 API も通らない", async () => {
 		const created = await member.post("/api/v1/me/api-keys", { name: "読むだけ", scopes: ["read"] });
 		const keyClient = createClient(h);
 		keyClient.useKey(created.body.token as string);
@@ -129,7 +129,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect((await keyClient.get("/api/v1/admin/domains")).status).toBe(403);
 	});
 
-	scenario("FR-12", "他人のキーは一覧にも出ず、失効もできない", async () => {
+	scenario("FR-12-4", "他人のキーは一覧にも出ず、失効もできない", async () => {
 		const stranger = await createMember("stranger@tsubame.test", [
 			{ addressId: othersId, level: "read" },
 		]);
@@ -151,7 +151,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect((await keyClient.get("/api/v1/me")).status).toBe(200);
 	});
 
-	scenario("FR-12", "失効したキーは使えない", async () => {
+	scenario("FR-12-1", "失効したキーは使えない", async () => {
 		const created = await member.post("/api/v1/me/api-keys", { name: "捨てる", scopes: ["read"] });
 		const keyClient = createClient(h);
 		keyClient.useKey(created.body.token as string);
@@ -162,7 +162,7 @@ describe("FR-12 メンバー自身の API キー", () => {
 		expect((await keyClient.get("/api/v1/me")).status).toBe(401);
 	});
 
-	scenario("FR-12", "失効したキーと同じ設定で再発行でき、新しいキーは同じ範囲で動く", async () => {
+	scenario("FR-12-5", "失効したキーと同じ設定で再発行でき、新しいキーは同じ範囲で動く", async () => {
 		const body = { name: "再発行", scopes: ["read"], addressIds: [mineId] };
 
 		const first = await member.post("/api/v1/me/api-keys", body);

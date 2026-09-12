@@ -41,14 +41,17 @@
 
 ## 3. 入口と経路の早見表
 
-攻撃者が触れる入口は 4 つしかない。観点を当てる前に、まずここを押さえる。
+攻撃者が触れる入口は 5 つしかない。観点を当てる前に、まずここを押さえる。
 
 | 入口 | 誰が | 何を流し込めるか | コード |
 | --- | --- | --- | --- |
 | HTTP `/api/*` | 誰でも（認証前）／各ロール | JSON ボディ、クエリ、パス、ヘッダ、Cookie | `src/worker.ts` → `src/api/app.ts` → `src/api/v1/**` |
 | email ハンドラ | 匿名の送信者 | エンベロープ（from / to）、生 MIME 全体 | `src/domain/routing/incoming.ts` |
-| キュー | 上の 2 つが積んだもの（間接） | R2 に置いた生 MIME、送信ジョブ | `src/services/consumer.ts` → `domain/mail/inbound.ts` / `outbound.ts` / `services/webhooks.ts` |
+| キュー | 上の 2 つが積んだもの（間接） | R2 に置いた生 MIME、送信ジョブ、Webhook の配信、通知の判定 | `src/services/consumer.ts` → `domain/mail/inbound.ts` / `outbound.ts` / `services/webhooks.ts` / `services/notify.ts` |
 | Webhook の応答 | 通知先の運営者 | HTTP ステータス、応答遅延、リダイレクト | `src/services/webhooks.ts` |
+| push サービスの応答 | Apple / Google / Mozilla（と、endpoint を登録した本人） | HTTP ステータス、応答遅延 | `src/services/webpush.ts` → `services/notify/deliver.ts` |
+
+cron（`scheduled`）は外から入力を受けない。
 
 HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所で決まる。
 
@@ -56,9 +59,10 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 | --- | --- | --- | --- |
 | `/api/health`, `/auth/login`, `/auth/logout`, `/auth/setup-state`, `/auth/bootstrap` | 無し | — | `v1/auth.ts` |
 | `/auth/session` | `requireAuth`（ルート単体） | — | `v1/auth.ts` |
-| `/me/*` | `requireAuth` | ハンドラ内で `principal` を見る | `v1/me.ts` |
-| `/messages/*`, `/threads/*`, `/addresses/*`, `/attachments/*`, `/messages/:id/raw` | `requireAuth` | ハンドラ内で `addressIds` を見る | `v1/messages.ts`, `outbound.ts`, `threads.ts`, `addresses.ts`, `attachments.ts` |
-| `/admin/*`, `/webhooks/*` | `requireAuth` + `requireOwner` | 各ルータにも重複実装がある（精査 #13） | `v1/admin/**`, `v1/webhooks.ts` |
+| `/me/*` | `requireAuth` | ハンドラ内で `principal` を見る。キーの発行・失効は `requireKeyManagement`（セッションか admin キー、仮パスワード中は 403） | `v1/me.ts` |
+| `/me/notifications/*`, `/me/devices/*`, `/push/*`, `/threads/:id/notification` | `requireAuth` | ハンドラ内で `via === "session"` を要求（API キーは 403）。`agent` は対象外 | `v1/notifications.ts`, `devices.ts`, `push.ts` |
+| `/messages/*`, `/threads/*`, `/addresses/*`, `/attachments/*`, `/messages/:id/raw` | `requireAuth` | ハンドラ内で `addressIds` を見る。`/addresses/:id/signature` はセッション限定 | `v1/messages.ts`, `outbound.ts`, `threads.ts`, `addresses.ts`, `attachments.ts` |
+| `/admin/*`, `/webhooks/*` | `requireAuth` + `requireOwner`（role が owner **かつ** admin スコープ） | 各ルータの `use("*")` にも同じ `requireOwner` を重ねている（精査 #13）。変更系は `requireUnrestricted`（範囲を絞ったキーは 403。#129）、ユーザー管理の変更系は `requireSession`（#121）、`/admin/audit-logs` は両方 | `v1/admin/**`, `v1/webhooks.ts` |
 
 **信頼できない文字列の追跡表。** 受信メールの各フィールドが、どこを通ってどこで
 「実行可能な文脈」に触れるか。監査ではこの表の右端を 1 つずつ確かめる。
@@ -73,7 +77,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 | `Message-ID` / `In-Reply-To` / `References` | `parse.ts` | `rfc_message_id` / `in_reply_to` / `references_header` | スレッド接ぎ木 `thread.ts`、**返信の送信ヘッダ** `outbound.ts` → `compose.ts` |
 | `Date` | `parse.ts` | `received_at` | 並び順・カーソル `search/sql.ts`、スレッドの `last_message_at` |
 | `text/plain` | `parse.ts` | `text_body` / `snippet` | UI（React がエスケープ）、FTS、返信の引用 `quote.ts`、ルールの `contains` |
-| `text/html` | `parse.ts` | `html_body` | **iframe `srcDoc`** `MessageHtml.tsx`、**返信 HTML にそのまま埋め込み** `quote.ts` |
+| `text/html` | `parse.ts` | `html_body` | **iframe `srcDoc`** `MessageHtml.tsx`（リンクは `rewriteLinks` が新しいタブへ）、返信の引用 `quote.ts`（`stripHtml → escapeHtml → <pre>` に落とす。精査 #16） |
+| `X-CF-SpamH-Score` / `Authentication-Results`（CF ブロック） | `parse.ts` | `spam_verdict` | 通知の判定 `decide.ts`（`suspicious` は設定次第）、スレッド接ぎ木の許可 `thread.ts`（DMARC / DKIM pass。精査 #127） |
 | 添付のファイル名・型・中身 | `parse.ts` | `attachments`、R2 `att/{msg}/{att}` | `Content-Disposition` / `Content-Type` `attachments.ts`、UI のリンク文字列 |
 | 生 MIME 全体 | `incoming.ts` | R2 `raw/` | `GET /messages/:id/raw` `attachments.ts` |
 
@@ -98,7 +103,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] 仮パスワードが CSPRNG 由来で、作成応答にしか出ないか → `password.ts` `generateTemporaryPassword`、`admin/users.ts` POST
 - [ ] 仮パスワードの利用者が「変更するまで進めない」制御が **UI だけ**になっていないか。
       API 経由なら仮パスワードのまま何でもできるなら、それを要件として意図しているか
-      → `ui/routes/AppLayout.tsx`（`mustChangePassword` で遷移）と `middleware/auth.ts`（何も見ていない）
+      → `ui/routes/AppLayout.tsx`（`mustChangePassword` で遷移）、`me.ts` `requireKeyManagement`（キーの発行・失効だけ 403。#64）、
+      `middleware/auth.ts`（他の API は見ていない。精査 #25 の残件として受け入れ）
 
 **ログイン**
 - [ ] 失敗の応答が「居ない／無効／agent／パスワード違い」で区別できないか（列挙対策）
@@ -117,8 +123,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] 有効期限が妥当か。絶対期限・アイドル期限のどちらを持つか → `tokens.ts` `SESSION_TTL_SECONDS`、`middleware/auth.ts` `principalFromSession`
 - [ ] 期限切れが確実に弾かれ、掃除されるか → `principalFromSession`
 - [ ] ログアウトがサーバ側の行を消すか（Cookie を消すだけでないか） → `auth.ts` logout
-- [ ] パスワード変更・ロール変更・無効化で既存セッションが落ちるか
-      → `me.ts` PATCH、`admin/users.ts` PATCH / DELETE
+- [ ] パスワード変更・ロール変更・無効化で既存セッションが落ちるか。購読端末も一緒に消えるか（#130）
+      → `me.ts` PATCH、`admin/users.ts` PATCH / DELETE、`auth.ts` logout（その端末の購読）
 
 **API キー**
 - [ ] 生成が CSPRNG 由来で十分な長さか。接頭辞 `tsb_` で Cookie と混同しないか
@@ -127,13 +133,15 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] `expires_at` / `revoked_at` が毎リクエスト検査されるか → `middleware/auth.ts` `principalFromApiKey`
 - [ ] 持ち主が `status != active` になった瞬間に効かなくなるか → `loadActiveUser`
 - [ ] `last_used_at` の更新が認証結果に影響しないか（失敗しても通す／落とす、どちらを意図しているか） → `touchLastUsed`
+- [ ] キーから発行したキーが親に連なり、親の失効・差し替え・持ち主の削除・パスワード変更・無効化で子孫も失効するか（#25 / #142）
+      → `api_keys.parent_key_id`、`me.ts` `revokeKeyTree` / `revokeKeysIssuedBy`、`admin/users.ts` PATCH / DELETE
 
 **ブートストラップ**
 - [ ] `INTERNAL_SECRET` の一致でしか通らず、未設定・短すぎなら誰も作れないか → `auth.ts` bootstrap
 - [ ] オーナーが 1 人でも居れば閉じるか。「居る」の判定が `status` を見るべきか検討したか
       （無効化された唯一のオーナーが居る状態で再ブートストラップできるべきか）
-- [ ] 合言葉の照合に**レート制限があるか**。ログインの制限は bootstrap には掛かっていない
-      → `auth.ts` bootstrap（`LOGIN_RATE_LIMIT` を使っていない）
+- [ ] 合言葉の照合に**レート制限があるか**。鍵が IP だけなので、バインディングの無い環境では消える
+      → `auth.ts` bootstrap（`LOGIN_RATE_LIMIT` を `bootstrap:ip:` の鍵で使う。精査 #52）
 - [ ] `setup-state` が認証無しで「オーナー未作成」を晒すことを許容しているか → `auth.ts` setup-state
 
 ### S-2 認可 — 「その人が何をしてよいか」（このアプリの中心）
@@ -175,8 +183,11 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] 表にして塞ぐ。行 = エンドポイント、列 = `read` のみ / `send` のみ / `admin` のみのキー、
       セル = 期待する応答。表の空欄が未検証 → `docs/spec/architecture.md` §4 の API 表を起点にする
 - [ ] オーナー専用操作が `role == owner` **かつ** `admin` スコープを要求するか。
-      重複実装が「または」になっていないか → `policy.ts` `requireOwner`、`v1/webhooks.ts` `requireAdmin`、
-      `admin/rules.ts`、`admin/domains.ts` / `admin/addresses.ts` `ownerOnly`（精査 #13）
+      重複実装が「または」になっていないか → `policy.ts` `requireOwner`、各ルータの `use("*", requireOwner)`（精査 #13）
+- [ ] 範囲を絞った admin キー（`addressIds` あり）で、キーより広い範囲を変える管理 API（ドメイン・アドレス・ルール・Webhook・
+      他人のキーの失効）を叩けないか → `middleware/auth.ts` `requireUnrestricted`、`grep -rn "requireUnrestricted" src/api`（精査 #129）
+- [ ] パスワード・ロールのように期限や範囲で縛れない資格情報を、API キーから変えられないか
+      → `requireSession`（ユーザー管理の変更系）、`addresses.ts` PATCH signature、`notifications.ts` / `devices.ts`（`via === "session"`）（#121 / #143）
 - [ ] 認証ミドルウェアがパス前置で掛かっているので、広いプレフィックスに載るルータ
       （`rawRouter` は `/api/v1` に載る）へ後からルートを足すと未認証になりうる → `app.ts` `app.route`
 - [ ] ミドルウェアのパスパターンが、末尾スラッシュ無し・大文字・エンコード違いを含めて
@@ -200,8 +211,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
       （`role` / `status` / `password_hash` / `user_id` / `address_id` の書き換え）
       → `grep -rn "\.set(\|\.values(" src/api`
 - [ ] スキーマにあるが**ハンドラが使っていない**項目が無いか。使わないなら消す。
-      使うようになった瞬間に検証無しで効く（`sendMessageInput.threadId` が典型）
-      → `contracts/send.ts` と `outbound.ts` POST
+      使うようになった瞬間に検証無しで効く（かつて `sendMessageInput.threadId` がそうだった。今は無い）
+      → `contracts/send.ts` と `outbound.ts` POST、`contracts/*.ts` の各項目
 - [ ] zod スキーマが未知のキーを落とすか（`strict`）。落とさないなら、その方針を自覚しているか
 - [ ] パスパラメータ（`:id`）が形式検査され、別テーブルの id を混ぜても安全か
 
@@ -216,7 +227,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] 受信ハンドラでパースせず、R2 に置いてキューへ逃がしているか（設計上の必須） → `incoming.ts` `deliver`
 - [ ] `setReject()` / `forward()` を email ハンドラの外で呼んでいないか → `grep -rn "setReject\|\.forward(" src`
 - [ ] R2 に置いた**後**にキュー投入が失敗したとき、メールが黙って消えないか
-      （`waitUntil` の失敗は誰も観測しない） → `incoming.ts` `ctx.waitUntil(env.INBOUND_QUEUE.send)`
+      （`waitUntil` の失敗は誰も観測しない。今は `await` して例外にし、Email Routing に一時失敗を返して送信側に再送させる。精査 #24）
+      → `incoming.ts` `await env.INBOUND_QUEUE.send`
 - [ ] 転送に付けるヘッダが受信者に露出してよい内容か（`X-Tsubame-Forwarded` にエンベロープ `to` を入れている）
 
 **宛先解決**
@@ -236,9 +248,11 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] 受信メールの `Message-ID` を、後続の受信メールの接ぎ木アンカーとして信用していないか
       （outbound の `rfc_message_id` だけを信用する等。精査 #10）
 - [ ] `Date` ヘッダを `received_at` にそのまま使っていないか。未来日付で一覧の先頭に居座れる／
-      カーソルの外に逃げられる → `inbound.ts` `receivedAt`、`sql.ts` `cursorCondition`
+      カーソルの外に逃げられる → `inbound.ts` `resolveReceivedAt`（投入時刻の 1 年前〜10 分後の外は投入時刻。精査 #19）、`sql.ts` `cursorCondition`
 - [ ] `From` が無い・複数ある・グループ構文のとき、`from_addr` が空や別人にならないか → `parse.ts` `flattenAddresses`
-- [ ] アドレススコープのルール照合がヘッダ値ではなくエンベロープで行われるか（精査 #14） → `inbound.ts` `applyAddressRules`
+- [ ] アドレススコープのルール照合がヘッダ値ではなくエンベロープで行われるか（精査 #14） → `inbound.ts` `matchAddressRules`
+- [ ] 受信メールの `In-Reply-To` で既存スレッドに接ぐとき、Cloudflare の認証結果（DMARC pass か From ドメインの DKIM pass）を
+      要求しているか。CF ブロックの判定が偽の ARC で崩れないか（精査 #127） → `parse.ts`、`thread.ts`
 - [ ] ルールの `contains` が本文全体を対象にするなら、その計算量を把握しているか → `rules.ts` `matchRule`
 - [x] Cloudflare の判定ヘッダを読んで `spam_verdict` に**書いて**いるか。読む側だけあって書く側が無い状態になっていないか
       → `inbound.ts` の insert（`spamVerdictFromScore`）、`grep -rn "spamVerdict" src`
@@ -260,14 +274,17 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
 **HTML 本文**
 - [ ] `html_body` を `dangerouslySetInnerHTML` 等で直接描画していないか → `grep -rn "dangerouslySetInnerHTML\|innerHTML" src/ui`
 - [ ] 描画するならサンドボックス化した iframe に隔離しているか。`sandbox` の各 allow を 1 つずつ根拠付きで持つか。
-      `allow-scripts` が無い、`allow-forms` が無い、`allow-popups` が無い、`allow-top-navigation` が無い、
-      `allow-same-origin` は何のために要るか → `MessageHtml.tsx`
+      `allow-scripts` が無い、`allow-forms` が無い、`allow-top-navigation` が無い、
+      `allow-same-origin` は何のために要るか（高さを読むため）、`allow-popups allow-popups-to-escape-sandbox` は
+      リンクを新しいタブで開くため（#141）で、開ける `href` を `rewriteLinks` が http(s) / mailto に絞っているか → `MessageHtml.tsx`
 - [ ] iframe 内での `<meta http-equiv="refresh">` や自己ナビゲーションで、枠の中身が攻撃者のサイトに
       差し替わらないか（フィッシングの土台になる）
 - [ ] リモート画像・外部 CSS・フォントを既定でブロックするか（開封トラッキング対策。精査 #11）。
       iframe の `csp` 属性か、`srcDoc` に埋める `<meta http-equiv="Content-Security-Policy">` か
 - [ ] `referrerPolicy` が iframe に付いているか（本文中のリンクから自分の URL を漏らさない）
 - [ ] 本文中のリンクをどう扱うか決めているか。`javascript:` / `data:` を弾くか、そもそも開かせないか
+      → `MessageHtml.tsx` `safeLinkHref` / `rewriteLinks`（`target="_blank" rel="noopener noreferrer"`、`<base>` は落とす）。
+      DOMParser の経路は vitest で通らず、ブラウザ実機でしか確かめられない
 - [ ] 件名・差出人名・ファイル名・スニペットなど**属性値やテキストに入る攻撃者文字列**を React の
       エスケープに任せているか。文字列連結で DOM を組んでいないか → `ThreadDetail.tsx`、`Inbox.tsx`、`Search.tsx`
 - [ ] API のエラーメッセージや `details` を UI が HTML として描画していないか → `ui/lib/api.ts`、各画面の `error` 表示
@@ -282,8 +299,8 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
       （`<a target=_blank>` で開く。要件 FR-10 の「認可付きの一時 URL」との差を自覚しているか） → `Attachments.tsx`
 
 **HTTP ヘッダ**
-- [ ] `Content-Security-Policy`（`default-src 'self'`、`frame-ancestors 'none'`、`object-src 'none'`）を返すか（精査 #6）
-      → `worker.ts` fetch（静的資産も API も素通し）
+- [ ] `Content-Security-Policy`（`default-src 'none'`、`frame-ancestors 'none'`、`base-uri 'none'`）を API と添付・生 MIME の応答に返すか（精査 #6）
+      → `app.ts` `secureHeaders`（`/api/*` だけ。静的資産は `ASSETS` が返すので `worker.ts` は素通し）
 - [ ] `X-Content-Type-Options: nosniff` / `Referrer-Policy` / `X-Frame-Options` を返すか
 - [ ] API の JSON 応答に `nosniff` が付き、ブラウザで直接開いたときに HTML と解釈されないか
 - [ ] エラー応答で `Content-Type` が `application/json` に揃っているか
@@ -345,7 +362,9 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
 - [ ] キューの at-least-once で二重送信しないか。「読んでから更新」ではなく
       `UPDATE … WHERE status='queued'` の結果で判定しているか → `domain/mail/outbound.ts` `processOutboundSend`
 - [ ] 再試行に上限とバックオフがあるか → `OUTBOUND_MAX_ATTEMPTS` / `backoffDelaySeconds`
-- [ ] 送信のレート制限（アドレス単位・キー単位）があるか。無いなら「キーのスコープ = 被害の上限」に送信量が入っていないことを自覚しているか
+- [ ] 送信のレート制限（キー単位）があるか。Rate Limiting binding の概算で、バインディングの無い環境では消える
+      → `outbound.ts` `checkSendRateLimit`、`wrangler.jsonc` `SEND_RATE_LIMIT`（100 回 / 60 秒。精査 #106）
+- [ ] 送信を無効にしたドメインから、API と積み済みのジョブの両方で送らないか（#144） → `sender.ts` `isSendingDisabled`、`outbound.ts` `assertCanSend` / reply、`domain/mail/outbound.ts`
 
 ### S-6 検索とクエリ生成
 
@@ -365,7 +384,7 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
 - [ ] LIKE フォールバックで `%` / `_` をエスケープしているか。漏えいにはならないが、
       `%_%_%_%` のようなパターンで走査が重くなる → `sql.ts` `freeWordCondition`、`buildMessageConditions`
 - [ ] 検索の**全経路**（FTS、LIKE、関連度順、スレッド）にアドレススコープの `WHERE` が付くか（S-2 と同じ項目。ここでも見る）
-- [ ] 日付・真偽値のクエリ引数が正規化され、不正値が 400 になるか → `query.ts` `parseDate`、`contracts/messages.ts` `boolParam`
+- [ ] 日付・真偽値のクエリ引数が正規化され、不正値が 400 になるか → `query.ts` `parseDayStart` / `parseDayEnd`、`contracts/messages.ts` `boolParam`
 - [ ] FTS の同期トリガが `UPDATE` / `DELETE` でも索引を消し、消したメッセージが検索に残らないか → `migrations/0001_search_fts.sql`
 
 ### S-7 外部連携 — Webhook と Cloudflare API と DNS
@@ -384,7 +403,8 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
 - [ ] URL の検証が**作成時だけでなく更新時**にも同じか → `v1/webhooks.ts` PATCH
 - [ ] 手動再送 API が同じ SSRF 面を持つことを把握しているか → `v1/webhooks.ts` `/deliveries/:id/retry`
 - [ ] 再送にバックオフと上限があるか（外部への増幅攻撃にしない） → `webhooks.ts` `MAX_ATTEMPTS` / `RETRY_DELAYS`
-- [ ] 応答待ちにタイムアウトがあるか（受け手が Worker を拘束できない） → `TIMEOUT_MS`
+- [ ] 同じ配信を 2 経路（キューの再配達と手動再送）が同時に走らせても POST が 1 回か → `webhooks.ts` `runDelivery` の claim（#86 / #118）
+- [ ] 応答待ちにタイムアウトがあるか（受け手が Worker を拘束できない）。受信・送信のコンシューマが POST を待たないか → `TIMEOUT_MS`、`dispatchMessageEvent`（キューに積むだけ）
 - [ ] 通知本文に何を載せるか決めているか（件名・スニペット・宛先は外に出る）。`addressIds` の絞り込みが効くか
       → `webhooks.ts` `serializeMessage` / `dispatchMessageEvent`
 - [ ] `addressIds` に存在しない id や、将来 member が登録できるようになったとき権限外の id を入れられないか → `v1/webhooks.ts` POST
@@ -402,7 +422,8 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
 - [ ] catch-all の有効化に `confirm` を要求し、受け皿アドレスの存在を先に確認するか → `admin/domains.ts` `/catch-all`、`provision.ts` `setCatchAll`
 - [ ] 切断時の後始末が、このアプリが作ったレコード・ルールだけを消すか。判定が保守的か
       （迷ったら消さず報告する） → `cleanup.ts` `isOwnDnsRecord` / `isOwnRoutingRule`
-- [ ] 切断が `cleanup=true` 既定で DNS を触るのに、確認や監査記録が無いことを許容しているか → `admin/domains.ts` DELETE
+- [ ] 切断が `cleanup=true` 既定で DNS を触ることを UI が確認し、監査ログ `domain.disconnect` に消したレコードとルールが残るか → `admin/domains.ts` DELETE
+- [ ] Email Sending の無効化が Cloudflare 側と DNS を触らないこと（tsubame の中で止めるだけ）を把握しているか → `admin/domains.ts` `/sending`
 - [ ] Worker 名（`wrangler.jsonc` の `name` / `vars.EMAIL_WORKER_NAME` / ルールの宛先）がずれると
       受信が止まる。ずれを検出する手段があるか → `provision.ts` `emailWorkerName`、`docs/ops/cutover.md`
 
@@ -438,8 +459,9 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
       新しい変更系のエンドポイントを足したら `recordAudit` と一覧の両方に足す
       → `grep -rn "recordAudit" src/api`
 - [ ] 記録の失敗で本処理を落とさないか → `policy.ts` `recordAudit`
-- [ ] 監査ログにシークレット・パスワード・仮パスワードを書いていないか → 各 `recordAudit` の `meta`
-- [ ] 監査ログを読む手段（API か SQL か）と保持期間を決めているか
+- [ ] 監査ログにシークレット・パスワード・仮パスワード・署名の本文を書いていないか → 各 `recordAudit` の `meta`
+- [ ] 監査ログを読む手段と保持期間が文書どおりか（`GET /v1/admin/audit-logs` は owner のセッションか範囲を絞っていない admin キー、
+      400 日で消す） → `admin/audit-logs.ts`、`maintenance.ts` `pruneAuditLogs`、`docs/ops/audit-log.md`
 
 ### S-9 可用性と資源の上限 — 「量」はすべてここで見る
 
@@ -458,8 +480,9 @@ S-3 / S-5 の「意味」の検証とは別に、入口ごとの**上限**をこ
 | 認証 API | KDF の回数、ログイン試行、bootstrap 試行 | `LOGIN_RATE_LIMIT`（login と bootstrap） |
 | 管理 API | 一覧のページング、`localParts` の個数、ルール数、Webhook の `addressIds` | `paginationQuery`、`contracts/domains.ts`（`localParts` 50）、`contracts/webhooks.ts`（100）。ルール数・Webhook 数の上限は無い |
 | 通知 API | 端末数、通知ルール数 | `devices.ts` 10 台、`notifications.ts` 50 件（精査 #133） |
-| キュー | 再試行回数、DLQ の有無、1 メッセージの処理時間 | `wrangler.jsonc` `max_retries: 3` と `dead_letter_queue`。DLQ の中身を見る手順は無い |
-| Webhook | 再送回数、タイムアウト、同時配信数 | `webhooks.ts` `MAX_ATTEMPTS` / `TIMEOUT_MS`。同時配信数の上限は無い |
+| キュー | 再試行回数、DLQ の有無、1 メッセージの処理時間 | `wrangler.jsonc` `max_retries: 3` と `dead_letter_queue`。DLQ の見方は `docs/ops/operations.md` §2 |
+| Webhook | 再送回数、タイムアウト、同時配信数 | `webhooks.ts` `MAX_ATTEMPTS` / `TIMEOUT_MS`。配信は 1 件 1 キューメッセージで、同時配信数はキューのバッチ（5）に従う |
+| push サービス | 1 実行の外部リクエスト数（Free で 50）、タイムアウト、再試行 | 利用者 1 人 1 メッセージに分割（`notify.ts`）、`webpush.ts` `PUSH_FETCH_TIMEOUT_MS`、`consumer.ts` `NOTIFY_RETRY_DELAYS` / `NOTIFY_MAX_RETRIES` |
 
 - [ ] 上の表の空欄を埋めたか。空欄ごとに「無くてよい理由」か「上限値」のどちらかがあるか
 - [ ] キューのコンシューマが毒メッセージで再試行し続けないか。`max_retries` を超えたメッセージが
@@ -470,7 +493,8 @@ S-3 / S-5 の「意味」の検証とは別に、入口ごとの**上限**をこ
 - [ ] 認証前に重い処理（KDF を含む）へ到達できる経路にレート制限があるか → `auth.ts` login / bootstrap
 - [ ] 認証後でも、`send` スコープ 1 本で送信量・添付量を無制限に使えないか
 - [ ] 一覧系が全件走査にならないか（精査 #15）
-- [ ] 外部への待ち（Webhook、Cloudflare API）にタイムアウトがあるか → `webhooks.ts` `TIMEOUT_MS`、`cloudflare-api.ts`（無し）
+- [ ] 外部への待ち（Webhook、push サービス、Cloudflare API）にタイムアウトがあるか
+      → `webhooks.ts` `TIMEOUT_MS`、`webpush.ts` `PUSH_FETCH_TIMEOUT_MS`、`cloudflare-api.ts` `DEFAULT_TIMEOUT_MS`（ページ走査は `#pageDeadlineMs`）
 
 ### S-10 サプライチェーンと CI・デプロイ
 

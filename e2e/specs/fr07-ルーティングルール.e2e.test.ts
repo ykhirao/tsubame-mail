@@ -38,7 +38,7 @@ describe("FR-7 ルーティングルール", () => {
 		return res.body;
 	}
 
-	scenario("FR-7", "domain スコープの reject が実在メールボックス宛でも効く", async () => {
+	scenario(["FR-7-1", "FR-1-3"], "domain スコープの reject が実在メールボックス宛でも効く", async () => {
 		await createDomainRule({
 			name: "スパム送信者を拒否",
 			action: "reject",
@@ -55,7 +55,7 @@ describe("FR-7 ルーティングルール", () => {
 		expect(h.pending).toHaveLength(0);
 	});
 
-	scenario("FR-7", "宛先の reject は +タグ を足しても効く", async () => {
+	scenario(["FR-7-1", "FR-1-4"], "宛先の reject は +タグ を足しても効く", async () => {
 		await createDomainRule({
 			name: "ai 宛てを拒否",
 			action: "reject",
@@ -72,7 +72,7 @@ describe("FR-7 ルーティングルール", () => {
 		expect(h.pending).toHaveLength(0);
 	});
 
-	scenario("FR-7", "domain スコープの forward が転送され、ループ防止ヘッダ付きは転送しない", async () => {
+	scenario("FR-7-1", "domain スコープの forward が転送され、ループ防止ヘッダ付きは転送しない", async () => {
 		await createDomainRule({
 			name: "外部へ転送",
 			action: "forward",
@@ -101,7 +101,47 @@ describe("FR-7 ルーティングルール", () => {
 		expect(loop.rejected).toContain("転送ループ");
 	});
 
-	scenario("FR-7", "catch-all が実在アドレスを覆い隠さない", async () => {
+	scenario(["FR-7-1", "FR-1-3"], "実在しない宛先に当たる domain スコープの drop は、拒否せず黙って捨てる（保存もキュー投入もしない）", async () => {
+		await createDomainRule({ name: "黙って捨てる", action: "drop", matcher: { to: "old-news@" } });
+
+		const result = await deliverEmail(h, {
+			from: "noise@ext.jp",
+			to: "old-news@mail.tsubame.test",
+			raw: mime({ from: "noise@ext.jp", to: "old-news@mail.tsubame.test" }),
+		});
+		expect(result.rejected).toBeFalsy();
+		expect(h.pending).toHaveLength(0);
+		const list = await owner.get("/api/v1/messages?limit=10&includeTrash=true");
+		expect(list.body.data).toHaveLength(0);
+	});
+
+	scenario("FR-1-3", "エイリアス宛のメールは、エイリアス先のメールボックスに届く", async () => {
+		const { getDb } = await import("@/db/client");
+		const { addresses } = await import("@/db/schema");
+		const { newId } = await import("@/lib/id");
+		await getDb(h.env).insert(addresses).values({
+			id: newId("address"),
+			domainId,
+			localPart: "sales",
+			address: "sales@mail.tsubame.test",
+			kind: "alias",
+			aliasTargetId: aiId,
+		});
+
+		await deliverEmail(h, {
+			from: "customer@ext.jp",
+			to: "sales@mail.tsubame.test",
+			raw: mime({ from: "customer@ext.jp", to: "sales@mail.tsubame.test", subject: "見積もりの依頼" }),
+		});
+		await drainQueues(h);
+
+		const list = await owner.get("/api/v1/messages?limit=10");
+		expect(list.body.data).toHaveLength(1);
+		expect(list.body.data[0].addressId).toBe(aiId);
+		expect(list.body.data[0].subject).toBe("見積もりの依頼");
+	});
+
+	scenario("FR-1-3", "catch-all が実在アドレスを覆い隠さない", async () => {
 		// seedDomain は isCatchAll: false でしか作らないので、受け皿は D1 に直接入れる。
 		const { getDb } = await import("@/db/client");
 		const { addresses } = await import("@/db/schema");
@@ -133,7 +173,7 @@ describe("FR-7 ルーティングルール", () => {
 		expect(h.pending).toHaveLength(1);
 	});
 
-	scenario("FR-7", "address スコープのルールが配信後に効く（既読化）", async () => {
+	scenario("FR-7-2", "address スコープのルールが配信後に効く（既読化）", async () => {
 		const res = await owner.post("/api/v1/admin/rules", {
 			scope: "address",
 			addressId: aiId,
@@ -186,7 +226,7 @@ describe("FR-7 ルーティングルール", () => {
 		return [member, keyed];
 	}
 
-	scenario("FR-7", "member セッションと admin 無しの owner キーではルールを作成・更新・削除できない", async () => {
+	scenario("FR-5-1", "member セッションと admin 無しの owner キーではルールを作成・更新・削除できない", async () => {
 		const [member, keyed] = await memberAndKeyedOwner();
 
 		const createdRule = await owner.post("/api/v1/admin/rules", {
@@ -225,7 +265,7 @@ describe("FR-7 ルーティングルール", () => {
 		expect(still.body.enabled).toBe(true);
 	});
 
-	scenario("FR-7", "mark の target は既読化の実在種別だけを許可する", async () => {
+	scenario("FR-7-2", "mark の target は既読化の実在種別だけを許可する", async () => {
 		// read / unread / star / unstar 以外（ここでは存在しない種別）は 400 で弾く。
 		const bad = await owner.post("/api/v1/admin/rules", {
 			scope: "address",
@@ -252,7 +292,7 @@ describe("FR-7 ルーティングルール", () => {
 		expect(ok.status).toBe(201);
 	});
 
-	scenario("FR-7", "不正なルール入力は 400", async () => {
+	scenario("FR-7-1", "不正なルール入力は 400", async () => {
 		const res = await owner.post("/api/v1/admin/rules", {
 			scope: "domain",
 			domainId,

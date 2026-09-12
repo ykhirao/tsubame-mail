@@ -16,5 +16,5 @@
 		"types": ["@cloudflare/workers-types", "vite/client", "@cloudflare/vitest-pool-workers/types"],
 		"paths": { "@/*": ["./src/*"] }
 	},
-	"include": ["src", "tests", "*.ts", "worker-env.d.ts"]
+	"include": ["src", "tests", "e2e", "*.ts", "worker-env.d.ts"]
 }
