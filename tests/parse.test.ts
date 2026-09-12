@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseRawMime, spamVerdictFromScore } from "@/domain/mail/parse";
 import { sampleMime } from "./helpers";
 
-// 実機のヘッダの並び（security-audit.md #127/#128）を写す。A / B の署名などは伏せる。
+// 実機のヘッダの並び（constraints.md #127/#128）を写す。A / B の署名などは伏せる。
 function cfMime(opts: {
 	arcAuth?: string;
 	authResults?: string;
