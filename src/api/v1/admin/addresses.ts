@@ -2,7 +2,14 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
-import { addresses, addressGrants, domains, users } from "@/db/schema";
+import {
+	addresses,
+	addressGrants,
+	attachments as attachmentsTable,
+	domains,
+	messages as messagesTable,
+	users,
+} from "@/db/schema";
 import {
 	emailWorkerName,
 	ensureAddressRoutingRule,
@@ -12,10 +19,11 @@ import { newId } from "@/lib/id";
 import { afterCursor, toPage } from "@/lib/paging";
 import { defaultColorFor, MAILBOX_COLORS } from "@/shared/colors";
 import { createCloudflareApi } from "@/services/cloudflare-api";
+import { deleteObjects } from "@/services/r2";
 import { requireOwner, requireUnrestricted } from "@/api/middleware/auth";
 import { clientIp, getPrincipal } from "@/api/middleware/auth";
 import { readJson } from "@/lib/validate";
-import { recordAudit } from "@/domain/access/policy";
+import { jsonIdsIn, recordAudit } from "@/domain/access/policy";
 import type { AppEnv } from "@/api/types";
 import { paginationQuery } from "@/shared/contracts/common";
 import {
@@ -419,7 +427,29 @@ app.delete("/:id", requireUnrestricted, async (c) => {
 		workerName: emailWorkerName(c.env),
 	});
 
+	// D1 は messages と attachments を cascade で消すので、その瞬間に R2 のキーを知る
+	// 手段が失われる。生 MIME と添付が参照されないまま残り続けないよう、先に集めておく。
+	const doomed = await db
+		.select({ id: messagesTable.id, rawKey: messagesTable.rawR2Key })
+		.from(messagesTable)
+		.where(eq(messagesTable.addressId, row.id))
+		.all();
+	const attachmentKeys = doomed.length
+		? (
+				await db
+					.select({ key: attachmentsTable.r2Key })
+					.from(attachmentsTable)
+					.where(jsonIdsIn(attachmentsTable.messageId, doomed.map((m) => m.id)))
+					.all()
+			).map((a) => a.key)
+		: [];
+
 	await db.delete(addresses).where(eq(addresses.id, row.id));
+
+	await deleteObjects(c.env, [
+		...doomed.map((m) => m.rawKey).filter((k): k is string => k !== null),
+		...attachmentKeys,
+	]);
 
 	await recordAudit(db, {
 		actorId: getPrincipal(c).userId,

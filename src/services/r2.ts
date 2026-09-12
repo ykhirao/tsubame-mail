@@ -57,3 +57,19 @@ export async function putAttachment(
 export function getAttachment(env: CloudflareEnv, key: string): Promise<R2ObjectBody | null> {
 	return env.BUCKET.get(key);
 }
+
+/**
+ * D1 の行を消すと R2 のキーを知る手段が無くなるので、消す前にまとめて渡すこと。
+ * R2 の delete は 1 回 1000 キーまで。失敗しても呼び出し側の処理は止めない
+ * （消し損ねた分は孤児として残るだけで、消せていない行が残るより害が小さい）。
+ */
+export async function deleteObjects(env: CloudflareEnv, keys: string[]): Promise<void> {
+	const unique = [...new Set(keys.filter((k) => k))];
+	for (let i = 0; i < unique.length; i += 1000) {
+		try {
+			await env.BUCKET.delete(unique.slice(i, i + 1000));
+		} catch (err) {
+			console.error("R2 の削除に失敗", { count: unique.length, err });
+		}
+	}
+}
