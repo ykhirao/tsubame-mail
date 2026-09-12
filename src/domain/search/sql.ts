@@ -293,6 +293,8 @@ export type ThreadRow = {
 	lastFromName: string | null;
 	/** 最新のメールの向き。一覧で受信と送信控えを見分けるために出す（B-34）。 */
 	lastDirection: MessageDirection | null;
+	/** 最新のメールの id。一覧のスターが、会話の全文を取らずに対象を決めるために使う。 */
+	lastMessageId: string | null;
 	snippet: string | null;
 	hasAttachments: boolean;
 	isStarred: boolean;
@@ -388,6 +390,7 @@ async function withLastMessage(
 		| "lastFromAddr"
 		| "lastFromName"
 		| "lastDirection"
+		| "lastMessageId"
 		| "snippet"
 		| "hasAttachments"
 		| "isStarred"
@@ -401,6 +404,7 @@ async function withLastMessage(
 	if (excludeTrash) msgConds.push(ne(messages.status, "trash"));
 	const rows = await db
 		.select({
+			id: messages.id,
 			threadId: messages.threadId,
 			fromAddr: messages.fromAddr,
 			fromName: messages.fromName,
@@ -442,6 +446,7 @@ async function withLastMessage(
 			lastFromAddr: m?.fromAddr ?? null,
 			lastFromName: m?.fromName ?? null,
 			lastDirection: m?.direction ?? null,
+			lastMessageId: m?.id ?? null,
 			snippet: m?.snippet ?? null,
 			hasAttachments: attached.has(t.id),
 			isStarred: starred.has(t.id),
@@ -531,13 +536,31 @@ export async function queryThreadMessages(
 	return { messages: messagesAsc, hasOlder, olderCursor, olderCount };
 }
 
-export async function attachmentsForMessage(
+type AttachmentRow = {
+	id: string;
+	filename: string;
+	contentType: string;
+	sizeBytes: number;
+	isInline: boolean;
+};
+
+export async function attachmentsForMessage(db: Db, messageId: string): Promise<AttachmentRow[]> {
+	return (await attachmentsForMessages(db, [messageId])).get(messageId) ?? [];
+}
+
+// 会話の詳細は最新 200 件まで返す。1 件ずつ引くと 200 往復が直列に走るので、
+// id をまとめて 1 本にする。バインド変数の上限（100）に当たらないよう、
+// id の列は `jsonIdsIn` が JSON 1 本に畳む（精査 #32 / #57）。
+export async function attachmentsForMessages(
 	db: Db,
-	messageId: string,
-): Promise<Array<{ id: string; filename: string; contentType: string; sizeBytes: number; isInline: boolean }>> {
+	messageIds: string[],
+): Promise<Map<string, AttachmentRow[]>> {
+	const byMessage = new Map<string, AttachmentRow[]>();
+	if (messageIds.length === 0) return byMessage;
 	const { attachments } = await import("@/db/schema");
-	return db
+	const rows = await db
 		.select({
+			messageId: attachments.messageId,
 			id: attachments.id,
 			filename: attachments.filename,
 			contentType: attachments.contentType,
@@ -545,9 +568,16 @@ export async function attachmentsForMessage(
 			isInline: attachments.isInline,
 		})
 		.from(attachments)
-		.where(eq(attachments.messageId, messageId))
+		.where(jsonIdsIn(attachments.messageId, messageIds))
 		.orderBy(attachments.createdAt, attachments.id)
 		.all();
+	for (const { messageId, ...att } of rows) {
+		if (!messageId) continue;
+		const list = byMessage.get(messageId);
+		if (list) list.push(att);
+		else byMessage.set(messageId, [att]);
+	}
+	return byMessage;
 }
 
 export function encodeCursor(seconds: number, id: string): string {

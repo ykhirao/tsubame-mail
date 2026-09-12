@@ -14,7 +14,7 @@ import {
 	queryThreads,
 	getThread,
 	queryThreadMessages,
-	attachmentsForMessage,
+	attachmentsForMessages,
 	resolveMailboxId,
 	hiddenAddressIds,
 	toUnix,
@@ -98,6 +98,7 @@ routes.get("/", async (c) => {
 			lastFromAddr: t.lastFromAddr,
 			lastFromName: t.lastFromName,
 			lastDirection: t.lastDirection,
+			lastMessageId: t.lastMessageId,
 			snippet: t.snippet,
 			hasAttachments: t.hasAttachments,
 			isStarred: t.isStarred,
@@ -139,9 +140,10 @@ routes.get("/:id", async (c) => {
 				.all()
 		: [];
 	const envelopeById = new Map(envRows.map((r) => [r.id, r.envelopeTo ?? null]));
+	const attachmentsByMessage = await attachmentsForMessages(db, msgIds);
 	const messages = [];
 	for (const m of msgs.messages) {
-		const atts = await attachmentsForMessage(db, m.id);
+		const atts = attachmentsByMessage.get(m.id) ?? [];
 		messages.push({
 			id: m.id,
 			threadId: m.threadId,

@@ -120,6 +120,8 @@ export const threadListItem = z.object({
 	lastFromName: z.string().nullable(),
 	/** 最新のメールの向き。一覧で受信と送信控えを見分けるために出す。 */
 	lastDirection: messageDirection.nullable(),
+	/** 最新のメールの id。スターの付け外しが会話の全文を取らずに済むように出す。 */
+	lastMessageId: z.string().nullable(),
 	snippet: z.string().nullable(),
 	hasAttachments: z.boolean(),
 	isStarred: z.boolean(),

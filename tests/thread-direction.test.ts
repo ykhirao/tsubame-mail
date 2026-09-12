@@ -103,6 +103,100 @@ describe("スレッド一覧の向き（lastDirection）", () => {
 		expect(body.data.find((t) => t.id === "thr_sent")!.lastDirection).toBe("outbound");
 	});
 
+	// 一覧のスターと「まとめて操作」は、この id があるから会話の全文を取らずに済む。
+	it("最新のメールの id を返す", async () => {
+		const user = await createUser({ role: "owner" });
+		const domainId = await createDomain();
+		const addressId = await createAddress(domainId, "me");
+		await db()
+			.insert(schema.threads)
+			.values({
+				id: "thr_last",
+				addressId,
+				subject: "見積もりの件",
+				lastMessageAt: new Date(1_770_000_100_000),
+				messageCount: 2,
+				unreadCount: 0,
+			});
+		await insertMessage({
+			id: "msg_older",
+			threadId: "thr_last",
+			addressId,
+			direction: "inbound",
+			receivedAt: 1_770_000_000_000,
+		});
+		await insertMessage({
+			id: "msg_newest",
+			threadId: "thr_last",
+			addressId,
+			direction: "inbound",
+			receivedAt: 1_770_000_100_000,
+		});
+
+		const app = buildApp(sessionPrincipal(user.id));
+		const res = await app.request("/api/v1/threads");
+		const body = (await res.json()) as { data: { id: string; lastMessageId: string | null }[] };
+		expect(body.data.find((t) => t.id === "thr_last")!.lastMessageId).toBe("msg_newest");
+	});
+
+	// 添付は 1 件ずつ引くと 200 往復になるのでまとめて 1 本にした（jsonIdsIn）。
+	// まとめる以上、どの添付がどのメッセージのものかを取り違えないことを押さえる。
+	it("会話の詳細で、添付が正しいメッセージに割り振られる", async () => {
+		const user = await createUser({ role: "owner" });
+		const domainId = await createDomain();
+		const addressId = await createAddress(domainId, "me");
+		await db()
+			.insert(schema.threads)
+			.values({
+				id: "thr_att",
+				addressId,
+				subject: "資料です",
+				lastMessageAt: new Date(1_770_000_100_000),
+				messageCount: 2,
+				unreadCount: 0,
+			});
+		await insertMessage({
+			id: "msg_a",
+			threadId: "thr_att",
+			addressId,
+			direction: "inbound",
+			receivedAt: 1_770_000_000_000,
+		});
+		await insertMessage({
+			id: "msg_b",
+			threadId: "thr_att",
+			addressId,
+			direction: "inbound",
+			receivedAt: 1_770_000_100_000,
+		});
+		// msg_a に 2 件、msg_b に 1 件。添付ゼロのメッセージも混ぜる意味で msg_b は 1 件だけ。
+		for (const [id, messageId, filename] of [
+			["att_1", "msg_a", "a1.pdf"],
+			["att_2", "msg_a", "a2.pdf"],
+			["att_3", "msg_b", "b1.pdf"],
+		] as const) {
+			await db().insert(schema.attachments).values({
+				id,
+				messageId,
+				filename,
+				contentType: "application/pdf",
+				sizeBytes: 10,
+				isInline: false,
+				r2Key: `att/${id}`,
+			});
+		}
+
+		const app = buildApp(sessionPrincipal(user.id));
+		const res = await app.request("/api/v1/threads/thr_att");
+		const body = (await res.json()) as {
+			messages: { id: string; attachments: { filename: string }[] }[];
+		};
+		const a = body.messages.find((m) => m.id === "msg_a")!;
+		const b = body.messages.find((m) => m.id === "msg_b")!;
+		expect(a.attachments.map((x) => x.filename)).toEqual(["a1.pdf", "a2.pdf"]);
+		expect(b.attachments.map((x) => x.filename)).toEqual(["b1.pdf"]);
+	});
+
 	it("最新が受信のスレッドは inbound を返す", async () => {
 		const user = await createUser({ role: "owner" });
 		const domainId = await createDomain();

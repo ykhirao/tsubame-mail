@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import type { MessageDetail, ThreadListItem } from "@/shared/contracts/messages";
+import type { ThreadListItem } from "@/shared/contracts/messages";
 import { MessagesApi, ThreadsApi, AddressesApi, useIncludeHidden } from "@/ui/lib/api";
 import { EmptyState } from "@/ui/components/EmptyState";
 import { Spinner } from "@/ui/components/Spinner";
@@ -158,14 +158,14 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 	/**
 	 * スターはメッセージ側に付くので、スレッドの最新 1 件を代表として更新する。
 	 * 画面は待たずに先に反転させ、失敗したら戻す。一覧の操作が重く感じないようにするため。
+	 * 対象の id は一覧が持っている（会話の全文を取ると本文 200 件分が乗ってくる）。
 	 */
 	const toggleStar = async (t: ThreadListItem) => {
+		if (!t.lastMessageId) return;
 		const next = !t.isStarred;
 		setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, isStarred: next } : x)));
 		try {
-			const detail = await ThreadsApi.get(t.id);
-			const last = detail.messages.at(-1);
-			if (last) await MessagesApi.patch(last.id, { isStarred: next });
+			await MessagesApi.patch(t.lastMessageId, { isStarred: next });
 		} catch {
 			setThreads((prev) => prev.map((x) => (x.id === t.id ? { ...x, isStarred: !next } : x)));
 		}
@@ -193,25 +193,28 @@ export function Inbox({ split = false }: { split?: boolean } = {}) {
 		/>
 	);
 
-	const markAllRead = async (msgs: MessageDetail[]) => {
-		for (const m of msgs) if (!m.isRead) await MessagesApi.patch(m.id, { isRead: true });
+	// 「既読にする」だけは会話の全メッセージを見る必要がある（未読の 1 通ずつに付ける）。
+	// 残る 2 つは最新の 1 件を代表にするので、一覧が持つ id で足りる。
+	const markAllRead = async (t: ThreadListItem) => {
+		const detail = await ThreadsApi.get(t.id);
+		for (const m of detail.messages) if (!m.isRead) await MessagesApi.patch(m.id, { isRead: true });
 	};
-	const markAllUnread = async (msgs: MessageDetail[]) => {
-		const last = msgs.at(-1);
-		if (last) await MessagesApi.patch(last.id, { isRead: false });
+	const markAllUnread = async (t: ThreadListItem) => {
+		if (t.lastMessageId) await MessagesApi.patch(t.lastMessageId, { isRead: false });
 	};
-	const moveToTrash = async (msgs: MessageDetail[]) => {
-		const last = msgs.at(-1);
-		if (last) await MessagesApi.patch(last.id, { status: "trash" });
+	const moveToTrash = async (t: ThreadListItem) => {
+		if (t.lastMessageId) await MessagesApi.patch(t.lastMessageId, { status: "trash" });
 	};
 
-	const bulkApply = async (op: (msgs: MessageDetail[]) => Promise<void>) => {
+	const bulkApply = async (op: (t: ThreadListItem) => Promise<void>) => {
 		setBulkBusy(true);
 		try {
+			const byId = new Map(threads.map((t) => [t.id, t]));
 			for (const tid of selectedIds) {
+				const t = byId.get(tid);
+				if (!t) continue;
 				try {
-					const detail = await ThreadsApi.get(tid);
-					await op(detail.messages);
+					await op(t);
 				} catch {
 					// 既にゴミ箱に移った等で消えたスレッドは飛ばす。
 				}
