@@ -18,9 +18,16 @@
 		"run_worker_first": ["/api/*"]
 	},
 
+	// TURNSTILE_SITEKEY / TURNSTILE_HOSTNAMES はプレースホルダ。deploy.sh が実行時に
+	// 実値を注入する（database_id と同じ理由で、実ドメインと自分のウィジェットの
+	// sitekey をコミットしない）。**環境ごとに別のプレースホルダにする。**
+	// 1 種類だと sed の置換が両方に当たり、ステージングが本番のホスト名を持つ。
+	// .invalid は RFC 2606 の予約 TLD。置換し忘れたら siteverify が必ず落ちて気付ける。
 	"vars": {
 		"APP_NAME": "tsubame",
-		"EMAIL_WORKER_NAME": "tsubame"
+		"EMAIL_WORKER_NAME": "tsubame",
+		"TURNSTILE_SITEKEY": "0xPRODUCTION_SITEKEY",
+		"TURNSTILE_HOSTNAMES": "production.invalid"
 	},
 
 	"d1_databases": [
@@ -61,12 +68,12 @@
 		{ "name": "SEND_RATE_LIMIT", "namespace_id": "1002", "simple": { "limit": 100, "period": 60 } }
 	],
 
-	// ステージング（tsubame-stg.forte.llc）。wrangler は env の vars もバインディングも
+	// ステージング。wrangler は env の vars もバインディングも
 	// 継承しないので、本番と同じものを全部書き直す。名前を 1 つでも本番と共有すると、
 	// ステージングの操作が本番のデータに届く。
 	//
-	// **受信は test.hirao.cc だけに割り当てる。** catch-all はゾーン単位なので、
-	// 本番と同じ forte.llc で受けるとルールが混在する（requirements.md §5）。
+	// **受信は本番とは別のゾーンに割り当てる。** catch-all はゾーン単位なので、
+	// 本番と同じゾーンで受けるとルールが混在する（requirements.md §5）。
 	// 送信も本番ドメインを使わない（constraints.md §2「送信」の評判の話）。
 	"env": {
 		"staging": {
@@ -87,9 +94,12 @@
 			// 未設定だと provision.ts の DEFAULT_WORKER_NAME（"tsubame"）に落ちて
 			// **本番 Worker 宛のルールを作ってしまう**。tests/worker-name.test.ts が見張る。
 			// APP_NAME は /api/health に出るので、どちらの環境を見ているか判別できるようにする。
+			// Turnstile は本番と別のプレースホルダ（上の vars のコメント参照）。
 			"vars": {
 				"APP_NAME": "tsubame-staging",
-				"EMAIL_WORKER_NAME": "tsubame-staging"
+				"EMAIL_WORKER_NAME": "tsubame-staging",
+				"TURNSTILE_SITEKEY": "0xSTAGING_SITEKEY",
+				"TURNSTILE_HOSTNAMES": "staging.invalid"
 			},
 
 			"d1_databases": [

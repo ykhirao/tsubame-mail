@@ -14,6 +14,10 @@
 #
 # 環境変数:
 #   D1_DATABASE_ID  デプロイ対象 D1 の database_id（必須）。**環境ごとに違う値**を渡すこと。
+#   TURNSTILE_SITEKEY / TURNSTILE_HOSTNAMES
+#                   Turnstile のサイトキーと、ウィジェットを置くホスト名（カンマ区切り）。
+#                   任意だが**両方まとめて**渡す。省くとボット確認が無効のままになる。
+#                   秘密鍵は `wrangler secret put TURNSTILE_SECRET` で別に入れる。
 #   CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID  任意。GitHub Actions から渡す場合
 #                                                    wrangler が自動で読む。
 set -euo pipefail
@@ -26,6 +30,12 @@ OUT="wrangler.local.jsonc"
 # ステージングのデプロイで本番の D1 を向いてしまう。
 PLACEHOLDER_PRODUCTION="00000000-0000-0000-0000-000000000000"
 PLACEHOLDER_STAGING="11111111-1111-1111-1111-111111111111"
+# Turnstile も同じ理由で環境ごとに分ける。実ドメインと自分のウィジェットの sitekey は
+# 公開リポジトリに置けないため（AGENTS.md「実環境の値をコミットしない」）。
+SITEKEY_PLACEHOLDER_PRODUCTION="0xPRODUCTION_SITEKEY"
+SITEKEY_PLACEHOLDER_STAGING="0xSTAGING_SITEKEY"
+HOSTS_PLACEHOLDER_PRODUCTION="production.invalid"
+HOSTS_PLACEHOLDER_STAGING="staging.invalid"
 
 SKIP_BUILD=0
 KEEP_CONFIG=0
@@ -42,8 +52,18 @@ for arg in "$@"; do
 done
 
 case "$ENV_NAME" in
-	"") PLACEHOLDER="$PLACEHOLDER_PRODUCTION"; WRANGLER_ENV=() ;;
-	staging) PLACEHOLDER="$PLACEHOLDER_STAGING"; WRANGLER_ENV=(--env staging) ;;
+	"")
+		PLACEHOLDER="$PLACEHOLDER_PRODUCTION"
+		SITEKEY_PLACEHOLDER="$SITEKEY_PLACEHOLDER_PRODUCTION"
+		HOSTS_PLACEHOLDER="$HOSTS_PLACEHOLDER_PRODUCTION"
+		WRANGLER_ENV=()
+		;;
+	staging)
+		PLACEHOLDER="$PLACEHOLDER_STAGING"
+		SITEKEY_PLACEHOLDER="$SITEKEY_PLACEHOLDER_STAGING"
+		HOSTS_PLACEHOLDER="$HOSTS_PLACEHOLDER_STAGING"
+		WRANGLER_ENV=(--env staging)
+		;;
 	*)
 		echo "エラー: 知らない --env です: ${ENV_NAME}（使えるのは staging だけ）" >&2
 		exit 1
@@ -67,12 +87,44 @@ if [[ ! "$DATABASE_ID" =~ ^[0-9a-f-]{36}$ ]]; then
 	exit 1
 fi
 
+# ---- Turnstile の検証 ------------------------------------------------------
+# 任意。両方揃ったときだけ注入する。入れない場合はプレースホルダのまま残るが、
+# TURNSTILE_SECRET が無ければサーバは検査そのものを行わないので実害はない
+# （.invalid なので、secret だけ入れて片方を忘れた場合は必ず 403 になって気付く）。
+SITEKEY="${TURNSTILE_SITEKEY:-}"
+HOSTNAMES="${TURNSTILE_HOSTNAMES:-}"
+if [[ -n "$SITEKEY" || -n "$HOSTNAMES" ]]; then
+	if [[ -z "$SITEKEY" || -z "$HOSTNAMES" ]]; then
+		echo "エラー: TURNSTILE_SITEKEY と TURNSTILE_HOSTNAMES は両方まとめて渡してください。" >&2
+		exit 1
+	fi
+	# sed の置換先にそのまま埋め込むため、区切り文字（/ & \）を含む値を弾く。
+	if [[ "$SITEKEY" == *[/\&\\]* || "$HOSTNAMES" == *[/\&\\]* ]]; then
+		echo "エラー: TURNSTILE_SITEKEY / TURNSTILE_HOSTNAMES に / & \\ は使えません。" >&2
+		exit 1
+	fi
+	# 本番の門を手元から抜けられるようになるため、localhost を混ぜさせない。
+	if [[ "$HOSTNAMES" == *localhost* || "$HOSTNAMES" == *127.0.0.1* ]]; then
+		echo "エラー: TURNSTILE_HOSTNAMES に localhost / 127.0.0.1 を入れないでください。" >&2
+		exit 1
+	fi
+fi
+
 # ---- 設定生成 --------------------------------------------------------------
 # sed の置換対象（UUID 文字列）は固定のプレースホルダなので置換後の値（実 ID は
 # ハイフン付き 16 進）が sed の置換記号と衝突しても安全なように、置換は固定文字列で行う。
-if ! sed "s/$PLACEHOLDER/$DATABASE_ID/" "$BASE" > "$OUT"; then
+SED_ARGS=(-e "s/$PLACEHOLDER/$DATABASE_ID/")
+if [[ -n "$SITEKEY" ]]; then
+	SED_ARGS+=(-e "s/$SITEKEY_PLACEHOLDER/$SITEKEY/" -e "s/$HOSTS_PLACEHOLDER/$HOSTNAMES/")
+fi
+if ! sed "${SED_ARGS[@]}" "$BASE" > "$OUT"; then
 	echo "エラー: $OUT の生成に失敗しました。" >&2
 	exit 1
+fi
+if [[ -n "$SITEKEY" ]]; then
+	echo "→ Turnstile を注入しました（ホスト名: ${HOSTNAMES}）"
+else
+	echo "→ Turnstile は未指定のためプレースホルダのままです（ボット確認は無効）"
 fi
 # 失敗時にも一時ファイルを残さない。--keep-config なら手動の d1 execute などで使えるよう残す。
 if [[ "$KEEP_CONFIG" == "1" ]]; then
