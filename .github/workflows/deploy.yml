@@ -1,17 +1,30 @@
 # Deploy — 手動実行（workflow_dispatch）のみ。自動デプロイはしない。
-# tsc → vitest → build を通してから scripts/deploy.sh（--skip-build）で本番に書き込む。
+# tsc → vitest → build を通してから scripts/deploy.sh（--skip-build）で書き込む。
+#
+# environment で本番とステージングを選ぶ。**既定は staging**（押し間違いで本番に
+# 書かないよう、本番は毎回選び直す）。Secrets は環境ごとに別名で持つ。
 name: Deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "書き込む先"
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
 
 jobs:
   deploy:
-    name: 検証して本番デプロイ
+    name: 検証してデプロイ
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
-      group: tsubame-deploy
+      # 環境ごとに分ける。同じ group にすると本番とステージングが互いを待つ。
+      group: tsubame-deploy-${{ inputs.environment }}
       cancel-in-progress: false
 
     steps:
@@ -36,7 +49,16 @@ jobs:
       - name: ビルド（検証）
         run: npm run build
 
-      - name: 本番デプロイ
+      - name: ステージングへデプロイ
+        if: inputs.environment == 'staging'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.STAGING_D1_DATABASE_ID }}
+        run: ./scripts/deploy.sh --env staging --skip-build
+
+      - name: 本番へデプロイ
+        if: inputs.environment == 'production'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

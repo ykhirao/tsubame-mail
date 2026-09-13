@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import wranglerJsonc from "../wrangler.jsonc?raw";
+import { emailWorkerName } from "@/domain/domains/provision";
 
 /**
  * wrangler.jsonc は JSONC（// 行コメント付き JSON）。文字列内の // まで消さないよう、
@@ -101,5 +102,21 @@ describe("wrangler.jsonc の Worker 名", () => {
 			wranglerJsonc.replace(/"EMAIL_WORKER_NAME":\s*"[^"]+"/, '"EMAIL_WORKER_NAME": "other-worker"'),
 		);
 		expect(drifted.vars.EMAIL_WORKER_NAME).not.toBe(drifted.name);
+	});
+
+	// 既定値に落ちると、Worker 名の違う環境（ステージング）で本番宛の
+	// Email Routing ルールを作ってしまい、本番の受信に混ざる。
+	it("EMAIL_WORKER_NAME が無ければ例外にする（既定値へ落とさない）", () => {
+		expect(() => emailWorkerName({} as Parameters<typeof emailWorkerName>[0])).toThrow(
+			/EMAIL_WORKER_NAME/,
+		);
+		expect(() =>
+			emailWorkerName({ EMAIL_WORKER_NAME: "  " } as Parameters<typeof emailWorkerName>[0]),
+		).toThrow(/EMAIL_WORKER_NAME/);
+		expect(
+			emailWorkerName({ EMAIL_WORKER_NAME: "tsubame-staging" } as Parameters<
+				typeof emailWorkerName
+			>[0]),
+		).toBe("tsubame-staging");
 	});
 });

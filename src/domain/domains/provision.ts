@@ -30,10 +30,20 @@ export type ProvisionEnv = CloudflareApiEnv & {
 	EMAIL_WORKER_NAME?: string;
 };
 
-export const DEFAULT_WORKER_NAME = "tsubame";
-
+/**
+ * 未設定のときに既定値へ落とさない。落とすと、ステージングのように Worker 名が違う
+ * 環境で本番の名前（"tsubame"）を Email Routing のルール宛先に書いてしまい、
+ * **その環境の管理画面からドメインを繋ぐと本番へメールが流れる**。
+ * 設定の取り違えは気付けないまま受信を壊すので、ここで止める。
+ */
 export function emailWorkerName(env: ProvisionEnv): string {
-	return env.EMAIL_WORKER_NAME ?? DEFAULT_WORKER_NAME;
+	const name = env.EMAIL_WORKER_NAME?.trim();
+	if (!name) {
+		throw new Error(
+			"EMAIL_WORKER_NAME が設定されていません。wrangler.jsonc の name と同じ値を vars に入れてください。",
+		);
+	}
+	return name;
 }
 
 export const CATCH_ALL_WARNING =

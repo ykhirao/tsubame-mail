@@ -7,12 +7,12 @@
 
 | 分類 | 意味 | 今 |
 | --- | --- | --- |
-| 1. 実装する | コードを変えれば終わる | **無し** |
+| 1. 実装する | コードを変えれば終わる | 1 件 |
 | 2. 実機でしか確かめられない | 走らせないと分からない。コードの変更は伴わないことが多い | 5 件 |
 | 3. やらないと決めたもの | 受け入れた制約・運用で守るもの・非目標 | [受け入れた制約](constraints.md) §2 ほか |
 
 - ID は `B-n`。B-1〜B-34 は片付けた（B-1〜B-32 は 2026-09-12、B-33 / B-34 は 2026-09-13。中身はその時のコミット）。
-  **次に振る番号は B-35。**
+  **次に振る番号は B-36。**
 - 優先度は 高（放置すると壊れる・利用者が操作できない）/ 中（要件・画面設計との差、利用者の要望）/ 低（改善）。
 - 規模は S（半日）/ M（1〜2 日）/ L（それ以上）。
 - 「共有」は `.agents/skills/workstream/SKILL.md` の編集禁止ファイルに手を入れるか。
@@ -21,7 +21,10 @@
 
 ## 1. 実装する
 
-**今は無い。** 見つけたら、コードを読んで確かめてから B-n として足す。
+| ID | 何をするか | 触る場所 | 共有 | 規模 | 優先度 |
+| --- | --- | --- | --- | --- | --- |
+| B-35 | アプリの名前を **Tsubamail** にする。画面に出る表記・ロゴ・PWA の manifest（`name` / `short_name`）・Service Worker の通知タイトル・OpenAPI の title を揃える。リポジトリ名（`tsubame-mail`）と Worker 名（`tsubame`）は**変えない**——Worker 名を変えると受信が止まる（`requirements.md` §5 の 3 箇所一致）。`vars.APP_NAME` は `/api/health` に出るだけなので、環境の識別子として今のままにするか、表示名に合わせるかを決める | `src/ui/routes/Login.tsx` `Bootstrap.tsx` `AppLayout.tsx` `settings/notifications/Display.tsx` `welcome/notifications.tsx`、`src/ui/sw.ts`、`public/manifest.webmanifest`、`index.html`、`src/api/v1/openapi.ts`。`src/domain/routing/incoming.ts` と `src/services/webhooks.ts` の "Tsubame" は外に出る文字列か要確認 | 不要 | S | 低 |
+
 直すときは [受け入れた制約](constraints.md) §3「再発しやすい型」を先に読む。
 
 B-33（未読数のドリフト）と B-34（一覧で送受信を見分けられない）は 2026-09-13 に片付けた。

@@ -324,8 +324,10 @@ D1_DATABASE_ID="<UUID>" ./scripts/deploy.sh
 | シークレット名 | 値 |
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | デプロイ用のトークン（下の権限で発行する。第 3 節の CF_API_TOKEN とは分ける） |
-| `CLOUDFLARE_ACCOUNT_ID` | アカウント ID |
+| `CLOUDFLARE_ACCOUNT_ID` | アカウント ID（本番・ステージングで共通） |
 | `D1_DATABASE_ID` | 第 2 節で控えた D1 の UUID |
+| `STAGING_CLOUDFLARE_API_TOKEN` | ステージング用（§11）。無ければステージングのデプロイだけが落ちる |
+| `STAGING_D1_DATABASE_ID` | ステージングの D1 の UUID（§11） |
 
 `CLOUDFLARE_API_TOKEN` は wrangler 本体がマイグレーションとデプロイに使う。アプリ用の CF_API_TOKEN には
 D1 の権限が無いので、同じ値を入れるとマイグレーションで `code: 7403` になる。デプロイ用に別に発行する
@@ -343,7 +345,8 @@ D1 の権限が無いので、同じ値を入れるとマイグレーション�
 
 アカウントリソースは本番のアカウントだけに絞る。この 7 つで Deploy が通ることを 2026-09-12 に確かめた。
 
-実行: *Actions → Deploy → Run workflow*。
+実行: *Actions → Deploy → Run workflow*。**書き込む先（`staging` / `production`）を選ぶ。**
+押し間違いで本番に書かないよう、既定は `staging` にしてある。本番に出すときは毎回選び直す。
 
 ---
 
@@ -465,6 +468,78 @@ function verify(secret, header, body, toleranceSec = 300) {
 
 `secret` は作成レスポンス（`POST /api/v1/webhooks`）にのみ平文で含まれ、以後は取得できない。
 紛失した場合は Webhook を作り直す。
+
+---
+
+## 11. ステージング環境
+
+`tsubame-staging` Worker（`https://tsubame-stg.forte.llc`）。**本番と共有するのは
+Cloudflare アカウントだけ**で、Worker・D1・R2・キュー・シークレットは全部別にする。
+
+### 11.1 なぜ全部分けるのか
+
+- **Worker 名を共有できない。** `wrangler.jsonc` の `name`・`vars.EMAIL_WORKER_NAME`・
+  Email Routing のルール宛先の 3 つは一致していなければならない（§0 と `requirements.md` §5）。
+  ステージングは `tsubame-staging` で揃える。`EMAIL_WORKER_NAME` を入れ忘れると
+  `emailWorkerName()` が例外を投げて止まる（黙って本番の名前に落ちないようにしてある）。
+- **受信ドメインを本番と同じゾーンに置かない。** catch-all は**ゾーン単位**なので、
+  `forte.llc` でステージングも受けるとルールが混ざり、どちらかの catch-all が
+  もう一方の宛先も飲み込む。**受信は `test.hirao.cc` に割り当てる。**
+- **送信も本番ドメインを使わない。** スパムの見本や存在しない宛先に送ると送信ドメインの
+  評判が落ち、Cloudflare が送信を止めうる（`constraints.md` §2「送信」。実際に「At Risk」になった記録がある）。
+
+### 11.2 リソースを作る
+
+本番（§2）と同じ手順で、名前だけ変えて作る。
+
+```bash
+npx wrangler d1 create tsubame-staging          # database_id を控える
+npx wrangler r2 bucket create tsubame-staging-mail
+npx wrangler queues create tsubame-staging-inbound
+npx wrangler queues create tsubame-staging-outbound
+npx wrangler queues create tsubame-staging-inbound-dlq
+npx wrangler queues create tsubame-staging-outbound-dlq
+```
+
+DLQ を先に作らないとデプロイが落ちるのは本番と同じ。
+
+### 11.3 シークレット
+
+`--env staging` を付けて、ステージングの Worker に入れる。
+
+```bash
+npx wrangler secret put INTERNAL_SECRET --env staging      # 本番とは別の値
+npx wrangler secret put CF_API_TOKEN --env staging
+npx wrangler secret put CF_ACCOUNT_ID --env staging
+npx wrangler secret put VAPID_PRIVATE_KEY --env staging    # 別に生成する
+npx wrangler secret put VAPID_SUBJECT --env staging
+```
+
+- `INTERNAL_SECRET` は**必ず別の値**。ステージングの DB は空なので bootstrap をやり直す。
+- `CF_API_TOKEN` は**ステージングで使うゾーンだけに絞ったトークンを別に発行する**。
+  本番と同じものを入れると、ステージングの管理画面から本番ゾーンの DNS を書き換えられる。
+- `VAPID_PRIVATE_KEY` は `node scripts/vapid-keys.mjs` で別に作る。オリジンが違うので
+  本番の購読とは無関係で、鍵を共有する利点が無い。
+
+### 11.4 デプロイと公開
+
+*Actions → Deploy → Run workflow* で `staging` を選ぶ（§7）。手元から出すなら:
+
+```bash
+D1_DATABASE_ID="<ステージングの UUID>" ./scripts/deploy.sh --env staging
+```
+
+公開ホスト名の付け方は `cutover.md` §1.1〜1.2 と同じ（DNS に CNAME を足して、
+Workers のダッシュボードで Add custom domain）。向き先を `tsubame-staging` にする。
+
+### 11.5 確認
+
+```bash
+curl -s https://tsubame-stg.forte.llc/api/health
+# → {"ok":true,"app":"tsubame-staging"} を期待（本番は "tsubame"）
+```
+
+`app` の値で環境を見分けられる。**本番のつもりでステージングを触っていないか、ここで確かめる。**
 
 ---
 
