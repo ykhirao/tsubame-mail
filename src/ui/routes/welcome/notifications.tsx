@@ -214,7 +214,7 @@ function Blocked({ onRecheck }: { onRecheck: () => Promise<void> }) {
 			<div className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-4 text-sm text-[var(--text)]">
 				<ul className="list-inside list-disc space-y-1 text-xs text-[var(--text-muted)]">
 					<li>
-						<strong className="text-[var(--text)]">iOS:</strong> 設定 → 通知 → Tsubame
+						<strong className="text-[var(--text)]">iOS:</strong> 設定 → 通知 → Tsubamail
 					</li>
 					<li>
 						<strong className="text-[var(--text)]">Android:</strong> アイコンを長押し → アプリ情報 → 通知

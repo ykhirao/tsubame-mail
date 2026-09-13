@@ -536,7 +536,7 @@ export function AppLayout() {
 				</button>
 
 				<Link to="/" className="shrink-0 text-lg font-bold tracking-tight text-[var(--text)]">
-					Tsubame
+					Tsubamail
 				</Link>
 
 				<MailboxSwitcher

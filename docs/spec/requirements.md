@@ -93,7 +93,7 @@
 ### FR-8 Webhook
 - 新着受信・送信完了などのイベントを外部 URL に POST する。イベントは
   `message.received` / `message.sent` / `message.failed` の 3 種。
-- 署名はヘッダ `X-Tsubame-Signature` に `t=<unix秒>,v1=<HMAC-SHA256>`（`t.body` を HMAC）で付ける。
+- 署名はヘッダ `X-Tsubamail-Signature` に `t=<unix秒>,v1=<HMAC-SHA256>`（`t.body` を HMAC）で付ける。
 - URL は https の公開ホストのみ。内部・予約済み IP や `localhost` 系の宛先は不可。
 - 失敗は 30 秒 / 300 秒 / 1800 秒の指数バックオフで**最大 5 回**まで再試行する。
   配信履歴（`deliveries`）を見られ、失敗ジョブは手動で再送できる。再試行の予定（無ければ作成）から 30 分以上

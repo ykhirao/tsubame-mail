@@ -45,7 +45,7 @@ export function Bootstrap() {
 				onSubmit={onSubmit}
 				className="w-full max-w-sm rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-6"
 			>
-				<h1 className="mb-1 text-2xl font-bold text-[var(--text)]">Tsubame</h1>
+				<h1 className="mb-1 text-2xl font-bold text-[var(--text)]">Tsubamail</h1>
 				<p className="mb-5 text-sm text-[var(--text-muted)]">
 					最初のオーナーアカウントを作成します。管理者はここで 1 人だけ作れます。
 				</p>

@@ -198,7 +198,7 @@ async function handlePush(event: SwPushEvent): Promise<void> {
 	const payload = parsePush(event.data?.text());
 	// 通知を出さないプッシュを続けると iOS は許可を取り消す。読めなくても必ず 1 件出す。
 	if (!payload?.notification) {
-		await sw.registration.showNotification("Tsubame", { body: "新着メール", data: { url: "/" } });
+		await sw.registration.showNotification("Tsubamail", { body: "新着メール", data: { url: "/" } });
 		return;
 	}
 

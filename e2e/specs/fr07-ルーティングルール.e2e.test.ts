@@ -95,7 +95,7 @@ describe("FR-7 ルーティングルール", () => {
 			raw: mime({
 				from: "fwd@ext.jp",
 				to: "nobody@mail.tsubame.test",
-				extraHeaders: { "X-Tsubame-Forwarded": "ai@mail.tsubame.test" },
+				extraHeaders: { "X-Tsubamail-Forwarded": "ai@mail.tsubame.test" },
 			}),
 		});
 		expect(loop.forwarded).toHaveLength(0);

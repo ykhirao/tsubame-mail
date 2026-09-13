@@ -70,7 +70,7 @@ const messageListItem = {
 const spec = {
 	openapi: "3.1.0",
 	info: {
-		title: "Tsubame API",
+		title: "Tsubamail API",
 		version: "1.0.0",
 		description:
 			"メールを読む・送る・整理するための HTTP API。\n\n" +
@@ -570,7 +570,7 @@ app.get("/openapi", (c) => {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tsubame API</title>
+<title>Tsubamail API</title>
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--muted:#666;--line:#e3e3e3;--soft:#f7f7f8;--accent:#2563eb;--get:#0a7b34;--post:#9a5b00;--patch:#6b21a8}
 @media(prefers-color-scheme:dark){:root{--bg:#16171a;--fg:#e8e8ea;--muted:#9a9aa2;--line:#2c2e33;--soft:#1d1f23;--accent:#7aa2f7;--get:#4ec27f;--post:#d9a441;--patch:#c084fc}}

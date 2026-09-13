@@ -8,7 +8,7 @@ import { saveRaw } from "@/services/r2";
 import type { InboundQueueMessage } from "@/services/queue";
 import { resolveIncoming } from "./resolve";
 
-const FORWARD_HEADER = "X-Tsubame-Forwarded";
+const FORWARD_HEADER = "X-Tsubamail-Forwarded";
 
 /** Email Routing 自体の上限と同じ。コンシューマはこれを超える生 MIME をパースしない。 */
 export const MAX_RAW_BYTES = 25 * 1024 * 1024;

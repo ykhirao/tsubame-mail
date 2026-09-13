@@ -230,7 +230,7 @@ export async function runDelivery(
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					"X-Tsubame-Signature": signature,
+					"X-Tsubamail-Signature": signature,
 				},
 				body,
 				redirect: "manual",

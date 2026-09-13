@@ -1018,7 +1018,7 @@ describe("handleIncomingEmail", () => {
 
 		expect(message.forwardedTo).toHaveLength(1);
 		const sentHeaders = message.forwardedTo[0]!.headers;
-		expect(sentHeaders.get("X-Tsubame-Forwarded")).toBe("1");
-		expect(sentHeaders.get("X-Tsubame-Forwarded")).not.toContain("nobody@example.com");
+		expect(sentHeaders.get("X-Tsubamail-Forwarded")).toBe("1");
+		expect(sentHeaders.get("X-Tsubamail-Forwarded")).not.toContain("nobody@example.com");
 	});
 });

@@ -119,8 +119,8 @@ describe("FR-15 ホーム画面に追加（PWA）", () => {
 			display: string;
 			icons: { sizes: string; purpose?: string }[];
 		};
-		expect(manifest.name).toBe("Tsubame Mail");
-		expect(manifest.short_name).toBe("Tsubame");
+		expect(manifest.name).toBe("Tsubamail");
+		expect(manifest.short_name).toBe("Tsubamail");
 		expect(manifest.start_url).toBe("/?source=pwa");
 		expect(manifest.display).toBe("standalone");
 		const sizes = manifest.icons.map((i) => i.sizes);

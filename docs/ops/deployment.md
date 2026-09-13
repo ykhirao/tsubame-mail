@@ -425,12 +425,12 @@ curl -X POST "https://<あなたの公開ホスト>/api/v1/auth/bootstrap" \
 ## 10. Webhook の署名検証（受け手向け）
 
 登録した Webhook の URL には、`message.received` / `message.sent` / `message.failed` の
-通知が `X-Tsubame-Signature` ヘッダ付きで届く。受け手はこのヘッダを検証してから本文を信用すること。
+通知が `X-Tsubamail-Signature` ヘッダ付きで届く。受け手はこのヘッダを検証してから本文を信用すること。
 
 ### ヘッダの形式
 
 ```
-X-Tsubame-Signature: t=<配信時刻の unix 秒>,v1=<HMAC-SHA256 の hex>
+X-Tsubamail-Signature: t=<配信時刻の unix 秒>,v1=<HMAC-SHA256 の hex>
 ```
 
 `v1` は、Webhook 作成時に一度だけ表示される `secret` を鍵にした

@@ -40,7 +40,7 @@ export function Login() {
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-[var(--surface-sunken)] px-4">
 			<form onSubmit={onSubmit} className="card w-full max-w-[400px] p-8">
-				<h1 className="mb-1 text-2xl font-bold text-[var(--text)]">Tsubame</h1>
+				<h1 className="mb-1 text-2xl font-bold text-[var(--text)]">Tsubamail</h1>
 				{passwordChanged && (
 					<p className="mb-3 rounded bg-[var(--surface-sunken)] px-3 py-2 text-sm text-[var(--text)]">
 						パスワードを変更しました。新しいパスワードでログインしてください。

@@ -7,7 +7,7 @@ import { Scaffold, Card, BackLink, Toggle } from "./shared";
 const DISPLAYS: { value: NotificationDisplay; label: string; title: string; body: string }[] = [
 	{ value: "full", label: "差出人・件名・冒頭", title: "山田 太郎", body: "議事録のご相談 ／ 先日お送りした件ですが…" },
 	{ value: "sender_subject", label: "差出人と件名", title: "山田 太郎", body: "議事録のご相談" },
-	{ value: "minimal", label: "最小限", title: "Tsubame", body: "新着メール（受信箱）" },
+	{ value: "minimal", label: "最小限", title: "Tsubamail", body: "新着メール（受信箱）" },
 ];
 
 const BADGES = [
@@ -141,7 +141,7 @@ export function NotificationDisplaySettings() {
 			<Card>
 				<div className="flex items-start gap-3 px-4 py-3">
 					<div className="min-w-0 flex-1">
-						<div className="text-sm text-[var(--text)]">他の端末で Tsubame を開いている間は送らない</div>
+						<div className="text-sm text-[var(--text)]">他の端末で Tsubamail を開いている間は送らない</div>
 						<div className="mt-0.5 text-xs text-[var(--text-muted)]">
 							この端末の利用中は他の端末への通知を止めます（既定オフ）
 						</div>

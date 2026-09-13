@@ -1,7 +1,7 @@
 import type { NotificationPrefs } from "@/domain/notify/decide";
 import type { MessageContext } from "./load";
 
-const APP_NAME = "Tsubame";
+const APP_NAME = "Tsubamail";
 
 function snippet80(body: string | null | undefined): string {
 	if (!body) return "";

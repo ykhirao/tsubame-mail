@@ -118,7 +118,7 @@ describe("FR-8 Webhook", () => {
 
 		expect(calls).toHaveLength(1);
 		const call = calls[0]!;
-		const sig = call.headers.get("X-Tsubame-Signature")!;
+		const sig = call.headers.get("X-Tsubamail-Signature")!;
 		expect(sig).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
 
 		// 署名対象は `<t>.<body>`。同じ secret で再計算して一致することを確かめる。

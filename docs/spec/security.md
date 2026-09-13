@@ -288,7 +288,7 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] R2 に置いた**後**にキュー投入が失敗したとき、メールが黙って消えないか
       （`waitUntil` の失敗は誰も観測しない。今は `await` して例外にし、Email Routing に一時失敗を返して送信側に再送させる。精査 #24）
       → `incoming.ts` `await env.INBOUND_QUEUE.send`
-- [ ] 転送に付けるヘッダが受信者に露出してよい内容か（`X-Tsubame-Forwarded` にエンベロープ `to` を入れている）
+- [ ] 転送に付けるヘッダが受信者に露出してよい内容か（`X-Tsubamail-Forwarded` にエンベロープ `to` を入れている）
 
 **宛先解決**
 - [ ] 宛先解決が**エンベロープ**（`message.to`）基準で、MIME の `To:` ヘッダを信用していないか → `incoming.ts` → `resolve.ts`
