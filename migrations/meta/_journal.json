@@ -64,6 +64,13 @@
       "when": 1789231438827,
       "tag": "0008_visibility_and_primary",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789303472719,
+      "tag": "0009_auth_failures",
+      "breakpoints": true
     }
   ]
 }

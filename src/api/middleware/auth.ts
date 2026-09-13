@@ -10,6 +10,7 @@ import type { Principal } from "@/shared/contracts/common";
 import { forbidden, unauthorized } from "@/shared/errors";
 import type { AppEnv } from "../types";
 import { redactError } from "@/lib/logError";
+import { clearFailures, isBlocked, recordFailure } from "@/domain/access/auth-failures";
 
 /** last_used_at の更新間隔。毎リクエスト書くと D1 が重いので間引く。 */
 const LAST_USED_GRANULARITY_MS = 60_000;
@@ -51,8 +52,22 @@ export async function resolveRequestPrincipal(c: Ctx): Promise<Principal | null>
 	return null;
 }
 
+/**
+ * 無効なキーを投げ続ける相手は、しばらく門前で返す（D1 を引かせない）。キーは 32 バイトの
+ * 乱数なので当てられる心配は無く、止めたいのは負荷の方（精査 #147 の穴埋め）。
+ * 数えるのは失敗したときだけなので、通っている相手には書き込みが増えない。
+ *
+ * **正しいキーは止めているあいだも必ず通す。** IP は NAT・社内網・CI で共有されるので、
+ * 同居している誰かの失敗で正規の利用者を締め出すわけにはいかない。止まっているのは
+ * 「キーの照合で落ちた要求」だけで、止まっている相手でも 1 回だけは照合する
+ * （照合は keyHash の索引 1 本なので、通す判断のための負荷は小さい）。
+ */
 async function principalFromApiKey(c: Ctx, token: string): Promise<Principal | null> {
 	const conn = db(c);
+	const ip = clientIp(c);
+	const now = Date.now();
+
+	const blocked = await isBlocked(conn, ip, now);
 	const keyHash = await hashToken(token);
 
 	const [key] = await conn
@@ -60,14 +75,17 @@ async function principalFromApiKey(c: Ctx, token: string): Promise<Principal | n
 		.from(schema.apiKeys)
 		.where(eq(schema.apiKeys.keyHash, keyHash))
 		.limit(1);
-	if (!key) return null;
+	if (!key) return await failed(conn, ip, now, blocked);
 
-	const now = Date.now();
-	if (key.revokedAt && key.revokedAt.getTime() <= now) return null;
-	if (key.expiresAt && key.expiresAt.getTime() <= now) return null;
+	if (key.revokedAt && key.revokedAt.getTime() <= now) return await failed(conn, ip, now, blocked);
+	if (key.expiresAt && key.expiresAt.getTime() <= now) return await failed(conn, ip, now, blocked);
 
 	const user = await loadActiveUser(conn, key.userId);
-	if (!user) return null;
+	if (!user) return await failed(conn, ip, now, blocked);
+
+	// 正しいキーが来たら、その IP の記録ごと消して止めるのをやめる。
+	// 攻撃者と正規の利用者が同じ出口 IP を共有していても、正規の側が使えなくならない。
+	void clearFailures(conn, ip).catch(() => {});
 
 	await touchLastUsed(c, conn, key.id, key.lastUsedAt, now);
 
@@ -75,6 +93,22 @@ async function principalFromApiKey(c: Ctx, token: string): Promise<Principal | n
 		user: { id: user.id, role: user.role },
 		apiKey: { id: key.id, scopes: key.scopes ?? [], addressIds: key.addressIds ?? null },
 	});
+}
+
+/**
+ * 失敗を数えてから null を返す。**記録に失敗しても認証の結果は変えない**——
+ * 数える側の不具合で、正しいキーを持つ相手を締め出す方が害が大きい。
+ * 既に止めている相手は数え直さない（止めている間ずっと期限が延びると、
+ * 一度引っ掛かった IP が実質いつまでも解けなくなる）。
+ */
+async function failed(
+	conn: ReturnType<typeof db>,
+	ip: string | null,
+	now: number,
+	blocked: boolean,
+): Promise<null> {
+	if (!blocked) await recordFailure(conn, ip, now).catch(() => {});
+	return null;
 }
 
 async function principalFromSession(c: Ctx, token: string): Promise<Principal | null> {

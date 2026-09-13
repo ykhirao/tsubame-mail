@@ -491,3 +491,20 @@ export const notificationLog = sqliteTable(
 	},
 	(t) => [index("notification_log_user_idx").on(t.userId, t.createdAt)],
 );
+
+/**
+ * 無効な API キーを繰り返し送ってくる相手を門前で返すためのカウンタ（精査 #147 の穴埋め）。
+ * `ip_hash` は IP の SHA-256。生の IP を残さない。
+ */
+export const authFailures = sqliteTable(
+	"auth_failures",
+	{
+		ipHash: text("ip_hash").primaryKey(),
+		failures: integer("failures").notNull().default(0),
+		/** この時刻を過ぎたら数え直す。 */
+		windowEndsAt: integer("window_ends_at", { mode: "timestamp_ms" }).notNull(),
+		/** 上限を超えたときだけ入る。ここを過ぎるまで門前で返す。 */
+		blockedUntil: integer("blocked_until", { mode: "timestamp_ms" }),
+	},
+	(t) => [index("auth_failures_window_idx").on(t.windowEndsAt)],
+);
