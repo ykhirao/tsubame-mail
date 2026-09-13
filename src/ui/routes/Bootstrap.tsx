@@ -4,10 +4,11 @@ import { useAuth } from "@/ui/lib/auth";
 import { AuthApi } from "@/ui/lib/api";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
 import { useSetupState } from "@/ui/lib/setup";
+import { Turnstile } from "@/ui/components/Turnstile";
 
 // これが唯一の自己登録経路。オーナーが既に居ればサーバが 409 を返す。
 export function Bootstrap() {
-	const setup = useSetupState();
+	const { state: setup, turnstileSitekey } = useSetupState();
 	const { refresh } = useAuth();
 	const navigate = useNavigate();
 	const [email, setEmail] = useState("");
@@ -16,13 +17,21 @@ export function Bootstrap() {
 	const [secret, setSecret] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+	const [turnstileReset, setTurnstileReset] = useState(0);
 
 	const onSubmit = async (e: FormEvent) => {
 		e.preventDefault();
 		setError(null);
 		setBusy(true);
 		try {
-			await AuthApi.bootstrap(email.trim().toLowerCase(), name.trim(), password, secret.trim());
+			await AuthApi.bootstrap(
+				email.trim().toLowerCase(),
+				name.trim(),
+				password,
+				secret.trim(),
+				turnstileToken,
+			);
 			await refresh();
 			navigate("/", { replace: true });
 		} catch (err) {
@@ -31,6 +40,7 @@ export function Bootstrap() {
 			} else {
 				setError(err instanceof Error ? err.message :"初期設定に失敗しました");
 			}
+			setTurnstileReset((n) => n + 1);
 		} finally {
 			setBusy(false);
 		}
@@ -108,9 +118,16 @@ export function Bootstrap() {
 					className="mb-5 w-full rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 font-mono text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
 				/>
 
+				<Turnstile
+					sitekey={turnstileSitekey}
+					action="bootstrap"
+					onToken={setTurnstileToken}
+					resetKey={turnstileReset}
+				/>
+
 				<button
 					type="submit"
-					disabled={busy}
+					disabled={busy || (turnstileSitekey !== null && turnstileToken === null)}
 					className="w-full min-h-11 rounded bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 sm:min-h-0"
 				>
 					{busy ?"作成中…" :"オーナーを作成"}

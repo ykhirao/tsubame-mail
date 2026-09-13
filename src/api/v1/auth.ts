@@ -19,6 +19,7 @@ import { readJson, unixSeconds } from "@/lib/validate";
 import { recordAudit } from "@/domain/access/policy";
 import { bootstrapBody, loginBody } from "@/shared/contracts/auth";
 import { ApiError, conflict, unauthorized } from "@/shared/errors";
+import { verifyTurnstile } from "@/domain/access/turnstile";
 import { clientIp, getPrincipal, requireAuth, sessionToken } from "../middleware/auth";
 import type { AppEnv } from "../types";
 
@@ -104,6 +105,10 @@ app.post("/login", async (c) => {
 	const body = await readJson(c.req, loginBody);
 	const email = body.email.trim().toLowerCase();
 	const ip = clientIp(c);
+
+	// パスワードを見る前に落とす。Rate Limiting binding が本番で発火しない（精査 #147）ので、
+	// 総当たりを止める門は今これだけ。設定していない環境（ローカル・vitest）では素通りする。
+	await verifyTurnstile(c.env, body["cf-turnstile-response"], "login");
 
 	// 「IP + メールアドレス」の組に加え、IP 単独・メール単独でも同じ回数窓を消費させる。
 	// 組だけだと 1 IP から多数のメールを試す列挙にも、多数の IP から 1 メールを試す分散総当たりにも
@@ -198,7 +203,12 @@ app.get("/setup-state", async (c) => {
 		.select({ count: sql<number>`count(*)` })
 		.from(schema.users)
 		.where(eq(schema.users.role, "owner"));
-	return c.json({ needsSetup: Number(owners?.count ?? 0) === 0 });
+	// sitekey は秘密ではない（画面の HTML に出る値）。環境ごとに違うのでビルドに焼かず、
+	// ログイン前に呼べるこの口から渡す。未設定なら null で、画面はウィジェットを出さない。
+	return c.json({
+		needsSetup: Number(owners?.count ?? 0) === 0,
+		turnstileSitekey: c.env.TURNSTILE_SITEKEY ?? null,
+	});
 });
 
 /**
@@ -214,6 +224,9 @@ app.post("/bootstrap", async (c) => {
 	const body = await readJson(c.req, bootstrapBody);
 	const db = c.get("db");
 	const ip = clientIp(c);
+
+	// 合言葉（INTERNAL_SECRET）を突き合わせる前に落とす。理由は login と同じ。
+	await verifyTurnstile(c.env, body["cf-turnstile-response"], "bootstrap");
 
 	// オーナーが 1 人も居ない窓（デプロイ直後〜初回セットアップ）は認証前なので、
 	// ログインと同じ IP 単位のレート制限を掛ける。

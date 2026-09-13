@@ -37,6 +37,22 @@ declare global {
 			VAPID_PRIVATE_KEY?: string;
 			/** VAPID の連絡先（`mailto:`）。実環境の宛先をリポジトリに書かないため Worker Secret に置く。 */
 			VAPID_SUBJECT?: string;
+			/**
+			 * Turnstile（ボット確認）の秘密鍵。Worker Secret。
+			 * **未設定なら確認そのものを行わない**（ローカル・vitest はウィジェットが無いため）。
+			 * 本番で入れ忘れると、総当たりを止める門が無くなる。
+			 */
+			TURNSTILE_SECRET?: string;
+			/**
+			 * ウィジェットを置いてよいホスト名。カンマ区切り。siteverify が返す hostname と突き合わせる。
+			 * **本番の値に localhost / 127.0.0.1 を入れない**（入れると手元から本番の門を抜けられる）。
+			 */
+			TURNSTILE_HOSTNAMES?: string;
+			/**
+			 * Turnstile のサイトキー。**秘密ではない**（画面の HTML に出る）ので vars に置く。
+			 * 未設定なら画面はウィジェットを出さず、サーバも検査しない。
+			 */
+			TURNSTILE_SITEKEY?: string;
 		}
 	}
 

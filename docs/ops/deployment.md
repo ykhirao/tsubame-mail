@@ -471,12 +471,68 @@ function verify(secret, header, body, toleranceSec = 300) {
 
 ---
 
-## 11. ステージング環境
+## 11. Turnstile（ログインのボット確認）
+
+画面のログインとオーナー作成に Cloudflare Turnstile のチェックボックスを出す。
+**Rate Limiting binding が本番で発火しない**（`constraints.md` §2 の #147）ので、
+総当たりを止める門は実質これだけ。
+
+**API キーの経路には影響しない。** エージェントが使う `Authorization: Bearer` の
+API は素通りで、Turnstile を通るのは画面のログインだけ。
+
+### 11.1 ウィジェットを作る
+
+ダッシュボード（Turnstile）で作り、`Sitekey` と `Secret Key` を控える。
+ドメインには**その環境のホスト名だけ**を入れる（本番とステージングでウィジェットを分ける）。
+
+### 11.2 値を入れる
+
+| 名前 | 置き場所 | 値 |
+| --- | --- | --- |
+| `TURNSTILE_SITEKEY` | `wrangler.jsonc` の `vars` | sitekey。**秘密ではない**（画面の HTML に出る） |
+| `TURNSTILE_SECRET` | Worker Secret | secret key |
+| `TURNSTILE_HOSTNAMES` | `wrangler.jsonc` の `vars` | siteverify が返す `hostname` と突き合わせる。カンマ区切り |
+
+```bash
+npx wrangler secret put TURNSTILE_SECRET
+```
+
+- **`TURNSTILE_HOSTNAMES` に `localhost` を入れない**（本番の値に入れると、手元から本番の門を抜けられる）。
+- **`TURNSTILE_SECRET` を入れなければ検査そのものを行わない。** ローカルと vitest 用の逃げ道だが、
+  本番で入れ忘れると黙って門が消える。デプロイ後に §11.4 で必ず確かめる。
+- `TURNSTILE_HOSTNAMES` だけ空にすると 500 で止まる（設定の誤りに気付けるように）。
+
+### 11.3 動作確認にテスト用キーを使うときの注意
+
+Cloudflare が配っているテスト用キー（`1x0000…`）は、**実トークンでも `action` を返さず、
+`hostname` は常に `example.com`** になる（`metadata.result_with_testing_key: true`。
+2026-09-13 に実測。公式ドキュメントの例とは違う）。このアプリは `action` の一致を
+必須にしているので、**テストキーでは必ず 403 になる**。確認は本物のキーで行う。
+
+### 11.4 確認
+
+```bash
+# sitekey が配られているか（画面がウィジェットを出せるか）
+curl -s https://<公開ホスト>/api/v1/auth/setup-state
+# => {"needsSetup":false,"turnstileSitekey":"0x..."}
+
+# トークン無しのログインが弾かれるか（＝ボットを止められているか）
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<公開ホスト>/api/v1/auth/login \
+  -H "content-type: application/json" \
+  -d '{"email":"<実在するアドレス>","password":"<正しいパスワード>"}'
+# => 403 を期待。200 が返るなら TURNSTILE_SECRET が入っていない
+```
+
+**正しいパスワードでも 403 になる**のが正常。ここが 200 なら門が効いていない。
+
+---
+
+## 12. ステージング環境
 
 `tsubame-staging` Worker（`https://tsubame-stg.forte.llc`）。**本番と共有するのは
 Cloudflare アカウントだけ**で、Worker・D1・R2・キュー・シークレットは全部別にする。
 
-### 11.1 なぜ全部分けるのか
+### 12.1 なぜ全部分けるのか
 
 - **Worker 名を共有できない。** `wrangler.jsonc` の `name`・`vars.EMAIL_WORKER_NAME`・
   Email Routing のルール宛先の 3 つは一致していなければならない（§0 と `requirements.md` §5）。
@@ -488,7 +544,7 @@ Cloudflare アカウントだけ**で、Worker・D1・R2・キュー・シーク
 - **送信も本番ドメインを使わない。** スパムの見本や存在しない宛先に送ると送信ドメインの
   評判が落ち、Cloudflare が送信を止めうる（`constraints.md` §2「送信」。実際に「At Risk」になった記録がある）。
 
-### 11.2 リソースを作る
+### 12.2 リソースを作る
 
 本番（§2）と同じ手順で、名前だけ変えて作る。
 
@@ -503,7 +559,7 @@ npx wrangler queues create tsubame-staging-outbound-dlq
 
 DLQ を先に作らないとデプロイが落ちるのは本番と同じ。
 
-### 11.3 シークレット
+### 12.3 シークレット
 
 `--env staging` を付けて、ステージングの Worker に入れる。
 
@@ -513,6 +569,7 @@ npx wrangler secret put CF_API_TOKEN --env staging
 npx wrangler secret put CF_ACCOUNT_ID --env staging
 npx wrangler secret put VAPID_PRIVATE_KEY --env staging    # 別に生成する
 npx wrangler secret put VAPID_SUBJECT --env staging
+npx wrangler secret put TURNSTILE_SECRET --env staging     # 別のウィジェットを作る
 ```
 
 - `INTERNAL_SECRET` は**必ず別の値**。ステージングの DB は空なので bootstrap をやり直す。
@@ -520,8 +577,12 @@ npx wrangler secret put VAPID_SUBJECT --env staging
   本番と同じものを入れると、ステージングの管理画面から本番ゾーンの DNS を書き換えられる。
 - `VAPID_PRIVATE_KEY` は `node scripts/vapid-keys.mjs` で別に作る。オリジンが違うので
   本番の購読とは無関係で、鍵を共有する利点が無い。
+- Turnstile（§11）も**ステージング用のウィジェットを別に作る**。ドメインに
+  `tsubame-stg.forte.llc` だけを入れ、`env.staging.vars` の `TURNSTILE_SITEKEY` と
+  `TURNSTILE_HOSTNAMES` をそれに合わせる。本番のウィジェットを使い回すと、
+  siteverify が返す `hostname` が食い違って必ず 403 になる。
 
-### 11.4 デプロイと公開
+### 12.4 デプロイと公開
 
 *Actions → Deploy → Run workflow* で `staging` を選ぶ（§7）。手元から出すなら:
 
@@ -532,7 +593,7 @@ D1_DATABASE_ID="<ステージングの UUID>" ./scripts/deploy.sh --env staging
 公開ホスト名の付け方は `cutover.md` §1.1〜1.2 と同じ（DNS に CNAME を足して、
 Workers のダッシュボードで Add custom domain）。向き先を `tsubame-staging` にする。
 
-### 11.5 確認
+### 12.5 確認
 
 ```bash
 curl -s https://tsubame-stg.forte.llc/api/health

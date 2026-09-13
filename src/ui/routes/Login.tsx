@@ -3,9 +3,10 @@ import { useState, type FormEvent } from "react";
 import { useAuth } from "@/ui/lib/auth";
 import { FullScreenSpinner } from "@/ui/components/Spinner";
 import { useSetupState } from "@/ui/lib/setup";
+import { Turnstile } from "@/ui/components/Turnstile";
 
 export function Login() {
-	const setup = useSetupState();
+	const { state: setup, turnstileSitekey } = useSetupState();
 	const { login } = useAuth();
 	const navigate = useNavigate();
 	const [params] = useSearchParams();
@@ -14,17 +15,21 @@ export function Login() {
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+	// 失敗しても画面が残るので、トークンを取り直させる（1 回しか使えない）。
+	const [turnstileReset, setTurnstileReset] = useState(0);
 
 	const onSubmit = async (e: FormEvent) => {
 		e.preventDefault();
 		setError(null);
 		setBusy(true);
 		try {
-			await login(email.trim().toLowerCase(), password);
+			await login(email.trim().toLowerCase(), password, turnstileToken);
 			const next = params.get("next");
 			navigate(next ?? "/", { replace: true });
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "ログインに失敗しました");
+			setTurnstileReset((n) => n + 1);
 		} finally {
 			setBusy(false);
 		}
@@ -78,9 +83,16 @@ export function Login() {
 					className={inputCls}
 				/>
 
+				<Turnstile
+					sitekey={turnstileSitekey}
+					action="login"
+					onToken={setTurnstileToken}
+					resetKey={turnstileReset}
+				/>
+
 				<button
 					type="submit"
-					disabled={busy}
+					disabled={busy || (turnstileSitekey !== null && turnstileToken === null)}
 					className="w-full min-h-11 rounded-full bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50 sm:min-h-0"
 				>
 					{busy ? "ログイン中…" : "ログイン"}

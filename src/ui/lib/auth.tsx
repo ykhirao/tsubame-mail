@@ -22,7 +22,7 @@ type AuthContextValue = {
 	me: MeWithAdminMode | null;
 	/** ログイン・bootstrap の成功後に呼ぶこと。呼ばないと me が古いままになる。 */
 	refresh: () => Promise<void>;
-	login: (email: string, password: string) => Promise<void>;
+	login: (email: string, password: string, turnstileToken?: string | null) => Promise<void>;
 	logout: () => Promise<void>;
 	/** 管理者モードのオン・オフ。切り替え後は me を読み直す。 */
 	setAdminMode: (enabled: boolean) => Promise<void>;
@@ -51,8 +51,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, [refresh]);
 
 	const login = useCallback(
-		async (email: string, password: string) => {
-			await AuthApi.login(email, password);
+		async (email: string, password: string, turnstileToken?: string | null) => {
+			await AuthApi.login(email, password, turnstileToken);
 			await refresh();
 		},
 		[refresh],

@@ -124,19 +124,45 @@ export type Me = {
 };
 
 export const AuthApi = {
-	login: (email: string, password: string) =>
+	login: (email: string, password: string, turnstileToken?: string | null) =>
 		request<{ userId: string; email: string; name: string; role: string; expiresAt: number }>(
 			"/auth/login",
-			{ method: "POST", body: { email, password }, redirectOnUnauthorized: false },
+			{
+				method: "POST",
+				body: {
+					email,
+					password,
+					...(turnstileToken ? { "cf-turnstile-response": turnstileToken } : {}),
+				},
+				redirectOnUnauthorized: false,
+			},
 		),
 	logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
 	session: () => request<SessionInfo>("/auth/session", { redirectOnUnauthorized: false }),
 	setupState: () =>
-		request<{ needsSetup: boolean }>("/auth/setup-state", { redirectOnUnauthorized: false }),
-	bootstrap: (email: string, name: string, password: string, secret: string) =>
+		request<{ needsSetup: boolean; turnstileSitekey: string | null }>("/auth/setup-state", {
+			redirectOnUnauthorized: false,
+		}),
+	bootstrap: (
+		email: string,
+		name: string,
+		password: string,
+		secret: string,
+		turnstileToken?: string | null,
+	) =>
 		request<{ userId: string; email: string; name: string; role: string; expiresAt: number }>(
 			"/auth/bootstrap",
-			{ method: "POST", body: { email, name, password, secret }, redirectOnUnauthorized: false },
+			{
+				method: "POST",
+				body: {
+					email,
+					name,
+					password,
+					secret,
+					...(turnstileToken ? { "cf-turnstile-response": turnstileToken } : {}),
+				},
+				redirectOnUnauthorized: false,
+			},
 		),
 };
 

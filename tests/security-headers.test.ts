@@ -50,7 +50,18 @@ describe("SPA 資産の _headers", () => {
 		expect(text).toContain("frame-ancestors 'none'");
 		expect(text).toContain("X-Frame-Options: DENY");
 		expect(text).toContain("X-Content-Type-Options: nosniff");
-		expect(text).toContain("script-src 'self';");
+		// script-src に足してよいのは Turnstile だけ。任意のオリジンが増えていないか見る。
+		expect(text).toMatch(/script-src 'self' https:\/\/challenges\.cloudflare\.com;/);
+	});
+
+	// ウィジェットは iframe で描かれるので frame-src も要る。ここも Turnstile 以外を許さない。
+	it("Turnstile のオリジンだけを script-src / frame-src / connect-src に許す", () => {
+		const csp = text.match(/Content-Security-Policy: (.+)/)?.[1] ?? "";
+		expect(csp).toContain("frame-src https://challenges.cloudflare.com;");
+		expect(csp).toContain("connect-src 'self' https://challenges.cloudflare.com;");
+		// 許したオリジンは Turnstile の 1 つだけ（他所が紛れ込んでいないか）。
+		const origins = new Set(csp.match(/https:\/\/[^\s;]+/g) ?? []);
+		expect([...origins]).toEqual(["https://challenges.cloudflare.com"]);
 	});
 
 	it("「画像を表示」が効くよう、親の img-src は https: を許す", () => {
