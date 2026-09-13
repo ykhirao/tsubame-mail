@@ -168,7 +168,8 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
 - [ ] オーナーが 1 人でも居れば閉じるか。「居る」の判定が `status` を見るべきか検討したか
       （無効化された唯一のオーナーが居る状態で再ブートストラップできるべきか）
 - [ ] 合言葉の照合に**レート制限があるか**。鍵が IP だけなので、バインディングの無い環境では消える
-      → `auth.ts` bootstrap（`LOGIN_RATE_LIMIT` を `bootstrap:ip:` の鍵で使う。精査 #52）
+      → `auth.ts` bootstrap（`LOGIN_RATE_LIMIT` を `bootstrap:ip:` の鍵で使う。精査 #52）。
+      **ただし本番では binding 自体が発火しない（精査 #147）。今この門は数えていないものとして見る。**
 - [ ] `setup-state` が認証無しで「オーナー未作成」を晒すことを許容しているか → `auth.ts` setup-state
 
 ### S-2 認可 — 「その人が何をしてよいか」（このアプリの中心）
@@ -422,7 +423,8 @@ S-3 の追跡表の右端を、ここで 1 つずつ潰す。
       `UPDATE … WHERE status='queued'` の結果で判定しているか → `domain/mail/outbound.ts` `processOutboundSend`
 - [ ] 再試行に上限とバックオフがあるか → `OUTBOUND_MAX_ATTEMPTS` / `backoffDelaySeconds`
 - [ ] 送信のレート制限（キー単位）があるか。Rate Limiting binding の概算で、バインディングの無い環境では消える
-      → `outbound.ts` `checkSendRateLimit`、`wrangler.jsonc` `SEND_RATE_LIMIT`（100 回 / 60 秒。精査 #106）
+      → `outbound.ts` `checkSendRateLimit`、`wrangler.jsonc` `SEND_RATE_LIMIT`（100 回 / 60 秒。精査 #106）。
+      **本番では発火しない（精査 #147）。送信量の上限は今は無いものとして見る。**
 - [ ] 送信を無効にしたドメインから、API と積み済みのジョブの両方で送らないか（#144） → `sender.ts` `isSendingDisabled`、`outbound.ts` `assertCanSend` / reply、`domain/mail/outbound.ts`
 
 ### S-6 検索とクエリ生成
