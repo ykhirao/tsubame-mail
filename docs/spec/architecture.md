@@ -148,6 +148,7 @@ docs/                    [W10]
 | `outbound_jobs` | 送信ジョブ | `message_id`, `status`, `attempts`, `last_error`, `next_attempt_at`, `sent_recipients`, `sent_at` |
 | `webhooks` | 通知先 | `name`, `url`, `secret`(ハッシュ保存), `events[]`, `address_ids[]`, `enabled` |
 | `webhook_deliveries` | 配信履歴 | `webhook_id`, `event`, `message_id`, `status`, `http_status`, `error`, `duration_ms`, `attempt`, `next_retry_at` |
+| `auth_failures` | 無効な API キーの失敗カウンタ | `ip_hash`（IP の SHA-256。生の IP は残さない）, `failures`, `window_ends_at`, `blocked_until`。10 分で 20 回を超えたら 15 分だけ 401 を即返しする。**正しいキーは止めている間も通し、通れば行ごと消す**（`constraints.md` §2「認証・キー」）。5 分の cron が切れた行を掃除する |
 | `audit_logs` | 監査 | 管理操作と端末・利用者自身のキー・署名・bootstrap を記録（action の一覧は `docs/ops/audit-log.md`）。`actor_id`, `action`, `target_type`, `target_id`, `meta`, `ip`。400 日で消す |
 | `settings` | キー・バリュー（VAPID キャッシュ等） | `key`, `value`(JSON), `updated_at` |
 | `push_devices` | 購読端末 | `user_id`, `session_id`, `endpoint`(一意), `p256dh`, `auth`, `name`, `platform: ios \| android \| desktop`, `enabled`, `address_ids[] \| null`, `last_seen_at`, `last_success_at`, `failure_count` |
@@ -218,8 +219,8 @@ trigram は 3 文字未満の語を索引しないので、1〜2 文字の語は
 | POST | `/v1/me/admin-mode` | `{ enabled }`。**owner のセッション限定**（member は 403、API キーは owner の admin キーでも 403）。`sessions.admin_mode_until` を今から 1 時間後（`ADMIN_MODE_SECONDS`）に置き、`false` で消す。監査ログ `admin_mode.enter` / `admin_mode.exit` | W4 |
 | POST | `/v1/me/external-email` `/v1/me/external-email/verify` `/v1/me/external-email/resend` | **セッション限定**（API キーは 403）。登録（`{ email }`。未確認に戻して確認コードを送る。他の利用者の外部アドレス・このアプリのアドレスと重なると 409）/ 確認（`{ code }`。6 桁。誤り 5 回か 30 分で行を消して 400）/ 再送（前回から 60 秒以内は `rate_limited`）。送れるドメインが無いときは `{ sent: false, reason }`。監査ログ `user.external_email.set` / `user.external_email.verify` | W4 |
 | GET/POST/DELETE | `/v1/me/api-keys` | 本人のキー。発行は本人の権限の範囲内のみ | W4 |
-| POST | `/v1/auth/login` `/v1/auth/logout` `/v1/auth/bootstrap` | — 。login の `email` はプライマリアドレスか確認済みの外部アドレス（`auth.ts` `findLoginUser`。プライマリがまだ無い利用者＝ドメインを繋ぐ前の最初の owner だけ、未確認の外部アドレスでも入れる）。bootstrap の `email` は外部アドレスとして保存する | W4 |
-| GET | `/v1/auth/session` `/v1/auth/setup-state` | セッション確認 / セットアップ要否 | W4 |
+| POST | `/v1/auth/login` `/v1/auth/logout` `/v1/auth/bootstrap` | — 。login の `email` はプライマリアドレスか確認済みの外部アドレス（`auth.ts` `findLoginUser`。プライマリがまだ無い利用者＝ドメインを繋ぐ前の最初の owner だけ、未確認の外部アドレスでも入れる）。bootstrap の `email` は外部アドレスとして保存する。login と bootstrap は **Turnstile**（`cf-turnstile-response`）を見る。`TURNSTILE_SECRET` を設定した環境だけで、トークンが無い・`action` や `hostname` が違う・siteverify に届かないときは 403（落ちる側に倒す）。**API キーの経路は素通り** | W4 |
+| GET | `/v1/auth/session` `/v1/auth/setup-state` | セッション確認 / セットアップ要否。setup-state は認証不要で、`needsSetup` と `turnstileSitekey`（未設定なら null。sitekey は画面の HTML に出る値なので秘密ではない）を返す | W4 |
 | GET | `/v1/addresses` | read。自分に割り当てたアドレス（管理者モードの owner は全部）。各行に `hidden`（割り当ての無いアドレスは false）と `level`（管理者モードで読めるだけのアドレスは `read`） | W5 |
 | PATCH | `/v1/addresses/{id}/signature` | **セッション限定**（API キーは 403）。そのメールボックスに write。監査ログ `address.signature` | W5 |
 | PATCH | `/v1/addresses/{id}/hidden` | `{ hidden }`。自分の `address_grants` の行だけ（割り当てが無ければ 404。管理者モードで読めるだけのアドレスも 404）。API キーでも通る。監査ログ無し | W5 |

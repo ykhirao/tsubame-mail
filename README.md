@@ -35,7 +35,8 @@ npm run test
 
 入口は [仕様書のトップ](docs/spec/index.md)。`npm run doc` で組み立てて読む形にもできる。
 
-- [これからやること](docs/spec/todo.md) — 残っている作業はここに集めてある
+- [あなたがやること](docs/user-todo.md) — Cloudflare の操作が要る作業（Turnstile・ステージング）
+- [これからやること](docs/spec/todo.md) — コード側の残作業
 - [要件定義](docs/spec/requirements.md) / [設計](docs/spec/architecture.md) — この 2 つが唯一の真実
 - [エージェント向けの API の使い方](docs/api-for-agents.md)
 - 運用: [デプロイ](docs/ops/deployment.md) / [切り替え手順](docs/ops/cutover.md) / [日々の運用](docs/ops/operations.md)

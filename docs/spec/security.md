@@ -171,6 +171,13 @@ HTTP の認証と認可がどこで掛かるかは `src/api/app.ts` の 1 か所
       → `auth.ts` bootstrap（`LOGIN_RATE_LIMIT` を `bootstrap:ip:` の鍵で使う。精査 #52）。
       **ただし本番では binding 自体が発火しない（精査 #147）。今この門は数えていないものとして見る。**
 - [ ] `setup-state` が認証無しで「オーナー未作成」を晒すことを許容しているか → `auth.ts` setup-state
+- [ ] 画面のログインと bootstrap に **Turnstile** が掛かっているか。トークン無し・`action` 違い・
+      `hostname` 違い・siteverify 不達のどれでも 403 に倒れるか（通信の失敗を「通す」に倒すと
+      siteverify を落とすだけで抜けられる）
+      → `domain/access/turnstile.ts`、`auth.ts` login / bootstrap。`TURNSTILE_SECRET` が無い環境は素通り
+- [ ] 無効な API キーを繰り返す相手を数えているか。**正しいキーが巻き添えで止まらないか**
+      （IP は NAT・CI で共有される）。止めている間に期限が延び続けないか
+      → `domain/access/auth-failures.ts`、`middleware/auth.ts` `principalFromApiKey`
 
 ### S-2 認可 — 「その人が何をしてよいか」（このアプリの中心）
 
