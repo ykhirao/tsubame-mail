@@ -529,7 +529,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<公開ホスト>/api/v
 
 ## 12. ステージング環境
 
-`tsubame-staging` Worker（`https://tsubame-stg.forte.llc`）。**本番と共有するのは
+`tsubame-staging` Worker（`https://<stg ホスト>`）。**本番と共有するのは
 Cloudflare アカウントだけ**で、Worker・D1・R2・キュー・シークレットは全部別にする。
 
 ### 12.1 なぜ全部分けるのか
@@ -539,8 +539,8 @@ Cloudflare アカウントだけ**で、Worker・D1・R2・キュー・シーク
   ステージングは `tsubame-staging` で揃える。`EMAIL_WORKER_NAME` を入れ忘れると
   `emailWorkerName()` が例外を投げて止まる（黙って本番の名前に落ちないようにしてある）。
 - **受信ドメインを本番と同じゾーンに置かない。** catch-all は**ゾーン単位**なので、
-  `forte.llc` でステージングも受けるとルールが混ざり、どちらかの catch-all が
-  もう一方の宛先も飲み込む。**受信は `test.hirao.cc` に割り当てる。**
+  本番と同じゾーンでステージングも受けるとルールが混ざり、どちらかの catch-all が
+  もう一方の宛先も飲み込む。**受信は本番とは別のゾーンに割り当てる。**
 - **送信も本番ドメインを使わない。** スパムの見本や存在しない宛先に送ると送信ドメインの
   評判が落ち、Cloudflare が送信を止めうる（`constraints.md` §2「送信」。実際に「At Risk」になった記録がある）。
 
@@ -577,10 +577,12 @@ npx wrangler secret put TURNSTILE_SECRET --env staging     # 別のウィジェ�
   本番と同じものを入れると、ステージングの管理画面から本番ゾーンの DNS を書き換えられる。
 - `VAPID_PRIVATE_KEY` は `node scripts/vapid-keys.mjs` で別に作る。オリジンが違うので
   本番の購読とは無関係で、鍵を共有する利点が無い。
-- Turnstile（§11）も**ステージング用のウィジェットを別に作る**。ドメインに
-  `tsubame-stg.forte.llc` だけを入れ、`env.staging.vars` の `TURNSTILE_SITEKEY` と
-  `TURNSTILE_HOSTNAMES` をそれに合わせる。本番のウィジェットを使い回すと、
-  siteverify が返す `hostname` が食い違って必ず 403 になる。
+- Turnstile（§11）は GitHub Secrets の `STAGING_TURNSTILE_SITEKEY` /
+  `STAGING_TURNSTILE_HOSTNAMES` から `deploy.sh` が注入する。ホスト名には
+  ステージングのホストだけを書く。**本番と同じ値を書くと、ステージングで解いた
+  トークンが本番でも通る。** ウィジェットを本番と共用するなら、そのウィジェットの
+  ドメイン欄にステージングのホストを足しておく（足さないとトークンを発行できない）。
+  別のウィジェットを作るなら secret も分けること。
 
 ### 12.4 デプロイと公開
 
@@ -596,7 +598,7 @@ Workers のダッシュボードで Add custom domain）。向き先を `tsubame
 ### 12.5 確認
 
 ```bash
-curl -s https://tsubame-stg.forte.llc/api/health
+curl -s https://<stg ホスト>/api/health
 # → {"ok":true,"app":"tsubame-staging"} を期待（本番は "tsubame"）
 ```
 
